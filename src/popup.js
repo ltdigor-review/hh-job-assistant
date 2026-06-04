@@ -11,12 +11,6 @@ const nodes = {
   groqApiKey: document.getElementById('groqApiKey')
 };
 
-const params = new URLSearchParams(location.search);
-const isWindowMode = params.get('mode') === 'window';
-if (isWindowMode) {
-  document.body.classList.add('window-mode');
-}
-
 const STATE_LABELS = {
   idle: 'Ожидание',
   scanning: 'Поиск вакансий',
@@ -181,23 +175,6 @@ document.getElementById('testGroq').addEventListener('click', async () => {
       return;
     }
     setStatus(`Groq OK. Sample length: ${response.sampleLength}`);
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), true);
-  }
-});
-
-document.getElementById('openWindow').addEventListener('click', async () => {
-  try {
-    setStatus('Открываю отдельное окно...');
-    const response = await chrome.runtime.sendMessage({ type: 'OPEN_ASSISTANT_WINDOW' });
-    if (!response?.ok) {
-      setStatus(response?.error || 'Не удалось открыть отдельное окно', true);
-      return;
-    }
-    setStatus('Окно открыто.');
-    if (!isWindowMode) {
-      window.close();
-    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
   }

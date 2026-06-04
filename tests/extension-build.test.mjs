@@ -12,7 +12,7 @@ async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, root), 'utf8'));
 }
 
-test('manifest is valid MV3 and exposes extension window UI', async () => {
+test('manifest is valid MV3 and exposes popup UI', async () => {
   const manifest = await readJson('manifest.json');
 
   assert.equal(manifest.manifest_version, 3);
@@ -20,10 +20,11 @@ test('manifest is valid MV3 and exposes extension window UI', async () => {
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.action.default_popup, 'src/popup.html');
   assert.equal(manifest.options_page, 'src/options.html');
-  assert.ok(manifest.permissions.includes('windows'));
   assert.ok(manifest.permissions.includes('storage'));
   assert.ok(manifest.permissions.includes('tabs'));
-  assert.ok(manifest.permissions.includes('alarms'));
+  assert.ok(manifest.permissions.includes('scripting'));
+  assert.ok(!manifest.permissions.includes('windows'));
+  assert.ok(!manifest.permissions.includes('alarms'));
   assert.ok(manifest.host_permissions.includes('https://hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
 });
@@ -78,36 +79,21 @@ test('background initializes defaults and registers required listeners', async (
       onStartup: { addListener() { calls.push(['runtime.onStartup']); } },
       onMessage: { addListener() { calls.push(['runtime.onMessage']); } }
     },
-    alarms: {
-      create() { calls.push(['alarms.create']); },
-      onAlarm: { addListener() { calls.push(['alarms.onAlarm']); } }
-    },
     tabs: {
       async get() {
         return { status: 'complete' };
       }
     },
-    scripting: {},
-    windows: {
-      async get() {
-        return null;
-      },
-      async update() {},
-      async create() {
-        calls.push(['windows.create']);
-        return { id: 1 };
-      },
-      onRemoved: { addListener() { calls.push(['windows.onRemoved']); } }
-    }
+    scripting: {}
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}`);
 
   assert.equal(localData.groqModel, 'llama-3.3-70b-versatile');
   assert.equal(localData.expectedSalary, '');
+  assert.equal(localData.resumeUrl, '');
   assert.equal(localData.dailyLimit, 20);
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
-  assert.ok(calls.some(([name]) => name === 'windows.onRemoved'));
 });
 
 test('test assistance prompt includes resume, vacancy, question text, and expected salary', async () => {
@@ -156,26 +142,12 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
         }
       }
     },
-    alarms: {
-      create() {},
-      onAlarm: { addListener() {} }
-    },
     tabs: {
       async get() {
         return { status: 'complete' };
       }
     },
-    scripting: {},
-    windows: {
-      async get() {
-        return null;
-      },
-      async update() {},
-      async create() {
-        return { id: 1 };
-      },
-      onRemoved: { addListener() {} }
-    }
+    scripting: {}
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
@@ -201,6 +173,111 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /250 000 руб\. на руки/);
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
+});
+
+test('Groq prompt parses configured hh resume URL for resume context', async () => {
+  let listener = null;
+  let requestBody = null;
+  let removedTabId = null;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeUrl: 'https://hh.ru/resume/abc123',
+    resumeParsedText: '',
+    resumeParsedAt: '',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt'
+  };
+
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: 'Письмо' } }] };
+      }
+    };
+  };
+
+  globalThis.location = { pathname: '/resume/abc123' };
+  globalThis.document = {
+    title: 'Java Developer resume',
+    body: new FakeElement({ text: 'Java developer parsed from hh resume' }),
+    querySelector(selector) {
+      if (selector === 'main') return new FakeElement({ text: 'Java developer parsed from hh resume' });
+      return null;
+    }
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async create({ url }) {
+        return { id: 41, url, status: 'complete' };
+      },
+      async get() {
+        return { status: 'complete' };
+      },
+      async remove(id) {
+        removedTabId = id;
+      },
+      onUpdated: {
+        addListener() {},
+        removeListener() {}
+      }
+    },
+    scripting: {
+      async executeScript({ func }) {
+        return [{ result: await func() }];
+      }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_COVER_LETTER',
+        task: 'cover_letter',
+        vacancyText: 'Вакансия: Java developer'
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  const userContent = requestBody.messages.find((message) => message.role === 'user').content;
+  assert.match(userContent, /Java developer parsed from hh resume/);
+  assert.equal(localData.resumeParsedText, 'Java developer parsed from hh resume');
+  assert.equal(removedTabId, 41);
 });
 
 test('content script registers one message listener', async () => {
@@ -231,19 +308,32 @@ test('content script registers one message listener', async () => {
   assert.equal(listenerCount, 1);
 });
 
-test('popup has controls wired to the extension window, Groq key, results, and actions', async () => {
+test('popup has ordered controls wired to Groq key, results, and actions', async () => {
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'openWindow', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'recentResults']) {
+  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'recentResults']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
 
-  assert.match(js, /OPEN_ASSISTANT_WINDOW/);
+  assert.ok(html.indexOf('id="dryRun"') < html.indexOf('id="autoApply"'));
+  assert.ok(html.indexOf('id="autoApply"') < html.indexOf('id="stop"'));
+  assert.ok(html.indexOf('id="stop"') < html.indexOf('id="refreshResumes"'));
+  assert.doesNotMatch(html, /openWindow|Открыть окном|window-mode/);
+  assert.doesNotMatch(js, /OPEN_ASSISTANT_WINDOW|openWindow/);
   assert.match(js, /openOptionsPage/);
   assert.match(js, /TEST_GROQ/);
   assert.match(js, /skipped_missing_groq_key/);
-  assert.match(html, /window-mode/);
+});
+
+test('options use hh resume URL instead of pasted resume text or daily refresh toggle', async () => {
+  const html = await readFile(new URL('src/options.html', root), 'utf8');
+  const js = await readFile(new URL('src/options.js', root), 'utf8');
+
+  assert.match(html, /id="resumeUrl"/);
+  assert.match(js, /resumeUrl/);
+  assert.doesNotMatch(html, /id="resumeText"|Resume text|resumeRefreshEnabled|Enable daily resume refresh/);
+  assert.doesNotMatch(js, /resumeText|resumeRefreshEnabled/);
 });
 
 class FakeElement {
@@ -296,6 +386,277 @@ class FakeElement {
     this.clickHandler?.();
   }
 }
+
+async function runBackgroundResumeRefresh({ clickButtons }) {
+  let listener = null;
+  let tabId = 0;
+  const localData = {};
+  const removedTabs = [];
+  const tabStatuses = new Map();
+
+  globalThis.window = {
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+
+  const resumeLink = new FakeElement({ href: 'https://hh.ru/resume/abc123' });
+
+  function setDocumentForList() {
+    globalThis.location = { pathname: '/applicant/resumes' };
+    globalThis.document = {
+      title: 'My resumes',
+      body: new FakeElement({ text: 'Мои резюме' }),
+      querySelectorAll(selector) {
+        if (selector.includes(',')) {
+          return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+        }
+        if (selector === 'a[href*="/resume/"]') return [resumeLink];
+        return [];
+      }
+    };
+  }
+
+  function setDocumentForResume() {
+    globalThis.location = { pathname: '/resume/abc123' };
+    globalThis.document = {
+      title: 'Java Developer',
+      body: new FakeElement({ text: 'Java Developer resume' }),
+      querySelectorAll(selector) {
+        if (selector.includes(',')) {
+          return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+        }
+        if (selector === 'button' || selector === 'a' || selector === '[role="button"]') return clickButtons;
+        return [];
+      }
+    };
+  }
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    alarms: {
+      create() {},
+      onAlarm: { addListener() {} }
+    },
+    tabs: {
+      async create({ url }) {
+        tabId += 1;
+        tabStatuses.set(tabId, 'complete');
+        return { id: tabId, url, status: 'complete' };
+      },
+      async get(id) {
+        return { status: tabStatuses.get(id) || 'complete' };
+      },
+      async remove(id) {
+        removedTabs.push(id);
+      },
+      onUpdated: {
+        addListener() {},
+        removeListener() {}
+      }
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'collectResumeLinksScript') {
+          setDocumentForList();
+        } else {
+          setDocumentForResume();
+        }
+        return [{ result: await func() }];
+      }
+    },
+    windows: {
+      async get() {
+        return null;
+      },
+      async update() {},
+      async create() {
+        return { id: 1 };
+      },
+      onRemoved: { addListener() {} }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'REFRESH_RESUMES_NOW' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  return { response, localData, removedTabs };
+}
+
+test('resume refresh continues when Chrome tab status stays loading after DOM is ready', async () => {
+  let listener = null;
+  let tabId = 0;
+  let raiseClicks = 0;
+  const localData = {};
+  const removedTabs = [];
+  const resumeLink = new FakeElement({ href: 'https://hh.ru/resume/abc123' });
+  const raiseButton = new FakeElement({ text: 'Поднять в поиске', click() { raiseClicks += 1; } });
+
+  globalThis.window = {
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+
+  function setDocumentForList() {
+    globalThis.location = { pathname: '/applicant/resumes' };
+    globalThis.document = {
+      readyState: 'interactive',
+      title: 'My resumes',
+      body: new FakeElement({ text: 'Мои резюме' }),
+      querySelectorAll(selector) {
+        if (selector.includes(',')) {
+          return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+        }
+        if (selector === 'a[href*="/resume/"]') return [resumeLink];
+        return [];
+      }
+    };
+  }
+
+  function setDocumentForResume() {
+    globalThis.location = { pathname: '/resume/abc123' };
+    globalThis.document = {
+      readyState: 'interactive',
+      title: 'Java Developer',
+      body: new FakeElement({ text: 'Java Developer resume' }),
+      querySelectorAll(selector) {
+        if (selector.includes(',')) {
+          return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+        }
+        if (selector === 'button' || selector === 'a' || selector === '[role="button"]') return [raiseButton];
+        return [];
+      }
+    };
+  }
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async create({ url }) {
+        tabId += 1;
+        if (/\/applicant\/resumes/.test(url)) {
+          setDocumentForList();
+        } else {
+          setDocumentForResume();
+        }
+        return { id: tabId, url, status: 'loading' };
+      },
+      async get() {
+        return { status: 'loading' };
+      },
+      async remove(id) {
+        removedTabs.push(id);
+      },
+      onUpdated: {
+        addListener() {},
+        removeListener() {}
+      }
+    },
+    scripting: {
+      async executeScript({ func }) {
+        return [{ result: await func() }];
+      }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'REFRESH_RESUMES_NOW' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(raiseClicks, 1);
+  assert.equal(removedTabs.length, 2);
+});
+
+test('resume refresh clicks raise/update controls', async () => {
+  let raiseClicks = 0;
+  let editClicks = 0;
+  const buttons = [
+    new FakeElement({ text: 'Редактировать', click() { editClicks += 1; } }),
+    new FakeElement({ text: 'Поднять в поиске', click() { raiseClicks += 1; } })
+  ];
+
+  const { response, localData, removedTabs } = await runBackgroundResumeRefresh({ clickButtons: buttons });
+
+  assert.equal(response.ok, true);
+  assert.equal(raiseClicks, 1);
+  assert.equal(editClicks, 0);
+  assert.equal(localData.runState.state, 'idle');
+  assert.equal(removedTabs.length, 2);
+});
+
+test('resume refresh does not report success after edit/save controls', async () => {
+  let clicks = 0;
+  const buttons = [
+    new FakeElement({ text: 'Редактировать', click() { clicks += 1; } }),
+    new FakeElement({ text: 'Сохранить', click() { clicks += 1; } })
+  ];
+
+  const { response, localData } = await runBackgroundResumeRefresh({ clickButtons: buttons });
+
+  assert.equal(response.ok, false);
+  assert.equal(clicks, 0);
+  assert.equal(response.error, '1 resume refresh actions failed');
+  assert.equal(localData.runState.state, 'error');
+});
 
 async function runContentAutoApply({
   dialogText,

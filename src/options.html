@@ -110,8 +110,8 @@
       <label for="groqModel">Groq model</label>
       <input id="groqModel" type="text" placeholder="llama-3.3-70b-versatile">
 
-      <label for="resumeText">Resume text</label>
-      <textarea id="resumeText" placeholder="Вставьте краткий текст резюме, который Groq будет использовать для писем."></textarea>
+      <label for="resumeUrl">Resume URL on hh.ru</label>
+      <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">
 
       <label for="expectedSalary">Expected salary for questions</label>
       <input id="expectedSalary" type="text" placeholder="Например: 250 000 руб. на руки">
@@ -133,11 +133,6 @@
           <input id="delayMaxMs" type="number" min="1000" step="500">
         </div>
       </div>
-
-      <label class="checkbox">
-        <input id="resumeRefreshEnabled" type="checkbox">
-        Enable daily resume refresh while Chrome is running
-      </label>
 
       <div class="actions">
         <button id="save">Save</button>

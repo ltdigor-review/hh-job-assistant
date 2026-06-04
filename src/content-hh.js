@@ -441,17 +441,6 @@ async function getExpectedSalary() {
 }
 
 async function getFallbackCoverLetter() {
-  const { resumeText = '' } = await chrome.storage.local.get(['resumeText']);
-  const resumeSnippet = cleanText(String(resumeText || '')).slice(0, 500);
-  if (resumeSnippet) {
-    return [
-      'Здравствуйте! Заинтересовала ваша вакансия.',
-      'Мой опыт и профиль соответствуют задачам позиции:',
-      resumeSnippet,
-      'Буду рад обсудить, чем могу быть полезен команде.'
-    ].join('\n');
-  }
-
   return 'Здравствуйте! Заинтересовала ваша вакансия. Имею релевантный опыт в разработке и управлении IT-продуктами, готов обсудить задачи и пользу для команды.';
 }
 

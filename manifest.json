@@ -9,7 +9,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "tabs", "alarms", "scripting", "activeTab", "windows"],
+  "permissions": ["storage", "tabs", "scripting", "activeTab"],
   "host_permissions": ["https://hh.ru/*", "https://api.groq.com/*"],
   "background": {
     "service_worker": "src/background.js",

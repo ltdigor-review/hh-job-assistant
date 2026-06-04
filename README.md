@@ -7,6 +7,7 @@ Chrome extension for applying to hh.ru vacancies from an already signed-in accou
 HH Job Assistant помогает:
 
 - находить вакансии на открытой странице hh.ru;
+<<<<<<< ours
 - отправлять отклики до заданного лимита, по умолчанию `20`;
 - продолжать отклики через страницы `/applicant/vacancy_response`, когда hh.ru открывает отдельную форму;
 - писать сопроводительные письма через Groq;
@@ -14,6 +15,12 @@ HH Job Assistant помогает:
 - подставлять `Expected salary for questions` в вопросы про зарплату;
 - показывать в popup последние результаты, ошибки и пропуски;
 - обновлять резюме вручную или по расписанию, пока Chrome открыт.
+=======
+- отправлять отклики до заданного лимита;
+- писать короткие сопроводительные письма через Groq;
+- обновлять резюме вручную или по расписанию, пока Chrome открыт;
+- показывать подсказки по тестам через Groq.
+>>>>>>> theirs
 
 ### Установка
 
@@ -25,6 +32,7 @@ HH Job Assistant помогает:
 6. Выберите папку `hh-job-assistant`, где лежит `manifest.json`.
 7. Закрепите расширение через значок пазла в Chrome.
 
+<<<<<<< ours
 После изменения файлов расширения нажмите reload у расширения на странице `chrome://extensions`, иначе Chrome продолжит использовать старую версию.
 
 ### Быстрая настройка в popup
@@ -37,6 +45,9 @@ HH Job Assistant помогает:
 Если тест успешен, popup покажет `Groq OK`.
 
 ### Полная настройка
+=======
+### Настройка
+>>>>>>> theirs
 
 Откройте `Настройки` расширения и заполните нужные поля:
 
@@ -45,7 +56,11 @@ HH Job Assistant помогает:
 - `Resume text` — краткий текст резюме;
 - `Expected salary for questions` — зарплата для ответов на вопросы работодателя;
 - `Cover-letter prompt` — инструкция для сопроводительного письма;
+<<<<<<< ours
 - `Daily apply limit` — лимит откликов, по умолчанию `20`;
+=======
+- `Daily apply limit` — лимит откликов;
+>>>>>>> theirs
 - `Delay min/max` — пауза между действиями;
 - `Enable daily resume refresh` — ежедневное обновление резюме, пока Chrome открыт.
 
@@ -55,11 +70,16 @@ HH Job Assistant помогает:
 
 1. Войдите в аккаунт на [hh.ru](https://hh.ru).
 2. Откройте страницу с вакансиями, лучше рекомендации по резюме.
+<<<<<<< ours
 3. Нажмите иконку `HH Job Assistant`.
+=======
+3. Нажмите иконку HH Job Assistant.
+>>>>>>> theirs
 4. Нажмите `Предпросмотр`, чтобы проверить найденные вакансии.
 5. Нажмите `Запустить отклики`.
 6. Для остановки нажмите `Стоп`.
 
+<<<<<<< ours
 Popup показывает:
 
 - счетчики найденных, проверенных, отправленных, пропущенных и ошибочных откликов;
@@ -86,6 +106,11 @@ Popup показывает:
 - Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную.
 - Не публикуйте Groq key в GitHub, чатах, скриншотах или логах.
 - После обновления кода расширения всегда нажимайте reload в `chrome://extensions`.
+=======
+Без Groq key обычные отклики работают, но вакансии с обязательным письмом или тестом пропускаются.
+
+Важно: расширение не хранит логин и пароль hh.ru. Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную. Не публикуйте Groq key в GitHub, чатах, скриншотах или логах.
+>>>>>>> theirs
 
 ---
 
@@ -94,6 +119,7 @@ Popup показывает:
 HH Job Assistant helps you:
 
 - detect vacancies on the current hh.ru page;
+<<<<<<< ours
 - submit applications up to the configured limit, default `20`;
 - continue through `/applicant/vacancy_response` pages when hh.ru opens a separate response form;
 - write cover letters with Groq;
@@ -101,6 +127,12 @@ HH Job Assistant helps you:
 - use `Expected salary for questions` for salary questions;
 - show recent results, errors, and skipped vacancies in the popup;
 - refresh resumes manually or on schedule while Chrome is open.
+=======
+- submit applications up to a configured limit;
+- write short cover letters with Groq;
+- refresh resumes manually or on schedule while Chrome is open;
+- show Groq hints for tests.
+>>>>>>> theirs
 
 ### Install
 
@@ -112,6 +144,7 @@ HH Job Assistant helps you:
 6. Select the `hh-job-assistant` folder containing `manifest.json`.
 7. Pin the extension through the Chrome puzzle icon.
 
+<<<<<<< ours
 After changing extension files, click reload for the extension on `chrome://extensions`; otherwise Chrome keeps using the old version.
 
 ### Quick Popup Setup
@@ -124,6 +157,9 @@ After changing extension files, click reload for the extension on `chrome://exte
 If the test succeeds, the popup shows `Groq OK`.
 
 ### Full Configuration
+=======
+### Configure
+>>>>>>> theirs
 
 Open extension `Настройки` and set what you need:
 
@@ -132,7 +168,11 @@ Open extension `Настройки` and set what you need:
 - `Resume text` — short resume text;
 - `Expected salary for questions` — salary used for employer-question answers;
 - `Cover-letter prompt` — cover-letter instruction;
+<<<<<<< ours
 - `Daily apply limit` — application limit, default `20`;
+=======
+- `Daily apply limit` — application limit;
+>>>>>>> theirs
 - `Delay min/max` — delay between actions;
 - `Enable daily resume refresh` — daily resume refresh while Chrome is open.
 
@@ -142,11 +182,16 @@ Click `Save`. If you added a Groq key, click `Test Groq`.
 
 1. Sign in at [hh.ru](https://hh.ru).
 2. Open a vacancies page, preferably resume recommendations.
+<<<<<<< ours
 3. Click the `HH Job Assistant` icon.
+=======
+3. Click the HH Job Assistant icon.
+>>>>>>> theirs
 4. Click `Предпросмотр` to check detected vacancies.
 5. Click `Запустить отклики`.
 6. Click `Стоп` to stop.
 
+<<<<<<< ours
 The popup shows:
 
 - found, processed, applied, skipped, and error counters;
@@ -173,6 +218,11 @@ If a vacancy needs complex employer answers or a test and no fallback is possibl
 - If captcha or login appears, stop the extension and complete the check manually.
 - Do not publish your Groq key in GitHub, chats, screenshots, or logs.
 - After updating extension code, always reload it on `chrome://extensions`.
+=======
+Without a Groq key, normal applications work, but vacancies requiring a cover letter or test are skipped.
+
+Important: the extension does not store your hh.ru login or password. If captcha or login appears, stop the extension and complete the check manually. Do not publish your Groq key in GitHub, chats, screenshots, or logs.
+>>>>>>> theirs
 
 ## Developer Checks
 

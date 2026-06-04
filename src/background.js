@@ -1,12 +1,14 @@
 const DEFAULTS = {
   groqModel: 'llama-3.3-70b-versatile',
   resumeText: '',
+  resumeUrl: '',
+  resumeParsedText: '',
+  resumeParsedAt: '',
   expectedSalary: '',
-  coverPrompt: 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
+  coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
   delayMinMs: 8000,
   delayMaxMs: 15000,
-  resumeRefreshEnabled: true,
   runState: {
     state: 'idle',
     found: 0,
@@ -20,8 +22,7 @@ const DEFAULTS = {
   runResults: []
 };
 
-const RESUME_REFRESH_ALARM = 'daily_resume_refresh';
-let assistantWindowId = null;
+const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 
 function nowIso() {
   return new Date().toISOString();
@@ -47,6 +48,10 @@ async function ensureDefaults() {
 
   if (current.dailyLimit === 10) {
     patch.dailyLimit = DEFAULTS.dailyLimit;
+  }
+
+  if (current.coverPrompt === OLD_DEFAULT_COVER_PROMPT) {
+    patch.coverPrompt = DEFAULTS.coverPrompt;
   }
 
   if (Object.keys(patch).length > 0) {
@@ -110,7 +115,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
     {
       role: 'system',
       content:
-        'Write a concise, honest cover letter in Russian for hh.ru. Do not invent experience. Return only the cover letter text.'
+        'Write a very short, honest cover letter in Russian for hh.ru: 3-4 sentences total. Do not invent experience. Do not include placeholders, bracketed template text, labels, greetings with unknown names, or instructions. Return only the final cover letter text.'
     },
     {
       role: 'user',
@@ -127,18 +132,97 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
   ];
 }
 
+function normalizeResumeUrl(value) {
+  if (!value) return '';
+  try {
+    const url = new URL(String(value).trim());
+    if (url.hostname !== 'hh.ru' || !/^\/resume\/[^/?#]+/.test(url.pathname)) {
+      return '';
+    }
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function extractResumeTextScript() {
+  const text = (document.body?.innerText || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (/\/account\/login|\/account\/signup/.test(location.pathname) || /captcha|подтвердите, что вы не робот|не робот/i.test(text)) {
+    return { ok: false, error: 'Login or captcha page detected', text: '' };
+  }
+
+  const main = document.querySelector('main')?.innerText || text;
+  return {
+    ok: true,
+    title: document.title,
+    text: String(main)
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+      .slice(0, 12000)
+  };
+}
+
+async function getResumeContext() {
+  const {
+    resumeUrl = '',
+    resumeParsedText = '',
+    resumeParsedAt = '',
+    resumeText = ''
+  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeText']);
+  const normalizedUrl = normalizeResumeUrl(resumeUrl);
+  if (!normalizedUrl) {
+    return String(resumeText || '').slice(0, 12000);
+  }
+
+  const cacheAgeMs = Date.now() - Date.parse(resumeParsedAt || 0);
+  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < 24 * 60 * 60 * 1000) {
+    return String(resumeParsedText).slice(0, 12000);
+  }
+
+  const tab = await chrome.tabs.create({ url: normalizedUrl, active: false });
+  try {
+    await waitForTabReady(tab.id, 30000);
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: extractResumeTextScript
+    });
+    const result = execution?.result || { ok: false, error: 'No resume parse result', text: '' };
+    if (!result.ok) {
+      throw new Error(result.error || 'Resume parse failed');
+    }
+    const text = String(result.text || '').slice(0, 12000);
+    await storageSet({
+      resumeParsedText: text,
+      resumeParsedAt: nowIso()
+    });
+    return text;
+  } finally {
+    if (tab.id) {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+  }
+}
+
 async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '' }) {
   const {
     groqApiKey,
     groqModel = DEFAULTS.groqModel,
-    resumeText = '',
     expectedSalary = '',
     coverPrompt = DEFAULTS.coverPrompt
-  } = await storageGet(['groqApiKey', 'groqModel', 'resumeText', 'expectedSalary', 'coverPrompt']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'coverPrompt']);
 
   if (!groqApiKey) {
     throw new Error('Groq API key is not configured');
   }
+
+  const resumeText = await getResumeContext();
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -182,27 +266,75 @@ async function testGroq() {
   return { ok: true, sampleLength: text.length };
 }
 
-async function waitForTabComplete(tabId, timeoutMs = 30000) {
+async function getTabDocumentReadyState(tabId) {
+  try {
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => document.readyState
+    });
+    return execution?.result || '';
+  } catch {
+    return '';
+  }
+}
+
+async function waitForTabReady(tabId, timeoutMs = 30000) {
   const currentTab = await chrome.tabs.get(tabId).catch(() => null);
   if (currentTab?.status === 'complete') {
     return;
   }
 
+  const currentReadyState = await getTabDocumentReadyState(tabId);
+  if (currentReadyState === 'interactive' || currentReadyState === 'complete') {
+    return;
+  }
+
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
+      clearInterval(poll);
       chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error('Tab load timed out'));
+      reject(new Error('Tab ready timed out'));
     }, timeoutMs);
 
-    function listener(updatedTabId, info) {
-      if (updatedTabId === tabId && info.status === 'complete') {
-        clearTimeout(timeout);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
+    function finish() {
+      clearTimeout(timeout);
+      clearInterval(poll);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
+
+    async function checkReady() {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (tab?.status === 'complete') {
+        finish();
+        return;
+      }
+
+      const readyState = await getTabDocumentReadyState(tabId);
+      if (readyState === 'interactive' || readyState === 'complete') {
+        finish();
       }
     }
 
+    function listener(updatedTabId, info) {
+      if (updatedTabId === tabId && (info.status === 'complete' || info.status === 'loading')) {
+        checkReady().catch(() => {});
+      }
+    }
+
+    const poll = setInterval(() => {
+      checkReady().catch(() => {});
+    }, 500);
+
     chrome.tabs.onUpdated.addListener(listener);
+    checkReady().catch((error) => {
+      if (error instanceof Error && /No tab/.test(error.message)) {
+        clearTimeout(timeout);
+        clearInterval(poll);
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(error);
+      }
+    });
   });
 }
 
@@ -214,7 +346,8 @@ function collectResumeLinksScript() {
 
   const links = [...document.querySelectorAll('a[href*="/resume/"]')]
     .map((link) => link.href)
-    .filter((href) => /\/resume\//.test(href));
+    .filter((href) => /\/resume\/[^/?#]+/.test(href))
+    .filter((href) => !/\/resume\/(?:new|edit|print|download)(?:[/?#]|$)/.test(new URL(href).pathname));
 
   return { ok: true, links: [...new Set(links)].slice(0, 20) };
 }
@@ -222,6 +355,7 @@ function collectResumeLinksScript() {
 function clickResumeRefreshScript() {
   const visible = (node) => {
     if (!node) return false;
+    if (node.disabled || node.getAttribute?.('aria-disabled') === 'true') return false;
     const style = window.getComputedStyle(node);
     const rect = node.getBoundingClientRect();
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
@@ -230,9 +364,13 @@ function clickResumeRefreshScript() {
   const textOf = (node) => (node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const findByText = (root, tags, patterns) => {
-    const nodes = [...root.querySelectorAll(tags.join(','))].filter(visible);
-    return nodes.find((node) => patterns.some((pattern) => pattern.test(textOf(node))));
+  const findByText = (root, selectors, patterns, rejectPatterns = []) => {
+    const nodes = [...root.querySelectorAll(selectors.join(','))].filter(visible);
+    return nodes.find((node) => {
+      const text = textOf(node);
+      if (rejectPatterns.some((pattern) => pattern.test(text))) return false;
+      return patterns.some((pattern) => pattern.test(text));
+    });
   };
 
   const isUnsafePage =
@@ -244,13 +382,17 @@ function clickResumeRefreshScript() {
   }
 
   return (async () => {
-    const button = findByText(document, ['button', 'a'], [
-      /обновить/i,
-      /поднять/i,
+    const button = findByText(document, ['button', 'a', '[role="button"]'], [
+      /^обновить$/i,
+      /поднять(?:\s+резюме)?(?:\s+в\s+поиске)?/i,
+      /обновить\s+(?:дату|резюме)/i,
+      /обновить\s+в\s+поиске/i
+    ], [
       /редактировать/i,
-      /сохранить/i
+      /сохранить/i,
+      /создать/i
     ]);
-    if (!button) return { ok: false, error: 'No update/edit/save button found' };
+    if (!button) return { ok: false, error: 'No resume refresh button found' };
     button.click();
     await sleep(1500);
     return { ok: true, title: document.title, action: 'clicked_resume_button' };
@@ -266,7 +408,7 @@ async function runResumeRefresh() {
   });
 
   try {
-    await waitForTabComplete(tab.id);
+    await waitForTabReady(tab.id);
 
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -284,7 +426,7 @@ async function runResumeRefresh() {
     for (const href of links) {
       const resumeTab = await chrome.tabs.create({ url: href, active: false });
       try {
-        await waitForTabComplete(resumeTab.id, 30000);
+        await waitForTabReady(resumeTab.id, 30000);
         const [resumeExecution] = await chrome.scripting.executeScript({
           target: { tabId: resumeTab.id },
           func: clickResumeRefreshScript
@@ -341,55 +483,12 @@ async function runResumeRefresh() {
   }
 }
 
-async function openAssistantWindow() {
-  if (assistantWindowId !== null) {
-    const existingWindow = await chrome.windows.get(assistantWindowId).catch(() => null);
-    if (existingWindow) {
-      await chrome.windows.update(assistantWindowId, { focused: true });
-      return { ok: true, windowId: assistantWindowId };
-    }
-    assistantWindowId = null;
-  }
-
-  const createdWindow = await chrome.windows.create({
-    url: chrome.runtime.getURL('src/popup.html?mode=window'),
-    type: 'popup',
-    width: 420,
-    height: 620,
-    focused: true
-  });
-  assistantWindowId = createdWindow.id ?? null;
-  return { ok: true, windowId: assistantWindowId };
-}
-
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
-  await chrome.alarms.create(RESUME_REFRESH_ALARM, {
-    delayInMinutes: 5,
-    periodInMinutes: 24 * 60
-  });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureDefaults();
-  await chrome.alarms.create(RESUME_REFRESH_ALARM, {
-    delayInMinutes: 5,
-    periodInMinutes: 24 * 60
-  });
-});
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== RESUME_REFRESH_ALARM) return;
-  const { resumeRefreshEnabled = true } = await storageGet(['resumeRefreshEnabled']);
-  if (resumeRefreshEnabled) {
-    await runResumeRefresh();
-  }
-});
-
-chrome.windows.onRemoved.addListener((windowId) => {
-  if (windowId === assistantWindowId) {
-    assistantWindowId = null;
-  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -428,11 +527,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'REFRESH_RESUMES_NOW': {
         const result = await runResumeRefresh();
-        sendResponse(result);
-        break;
-      }
-      case 'OPEN_ASSISTANT_WINDOW': {
-        const result = await openAssistantWindow();
         sendResponse(result);
         break;
       }

@@ -1,24 +1,24 @@
 const DEFAULTS = {
   groqModel: 'llama-3.3-70b-versatile',
-  resumeText: '',
+  resumeUrl: '',
   expectedSalary: '',
-  coverPrompt: 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
+  coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
   delayMinMs: 8000,
-  delayMaxMs: 15000,
-  resumeRefreshEnabled: true
+  delayMaxMs: 15000
 };
+
+const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 
 const fields = {
   groqApiKey: document.getElementById('groqApiKey'),
   groqModel: document.getElementById('groqModel'),
-  resumeText: document.getElementById('resumeText'),
+  resumeUrl: document.getElementById('resumeUrl'),
   expectedSalary: document.getElementById('expectedSalary'),
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
-  delayMaxMs: document.getElementById('delayMaxMs'),
-  resumeRefreshEnabled: document.getElementById('resumeRefreshEnabled')
+  delayMaxMs: document.getElementById('delayMaxMs')
 };
 
 const statusNode = document.getElementById('status');
@@ -34,29 +34,35 @@ async function loadOptions() {
   fields.groqApiKey.value = values.groqApiKey ? '********' : '';
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
   fields.groqModel.value = values.groqModel || DEFAULTS.groqModel;
-  fields.resumeText.value = values.resumeText || DEFAULTS.resumeText;
+  fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
-  fields.coverPrompt.value = values.coverPrompt || DEFAULTS.coverPrompt;
+  fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
+    ? DEFAULTS.coverPrompt
+    : values.coverPrompt || DEFAULTS.coverPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
-  fields.resumeRefreshEnabled.checked = values.resumeRefreshEnabled ?? DEFAULTS.resumeRefreshEnabled;
 }
 
 async function saveOptions() {
+  const current = await chrome.storage.local.get(['resumeUrl']);
   const patch = {
     groqModel: fields.groqModel.value.trim() || DEFAULTS.groqModel,
-    resumeText: fields.resumeText.value.trim(),
+    resumeUrl: fields.resumeUrl.value.trim(),
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(1000, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
-    delayMaxMs: Math.max(1000, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
-    resumeRefreshEnabled: fields.resumeRefreshEnabled.checked
+    delayMaxMs: Math.max(1000, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs)
   };
 
   if (patch.delayMaxMs < patch.delayMinMs) {
     patch.delayMaxMs = patch.delayMinMs;
+  }
+
+  if ((current.resumeUrl || '') !== patch.resumeUrl) {
+    patch.resumeParsedText = '';
+    patch.resumeParsedAt = '';
   }
 
   if (fields.groqApiKey.dataset.masked !== 'true' || fields.groqApiKey.value !== '********') {
