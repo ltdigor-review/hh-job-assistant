@@ -44,6 +44,13 @@ test('javascript files parse', async () => {
   }
 });
 
+test('background service worker avoids top-level await', async () => {
+  const js = await readFile(new URL('src/background.js', root), 'utf8');
+
+  assert.doesNotMatch(js.trim(), /await\s+ensureDefaults\(\);?$/);
+  assert.match(js, /ensureDefaults\(\)\.catch/);
+});
+
 test('background initializes defaults and registers required listeners', async () => {
   const calls = [];
   const localData = {};

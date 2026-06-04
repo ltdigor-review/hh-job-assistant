@@ -436,4 +436,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-await ensureDefaults();
+ensureDefaults().catch((error) => {
+  console.error('HH Job Assistant initialization failed:', error);
+});
