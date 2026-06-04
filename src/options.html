@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HH Job Assistant Options</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Arial, sans-serif;
+        color: #1f2937;
+        background: #f6f8fb;
+      }
+
+      body {
+        margin: 0;
+        padding: 28px;
+      }
+
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        background: #fff;
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        padding: 24px;
+      }
+
+      h1 {
+        margin: 0 0 20px;
+        font-size: 24px;
+      }
+
+      label {
+        display: block;
+        margin: 16px 0 6px;
+        font-weight: 700;
+      }
+
+      input,
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #b8c4d4;
+        border-radius: 6px;
+        padding: 10px 12px;
+        font: inherit;
+      }
+
+      textarea {
+        min-height: 130px;
+        resize: vertical;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .checkbox {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 16px;
+        font-weight: 400;
+      }
+
+      .checkbox input {
+        width: auto;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 22px;
+      }
+
+      button {
+        border: 1px solid #1f5fbf;
+        border-radius: 6px;
+        background: #2563eb;
+        color: #fff;
+        padding: 10px 14px;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: #fff;
+        color: #1f2937;
+        border-color: #b8c4d4;
+      }
+
+      #status {
+        min-height: 20px;
+        margin-top: 16px;
+        color: #475569;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>HH Job Assistant</h1>
+
+      <label for="groqApiKey">Groq API key</label>
+      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
+
+      <label for="groqModel">Groq model</label>
+      <input id="groqModel" type="text" placeholder="llama-3.3-70b-versatile">
+
+      <label for="resumeText">Resume text</label>
+      <textarea id="resumeText" placeholder="Вставьте краткий текст резюме, который Groq будет использовать для писем."></textarea>
+
+      <label for="coverPrompt">Cover-letter prompt</label>
+      <textarea id="coverPrompt"></textarea>
+
+      <div class="row">
+        <div>
+          <label for="dailyLimit">Daily apply limit</label>
+          <input id="dailyLimit" type="number" min="1" max="100">
+        </div>
+        <div>
+          <label for="delayMinMs">Delay min, ms</label>
+          <input id="delayMinMs" type="number" min="1000" step="500">
+        </div>
+        <div>
+          <label for="delayMaxMs">Delay max, ms</label>
+          <input id="delayMaxMs" type="number" min="1000" step="500">
+        </div>
+      </div>
+
+      <label class="checkbox">
+        <input id="resumeRefreshEnabled" type="checkbox">
+        Enable daily resume refresh while Chrome is running
+      </label>
+
+      <div class="actions">
+        <button id="save">Save</button>
+        <button id="testGroq" class="secondary">Test Groq</button>
+      </div>
+
+      <div id="status" role="status"></div>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

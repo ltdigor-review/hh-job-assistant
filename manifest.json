@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "HH Job Assistant",
+  "description": "Assists with hh.ru resume refresh, vacancy responses, Groq cover letters, and test hints.",
+  "version": "0.1.0",
+  "permissions": ["storage", "tabs", "alarms", "scripting", "activeTab", "windows"],
+  "host_permissions": ["https://hh.ru/*", "https://api.groq.com/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://hh.ru/*"],
+      "js": ["src/content-hh.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "HH Job Assistant"
+  },
+  "options_page": "src/options.html"
+}
