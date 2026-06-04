@@ -1,8 +1,9 @@
 const DEFAULTS = {
   groqModel: 'llama-3.3-70b-versatile',
   resumeText: '',
+  expectedSalary: '',
   coverPrompt: 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
-  dailyLimit: 10,
+  dailyLimit: 20,
   delayMinMs: 8000,
   delayMaxMs: 15000,
   resumeRefreshEnabled: true,
@@ -44,6 +45,10 @@ async function ensureDefaults() {
     }
   }
 
+  if (current.dailyLimit === 10) {
+    patch.dailyLimit = DEFAULTS.dailyLimit;
+  }
+
   if (Object.keys(patch).length > 0) {
     await storageSet(patch);
   }
@@ -74,19 +79,22 @@ async function appendRunResult(item) {
   });
 }
 
-function buildGroqMessages({ task, resumeText, coverPrompt, vacancyText, extraText }) {
+function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vacancyText, extraText }) {
   if (task === 'test_assist') {
     return [
       {
         role: 'system',
         content:
-          'You help a job applicant understand hh.ru screening tests. Give concise Russian hints or draft answers. Do not claim certainty when information is missing. Return only useful assistance text.'
+          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, and expected salary. Give concise Russian draft answers. Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
       },
       {
         role: 'user',
         content: [
           'Резюме кандидата:',
           resumeText || '(резюме не указано)',
+          '',
+          'Ожидаемая зарплата кандидата:',
+          expectedSalary || '(зарплата не указана)',
           '',
           'Текст вакансии или теста:',
           vacancyText || '(текст не найден)',
@@ -124,8 +132,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     groqApiKey,
     groqModel = DEFAULTS.groqModel,
     resumeText = '',
+    expectedSalary = '',
     coverPrompt = DEFAULTS.coverPrompt
-  } = await storageGet(['groqApiKey', 'groqModel', 'resumeText', 'coverPrompt']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'resumeText', 'expectedSalary', 'coverPrompt']);
 
   if (!groqApiKey) {
     throw new Error('Groq API key is not configured');
@@ -142,6 +151,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       messages: buildGroqMessages({
         task,
         resumeText: String(resumeText).slice(0, 12000),
+        expectedSalary: String(expectedSalary).slice(0, 1000),
         coverPrompt: String(coverPrompt).slice(0, 4000),
         vacancyText: String(vacancyText).slice(0, 12000),
         extraText: String(extraText).slice(0, 8000)

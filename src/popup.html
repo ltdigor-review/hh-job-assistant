@@ -57,6 +57,37 @@
         border-color: #991b1b;
       }
 
+      .settings {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      label {
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 34px;
+        border: 1px solid #b8c4d4;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font: 13px Arial, sans-serif;
+      }
+
+      .settings-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
       dl {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -91,6 +122,32 @@
         color: #475569;
         font-size: 12px;
       }
+
+      #recentResults {
+        display: grid;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .result {
+        padding: 8px;
+        border: 1px solid #d8e0ea;
+        border-radius: 6px;
+        background: #f8fafc;
+        font-size: 12px;
+      }
+
+      .result.warn {
+        border-color: #f3c969;
+        background: #fffbeb;
+        color: #7c4a03;
+      }
+
+      .result.error {
+        border-color: #f2a1a1;
+        background: #fef2f2;
+        color: #991b1b;
+      }
     </style>
   </head>
   <body>
@@ -103,6 +160,15 @@
       <button id="openWindow" class="secondary">Открыть окном</button>
       <button id="openOptions" class="secondary">Настройки</button>
     </div>
+
+    <section class="settings" aria-label="Groq settings">
+      <label for="groqApiKey">Groq API key</label>
+      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
+      <div class="settings-actions">
+        <button id="saveGroqKey" class="secondary">Save key</button>
+        <button id="testGroq" class="secondary">Test Groq</button>
+      </div>
+    </section>
 
     <dl>
       <dt>Статус</dt>
@@ -121,6 +187,7 @@
 
     <div id="lastError"></div>
     <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
+    <div id="recentResults" aria-live="polite"></div>
     <script src="popup.js"></script>
   </body>
 </html>

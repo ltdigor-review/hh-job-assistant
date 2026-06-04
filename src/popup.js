@@ -6,7 +6,9 @@ const nodes = {
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
   lastError: document.getElementById('lastError'),
-  statusLine: document.getElementById('statusLine')
+  statusLine: document.getElementById('statusLine'),
+  recentResults: document.getElementById('recentResults'),
+  groqApiKey: document.getElementById('groqApiKey')
 };
 
 const params = new URLSearchParams(location.search);
@@ -46,6 +48,46 @@ function renderState(runState = {}) {
   nodes.lastError.textContent = runState.lastError || '';
 }
 
+function resultMessage(item) {
+  if (item.status === 'skipped_missing_groq_key') {
+    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} needs a cover letter, but Groq API key is missing.`;
+  }
+  if (item.status === 'skipped_test_missing_groq_key') {
+    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} needs employer questions/test assistance, but Groq API key is missing.`;
+  }
+  if (item.status === 'error') {
+    return `Error: ${item.title || item.vacancyId || 'vacancy'} — ${item.error || 'unknown error'}`;
+  }
+  if (/^applied/.test(item.status || '')) {
+    return `Applied: ${item.title || item.vacancyId || 'vacancy'}`;
+  }
+  return `${item.status || 'Result'}: ${item.title || item.vacancyId || 'vacancy'}`;
+}
+
+function resultClass(item) {
+  if (/missing_groq_key/.test(item.status || '')) return 'result warn';
+  if (item.status === 'error') return 'result error';
+  return 'result';
+}
+
+function renderResults(runResults = []) {
+  const items = runResults.slice(-4).reverse();
+  nodes.recentResults.replaceChildren(
+    ...items.map((item) => {
+      const node = document.createElement('div');
+      node.className = resultClass(item);
+      node.textContent = resultMessage(item);
+      return node;
+    })
+  );
+}
+
+async function loadPopupSettings() {
+  const values = await chrome.storage.local.get(['groqApiKey']);
+  nodes.groqApiKey.value = values.groqApiKey ? '********' : '';
+  nodes.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
+}
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
@@ -66,6 +108,7 @@ async function refreshStatus() {
   const response = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
   if (response?.ok) {
     renderState(response.runState);
+    renderResults(response.runResults || []);
   }
 }
 
@@ -108,6 +151,41 @@ document.getElementById('refreshResumes').addEventListener('click', async () => 
   }
 });
 
+nodes.groqApiKey.addEventListener('focus', () => {
+  if (nodes.groqApiKey.dataset.masked === 'true') {
+    nodes.groqApiKey.value = '';
+    nodes.groqApiKey.dataset.masked = 'false';
+  }
+});
+
+document.getElementById('saveGroqKey').addEventListener('click', async () => {
+  try {
+    const patch = {};
+    if (nodes.groqApiKey.dataset.masked !== 'true' || nodes.groqApiKey.value !== '********') {
+      patch.groqApiKey = nodes.groqApiKey.value.trim();
+    }
+    await chrome.storage.local.set(patch);
+    await loadPopupSettings();
+    setStatus(patch.groqApiKey ? 'Groq key saved.' : 'Groq key cleared.');
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+});
+
+document.getElementById('testGroq').addEventListener('click', async () => {
+  try {
+    setStatus('Testing Groq...');
+    const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
+    if (!response?.ok) {
+      setStatus(response?.error || 'Groq test failed.', true);
+      return;
+    }
+    setStatus(`Groq OK. Sample length: ${response.sampleLength}`);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+});
+
 document.getElementById('openWindow').addEventListener('click', async () => {
   try {
     setStatus('Открываю отдельное окно...');
@@ -129,6 +207,7 @@ document.getElementById('openOptions').addEventListener('click', () => {
   chrome.runtime.openOptionsPage();
 });
 
+loadPopupSettings().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
 refreshStatus().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
 setInterval(() => {
   refreshStatus().catch(() => {});

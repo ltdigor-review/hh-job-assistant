@@ -1,9 +1,4 @@
 const HH_SELECTORS = {
-  cards: [
-    '[data-qa="vacancy-serp__vacancy"]',
-    '[data-qa="serp-item"]',
-    '[data-qa*="vacancy-serp"]'
-  ],
   responseButtons: [
     '[data-qa="vacancy-serp__vacancy_response"]',
     '[data-qa="vacancy-response-link-top"]',
@@ -36,9 +31,13 @@ const HH_SELECTORS = {
   ]
 };
 
+const CLICK_DELAY_MIN_MS = 2000;
+const CLICK_DELAY_MAX_MS = 4000;
+
 let stopRequested = false;
 let stopReason = '';
 let activeRunId = null;
+let queuedResumeStarted = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,6 +47,11 @@ function randomDelay(minMs, maxMs) {
   const min = Math.max(0, Number(minMs) || 0);
   const max = Math.max(min, Number(maxMs) || min);
   return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+async function waitBeforeClick() {
+  if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return;
+  await sleep(randomDelay(CLICK_DELAY_MIN_MS, CLICK_DELAY_MAX_MS));
 }
 
 function cleanText(value) {
@@ -90,12 +94,31 @@ function getVacancyId(url) {
   return String(url || '').match(/\/vacancy\/(\d+)/)?.[1] || new URL(String(url || location.href), location.href).searchParams.get('vacancyId') || '';
 }
 
+function getResponseUrl(item) {
+  const href = item?.responseButton?.href || '';
+  if (!href) return '';
+  const url = new URL(href, location.href);
+  return /\/applicant\/vacancy_response/.test(url.pathname) ? url.href : '';
+}
+
+function navigateTo(url) {
+  if (window.__HH_JOB_ASSISTANT_TEST_NAVIGATE__) {
+    window.__HH_JOB_ASSISTANT_TEST_NAVIGATE__(url);
+    return;
+  }
+  location.href = url;
+}
+
 function isUnsafePage() {
   const body = textOf(document.body);
   return (
     /\/account\/login|\/account\/signup/.test(location.pathname) ||
     /captcha|подтвердите, что вы не робот|не робот|слишком много запросов/i.test(body)
   );
+}
+
+function isResponseFormPage() {
+  return /\/applicant\/vacancy_response/.test(location.pathname) || Boolean(queryFirst(HH_SELECTORS.submitButtons, document));
 }
 
 function getCardInfo(card, index) {
@@ -118,10 +141,25 @@ function getCardInfo(card, index) {
   };
 }
 
+function getVacancyCardNodes() {
+  for (const selectors of [
+    ['[data-qa="vacancy-serp__vacancy"]'],
+    ['[data-qa="serp-item"]'],
+    ['[data-qa*="vacancy-serp"]']
+  ]) {
+    const cards = queryAll(selectors).filter(
+      (card) => card.querySelector('a[href*="/vacancy/"]') || /откликнуться/i.test(textOf(card))
+    );
+    if (cards.length > 0) {
+      return cards;
+    }
+  }
+
+  return [];
+}
+
 function scanVacancies() {
-  const cards = queryAll(HH_SELECTORS.cards)
-    .filter((card) => card.querySelector('a[href*="/vacancy/"]') || /откликнуться/i.test(textOf(card)))
-    .map(getCardInfo);
+  const cards = getVacancyCardNodes().map(getCardInfo);
 
   const seen = new Set();
   const uniqueCards = cards.filter((item) => {
@@ -133,6 +171,23 @@ function scanVacancies() {
 
   if (uniqueCards.length > 0) {
     return uniqueCards;
+  }
+
+  if (isResponseFormPage()) {
+    const submitButton = findSubmitButton(document);
+    return [
+      {
+        index: 1,
+        vacancyId: getVacancyId(location.href),
+        title: cleanText(document.querySelector('h1')?.textContent) || document.title || 'Отклик на вакансию',
+        url: location.href,
+        card: document,
+        responseButton: submitButton,
+        responseFormOpen: true,
+        cardText: getVacancyText(),
+        testDetected: /тест|задани[ея]|ответьте на вопросы|вопрос/i.test(textOf(document.body)) || findQuestionFields(document).length > 0
+      }
+    ];
   }
 
   const detailButton = findClickableByText(document, [/откликнуться/i]);
@@ -171,8 +226,39 @@ function detectTest(root = getDialogRoot()) {
   return /тест|задани[ея]|контрольн|ответьте на вопросы|вопрос \d|пройти тест/i.test(text);
 }
 
+function isAlreadyAppliedPage(root = document) {
+  return /вы откликнулись|отклик отправлен|отклик успешно|отклик на вакансию отправлен/i.test(
+    textOf(root) || textOf(root.body)
+  );
+}
+
 function findTextarea(root = getDialogRoot()) {
   return queryFirst(HH_SELECTORS.textareas, root);
+}
+
+function getFieldMarker(field) {
+  const name = field.getAttribute('name') || '';
+  const dataQa = field.getAttribute('data-qa') || '';
+  const placeholder = field.getAttribute('placeholder') || '';
+  const label = typeof field.closest === 'function' ? field.closest('label') : null;
+  const nearText = textOf(label || field.parentElement || field);
+  return `${name}\n${dataQa}\n${placeholder}\n${nearText}`;
+}
+
+function findCoverLetterTextarea(root = getDialogRoot()) {
+  return [...root.querySelectorAll('textarea,input:not([type="hidden"])')]
+    .filter(isVisible)
+    .find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
+}
+
+function findQuestionFields(root = getDialogRoot()) {
+  return [...root.querySelectorAll('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')]
+    .filter(isVisible)
+    .filter((field) => {
+      const marker = getFieldMarker(field);
+      if (/letter|cover|сопровод/i.test(marker)) return false;
+      return /task_|question|answer|вопрос|ответ|писать тут|зарплат|доход/i.test(marker);
+    });
 }
 
 function findSubmitButton(root = getDialogRoot()) {
@@ -182,6 +268,46 @@ function findSubmitButton(root = getDialogRoot()) {
       .find((button) => /отправить|откликнуться|продолжить/i.test(textOf(button))) ||
     findClickableByText(root, [/отправить/i, /откликнуться/i, /продолжить/i])
   );
+}
+
+function findFollowupConfirmButton(root = getDialogRoot()) {
+  const text = textOf(root);
+  if (!/другой стране|такой отклик может получить отказ|скорее всего, будет отказ|получить отказ/i.test(text)) {
+    return null;
+  }
+
+  return findClickableByText(root, [
+    /в[сc]е равно откликнуться/i,
+    /откликнуться все равно/i,
+    /продолжить отклик/i,
+    /подтвердить/i
+  ]);
+}
+
+async function confirmFollowupIfNeeded(previousText, counters) {
+  if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
+    const confirmButton = findFollowupConfirmButton(getDialogRoot());
+    if (!confirmButton) {
+      return false;
+    }
+
+    await setRunState({ state: 'submitting', ...counters });
+    confirmButton.click();
+    await sleep(0);
+    return true;
+  }
+
+  const root = await waitForDialogOrChange(previousText, 5000);
+  const confirmButton = findFollowupConfirmButton(root);
+  if (!confirmButton) {
+    return false;
+  }
+
+  await setRunState({ state: 'submitting', ...counters });
+  await waitBeforeClick();
+  confirmButton.click();
+  await sleep(1800);
+  return true;
 }
 
 function closeDialog() {
@@ -267,7 +393,7 @@ async function getConfig() {
     'runResults'
   ]);
   return {
-    dailyLimit: Number(values.dailyLimit) || 10,
+    dailyLimit: Number(values.dailyLimit) || 20,
     delayMinMs: Number(values.delayMinMs) || 8000,
     delayMaxMs: Number(values.delayMaxMs) || 15000
   };
@@ -289,6 +415,13 @@ function isMissingGroqKeyError(error) {
   return /groq api key is not configured/i.test(error instanceof Error ? error.message : String(error));
 }
 
+function missingGroqMessage(kind) {
+  if (kind === 'test') {
+    return 'Skipped because Groq API key is missing: vacancy needs employer questions/test assistance.';
+  }
+  return 'Skipped because Groq API key is missing: vacancy needs a cover letter.';
+}
+
 async function generateTestAssistance(vacancyText, extraText) {
   const response = await sendRuntimeMessage({
     type: 'GENERATE_COVER_LETTER',
@@ -300,6 +433,42 @@ async function generateTestAssistance(vacancyText, extraText) {
     throw new Error(response?.error || 'Test assistance generation failed');
   }
   return response.text;
+}
+
+async function getExpectedSalary() {
+  const { expectedSalary = '' } = await chrome.storage.local.get(['expectedSalary']);
+  return String(expectedSalary || '').trim();
+}
+
+async function getFallbackCoverLetter() {
+  const { resumeText = '' } = await chrome.storage.local.get(['resumeText']);
+  const resumeSnippet = cleanText(String(resumeText || '')).slice(0, 500);
+  if (resumeSnippet) {
+    return [
+      'Здравствуйте! Заинтересовала ваша вакансия.',
+      'Мой опыт и профиль соответствуют задачам позиции:',
+      resumeSnippet,
+      'Буду рад обсудить, чем могу быть полезен команде.'
+    ].join('\n');
+  }
+
+  return 'Здравствуйте! Заинтересовала ваша вакансия. Имею релевантный опыт в разработке и управлении IT-продуктами, готов обсудить задачи и пользу для команды.';
+}
+
+function splitGeneratedAnswers(text, count) {
+  const cleaned = cleanText(text);
+  if (!cleaned || count <= 1) return [cleaned];
+
+  const lines = cleaned
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*(?:\d+[\).:-]?|[-*])\s*/, '').trim())
+    .filter(Boolean);
+
+  if (lines.length >= count) {
+    return lines.slice(0, count);
+  }
+
+  return Array.from({ length: count }, () => cleaned);
 }
 
 async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
@@ -364,20 +533,44 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
-  await setRunState({ state: 'waiting_for_dialog', ...counters });
-  const beforeText = textOf(document.body);
-  item.responseButton.scrollIntoView({ block: 'center', inline: 'center' });
-  await sleep(250);
-  item.responseButton.click();
+  let root;
+  if (item.responseFormOpen) {
+    root = document;
+  } else {
+    await setRunState({ state: 'waiting_for_dialog', ...counters });
+    const beforeText = textOf(document.body);
+    item.responseButton.scrollIntoView({ block: 'center', inline: 'center' });
+    await sleep(250);
+    await waitBeforeClick();
+    item.responseButton.click();
 
-  const root = await waitForDialogOrChange(beforeText);
-  await sleep(700);
+    root = await waitForDialogOrChange(beforeText);
+    await sleep(700);
+  }
 
   if (isUnsafePage()) {
     throw new Error('Login, captcha, or anti-bot page detected after click');
   }
 
-  if (detectTest(root)) {
+  if (isAlreadyAppliedPage(root)) {
+    counters.applied += 1;
+    await appendResult({
+      index: item.index,
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      status: 'applied_already_confirmed',
+      coverLetterUsed: false,
+      testDetected: item.testDetected,
+      error: ''
+    });
+    return;
+  }
+
+  if (detectTest(root) || findQuestionFields(root).length > 0) {
+    const questionFields = findQuestionFields(root);
+    const coverLetterTextarea = findCoverLetterTextarea(root);
+    let coverLetterUsed = false;
     await setRunState({ state: 'generating_cover_letter', ...counters });
     let assistance;
     try {
@@ -387,30 +580,66 @@ async function applyToVacancy(item, counters) {
         throw error;
       }
 
-      counters.skipped += 1;
-      await appendResult({
-        index: item.index,
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        status: 'skipped_test_missing_groq_key',
-        coverLetterUsed: false,
-        testDetected: true,
-        error: 'Groq API key is not configured'
-      });
-      closeDialog();
-      return;
+      assistance = questionFields.length > 0 ? await getExpectedSalary() : '';
+      if (assistance) {
+        await setRunState({ state: 'filling_cover_letter', ...counters });
+      } else {
+        const message = missingGroqMessage('test');
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_test_missing_groq_key',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
+      }
     }
 
-    showAssistantPanel({ title: 'HH test assistance', text: assistance });
+    if (questionFields.length > 0) {
+      const answers = splitGeneratedAnswers(assistance, questionFields.length);
+      questionFields.forEach((field, index) => {
+        setNativeValue(field, answers[index] || assistance);
+      });
+      await sleep(500);
+    } else {
+      showAssistantPanel({ title: 'HH test assistance', text: assistance });
+    }
+
+    if (coverLetterTextarea && !coverLetterTextarea.value) {
+      let letter;
+      try {
+        letter = await generateCoverLetter(getVacancyText(item.card) || getVacancyText(document));
+      } catch (error) {
+        if (!isMissingGroqKeyError(error)) {
+          throw error;
+        }
+        letter = await getFallbackCoverLetter();
+      }
+
+      await setRunState({ state: 'filling_cover_letter', ...counters });
+      setNativeValue(coverLetterTextarea, letter);
+      coverLetterUsed = true;
+      await sleep(500);
+    }
+
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
       throw new Error('Test submit button was not found');
     }
 
     await setRunState({ state: 'submitting', ...counters });
+    await waitBeforeClick();
+    const beforeSubmitText = textOf(document.body);
     submitButton.click();
     await sleep(1800);
+    await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
     counters.applied += 1;
     await appendResult({
@@ -419,7 +648,7 @@ async function applyToVacancy(item, counters) {
       title: item.title,
       url: item.url,
       status: 'applied_test_assisted',
-      coverLetterUsed: false,
+      coverLetterUsed,
       testDetected: true,
       error: ''
     });
@@ -456,6 +685,7 @@ async function applyToVacancy(item, counters) {
         throw error;
       }
 
+      const message = missingGroqMessage('cover');
       counters.skipped += 1;
       await appendResult({
         index: item.index,
@@ -465,8 +695,9 @@ async function applyToVacancy(item, counters) {
         status: 'skipped_missing_groq_key',
         coverLetterUsed: false,
         testDetected: false,
-        error: 'Groq API key is not configured'
+        error: message
       });
+      await setRunState({ state: 'applying', ...counters, lastError: message });
       closeDialog();
       return;
     }
@@ -483,8 +714,11 @@ async function applyToVacancy(item, counters) {
   }
 
   await setRunState({ state: 'submitting', ...counters });
+  await waitBeforeClick();
+  const beforeSubmitText = textOf(document.body);
   submitButton.click();
   await sleep(1800);
+  await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
   counters.applied += 1;
   await appendResult({
@@ -499,6 +733,125 @@ async function applyToVacancy(item, counters) {
   });
 
   closeDialog();
+}
+
+function serializeQueueItem(item) {
+  return {
+    index: item.index,
+    vacancyId: item.vacancyId,
+    title: item.title,
+    url: item.url,
+    responseUrl: getResponseUrl(item),
+    testDetected: item.testDetected
+  };
+}
+
+function buildResponseFormItem(queueItem) {
+  return {
+    index: queueItem.index,
+    vacancyId: queueItem.vacancyId || getVacancyId(location.href),
+    title: queueItem.title || cleanText(document.querySelector('h1')?.textContent) || document.title || 'Отклик на вакансию',
+    url: queueItem.url || location.href,
+    card: document,
+    responseButton: findSubmitButton(document),
+    responseFormOpen: true,
+    cardText: getVacancyText(),
+    testDetected: queueItem.testDetected || detectTest(document) || findQuestionFields(document).length > 0
+  };
+}
+
+async function saveQueue(queue) {
+  await chrome.storage.local.set({ autoApplyQueue: queue });
+}
+
+async function startQueuedAutoApply(vacancies, counters, config) {
+  const items = vacancies.map(serializeQueueItem).filter((item) => item.responseUrl);
+  if (items.length === 0) {
+    return false;
+  }
+
+  const queue = {
+    active: true,
+    runId: activeRunId,
+    index: 0,
+    items,
+    counters,
+    config: {
+      delayMinMs: config.delayMinMs,
+      delayMaxMs: config.delayMaxMs
+    }
+  };
+
+  await saveQueue(queue);
+  await setRunState({ state: 'applying', ...counters, found: items.length, lastError: '' });
+  navigateTo(items[0].responseUrl);
+  return true;
+}
+
+async function continueQueuedAutoApply() {
+  if (queuedResumeStarted || !isResponseFormPage()) {
+    return;
+  }
+
+  const { autoApplyQueue } = await chrome.storage.local.get(['autoApplyQueue']);
+  if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
+    return;
+  }
+
+  queuedResumeStarted = true;
+  const queue = autoApplyQueue;
+  const itemData = queue.items[queue.index];
+  if (!itemData) {
+    await saveQueue({ ...queue, active: false });
+    await setRunState({ state: 'complete', ...(queue.counters || {}) });
+    return;
+  }
+
+  const counters = {
+    found: queue.items.length,
+    processed: 0,
+    applied: 0,
+    skipped: 0,
+    errors: 0,
+    ...(queue.counters || {})
+  };
+
+  counters.processed += 1;
+  const item = buildResponseFormItem(itemData);
+
+  try {
+    await applyToVacancy(item, counters);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    counters.errors += 1;
+    await appendResult({
+      index: item.index,
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      status: 'error',
+      coverLetterUsed: false,
+      testDetected: item.testDetected,
+      error: message
+    });
+    await saveQueue({ ...queue, active: false, counters });
+    await setRunState({ state: 'error', ...counters, lastError: message });
+    return;
+  }
+
+  const nextIndex = queue.index + 1;
+  if (nextIndex >= queue.items.length || stopRequested) {
+    await saveQueue({ ...queue, active: false, index: nextIndex, counters });
+    await setRunState({ state: stopRequested ? 'stopped' : 'complete', ...counters });
+    return;
+  }
+
+  const nextItem = queue.items[nextIndex];
+  await saveQueue({ ...queue, index: nextIndex, counters });
+  await setRunState({ state: 'applying', ...counters });
+  const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
+  await sleep(delayMs);
+  navigateTo(nextItem.responseUrl);
 }
 
 async function handleAutoApply(limit) {
@@ -517,6 +870,10 @@ async function handleAutoApply(limit) {
   };
 
   await setRunState({ state: 'applying', ...counters, lastError: '' });
+
+  if (await startQueuedAutoApply(vacancies, counters, config)) {
+    return { ok: true, queued: true, ...counters };
+  }
 
   for (const item of vacancies) {
     if (stopRequested) break;
@@ -555,11 +912,11 @@ async function handleAutoApply(limit) {
 
 async function startRun(mode) {
   const config = await getConfig();
-  const limit = Math.max(1, Math.min(Number(config.dailyLimit) || 10, 100));
+  const limit = Math.max(1, Math.min(Number(config.dailyLimit) || 20, 100));
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
-  await chrome.storage.local.set({ runResults: [] });
+  await chrome.storage.local.set({ runResults: [], autoApplyQueue: { active: false } });
 
   if (mode === 'dry') {
     return handleDryRun(limit);
@@ -579,6 +936,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'STOP_RUN':
         stopRequested = true;
         stopReason = 'user_stop';
+        await chrome.storage.local.set({ autoApplyQueue: { active: false } });
         await setRunState({ state: 'stopped' });
         sendResponse({ ok: true, activeRunId });
         break;
@@ -592,4 +950,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   });
 
   return true;
+});
+
+continueQueuedAutoApply().catch(async (error) => {
+  const messageText = error instanceof Error ? error.message : String(error);
+  await chrome.storage.local.set({ autoApplyQueue: { active: false } });
+  await setRunState({ state: 'error', lastError: messageText });
 });

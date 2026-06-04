@@ -1,8 +1,9 @@
 const DEFAULTS = {
   groqModel: 'llama-3.3-70b-versatile',
   resumeText: '',
+  expectedSalary: '',
   coverPrompt: 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
-  dailyLimit: 10,
+  dailyLimit: 20,
   delayMinMs: 8000,
   delayMaxMs: 15000,
   resumeRefreshEnabled: true
@@ -12,6 +13,7 @@ const fields = {
   groqApiKey: document.getElementById('groqApiKey'),
   groqModel: document.getElementById('groqModel'),
   resumeText: document.getElementById('resumeText'),
+  expectedSalary: document.getElementById('expectedSalary'),
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
@@ -33,6 +35,7 @@ async function loadOptions() {
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
   fields.groqModel.value = values.groqModel || DEFAULTS.groqModel;
   fields.resumeText.value = values.resumeText || DEFAULTS.resumeText;
+  fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
   fields.coverPrompt.value = values.coverPrompt || DEFAULTS.coverPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
@@ -44,6 +47,7 @@ async function saveOptions() {
   const patch = {
     groqModel: fields.groqModel.value.trim() || DEFAULTS.groqModel,
     resumeText: fields.resumeText.value.trim(),
+    expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(1000, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
