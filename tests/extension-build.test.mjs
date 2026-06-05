@@ -26,7 +26,9 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(!manifest.permissions.includes('windows'));
   assert.ok(!manifest.permissions.includes('alarms'));
   assert.ok(manifest.host_permissions.includes('https://hh.ru/*'));
+  assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
+  assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
 });
 
 test('javascript files parse', async () => {
@@ -182,7 +184,7 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
-    resumeUrl: 'https://hh.ru/resume/abc123',
+    resumeUrl: 'https://ekaterinburg.hh.ru/resume/abc123',
     resumeParsedText: '',
     resumeParsedAt: '',
     expectedSalary: '',

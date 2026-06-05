@@ -92,7 +92,13 @@ async function getActiveTab() {
 
 async function sendToActiveTab(type) {
   const tab = await getActiveTab();
-  if (!/^https:\/\/hh\.ru\//.test(tab.url || '')) {
+  let hostname = '';
+  try {
+    hostname = new URL(tab.url || '').hostname;
+  } catch {
+    hostname = '';
+  }
+  if (hostname !== 'hh.ru' && !hostname.endsWith('.hh.ru')) {
     throw new Error('Сначала откройте вкладку hh.ru');
   }
   return chrome.tabs.sendMessage(tab.id, { type });

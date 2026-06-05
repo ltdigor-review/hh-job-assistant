@@ -136,7 +136,7 @@ function normalizeResumeUrl(value) {
   if (!value) return '';
   try {
     const url = new URL(String(value).trim());
-    if (url.hostname !== 'hh.ru' || !/^\/resume\/[^/?#]+/.test(url.pathname)) {
+    if ((url.hostname !== 'hh.ru' && !url.hostname.endsWith('.hh.ru')) || !/^\/resume\/[^/?#]+/.test(url.pathname)) {
       return '';
     }
     return url.href;
