@@ -17,6 +17,7 @@ const DEFAULTS = {
     skipped: 0,
     errors: 0,
     lastError: '',
+    currentAction: '',
     updatedAt: null
   },
   runResults: []
@@ -26,6 +27,11 @@ const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопровод
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function sleep(ms) {
+  if (globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function storageGet(keys) {
@@ -142,6 +148,15 @@ function normalizeResumeUrl(value) {
     return url.href;
   } catch {
     return '';
+  }
+}
+
+function isHhUrl(value) {
+  try {
+    const hostname = new URL(String(value || '')).hostname;
+    return hostname === 'hh.ru' || hostname.endsWith('.hh.ru');
+  } catch {
+    return false;
   }
 }
 
@@ -338,21 +353,11 @@ async function waitForTabReady(tabId, timeoutMs = 30000) {
   });
 }
 
-function collectResumeLinksScript() {
-  const text = document.body?.innerText || '';
-  if (/\/account\/login|\/account\/signup/.test(location.pathname) || /captcha|подтвердите, что вы не робот|не робот/i.test(text)) {
-    return { ok: false, error: 'Login or captcha page detected', links: [] };
-  }
+function resumeRefreshPageActionScript(kind, actionText = '', status = 'running') {
+  const PANEL_ID = 'hh-job-assistant-resume-refresh-panel';
+  const CURSOR_ID = 'hh-job-assistant-resume-refresh-cursor';
+  const HIGHLIGHT_ATTR = 'data-hh-job-assistant-highlight';
 
-  const links = [...document.querySelectorAll('a[href*="/resume/"]')]
-    .map((link) => link.href)
-    .filter((href) => /\/resume\/[^/?#]+/.test(href))
-    .filter((href) => !/\/resume\/(?:new|edit|print|download)(?:[/?#]|$)/.test(new URL(href).pathname));
-
-  return { ok: true, links: [...new Set(links)].slice(0, 20) };
-}
-
-function clickResumeRefreshScript() {
   const visible = (node) => {
     if (!node) return false;
     if (node.disabled || node.getAttribute?.('aria-disabled') === 'true') return false;
@@ -361,8 +366,103 @@ function clickResumeRefreshScript() {
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
   };
 
-  const textOf = (node) => (node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const textOf = (node) =>
+    (
+      node?.innerText ||
+      node?.textContent ||
+      node?.value ||
+      node?.getAttribute?.('aria-label') ||
+      node?.getAttribute?.('title') ||
+      ''
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+  const sleep = (ms) => {
+    if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  };
+
+  const ensureOverlay = (text, state = 'running') => {
+    let panel = document.getElementById(PANEL_ID);
+    if (!panel) {
+      panel = document.createElement('aside');
+      panel.id = PANEL_ID;
+      panel.style.cssText = [
+        'position:fixed',
+        'right:16px',
+        'top:16px',
+        'z-index:2147483647',
+        'width:min(360px,calc(100vw - 32px))',
+        'background:#fff',
+        'border:1px solid #b6c2d1',
+        'box-shadow:0 16px 48px rgba(0,0,0,.22)',
+        'border-radius:8px',
+        'font:14px/1.45 Arial,sans-serif',
+        'color:#1f2937',
+        'padding:12px'
+      ].join(';');
+
+      const title = document.createElement('strong');
+      title.textContent = 'HH Job Assistant';
+      title.style.cssText = 'display:block;margin-bottom:6px';
+
+      const body = document.createElement('div');
+      body.id = `${PANEL_ID}-body`;
+      body.style.cssText = 'white-space:pre-wrap';
+
+      panel.append(title, body);
+      document.body.append(panel);
+    }
+
+    const body = document.getElementById(`${PANEL_ID}-body`);
+    if (body) {
+      body.textContent = text || 'Обновление резюме';
+      body.style.color = state === 'error' ? '#b91c1c' : '#1f2937';
+    }
+    panel.style.borderColor = state === 'error' ? '#f2a1a1' : state === 'complete' ? '#86efac' : '#b6c2d1';
+  };
+
+  const clearHighlights = () => {
+    for (const node of [...document.querySelectorAll(`[${HIGHLIGHT_ATTR}]`)]) {
+      node.style.outline = '';
+      node.style.boxShadow = '';
+      node.removeAttribute?.(HIGHLIGHT_ATTR);
+    }
+  };
+
+  const showCursorFor = (node) => {
+    let cursor = document.getElementById(CURSOR_ID);
+    if (!cursor) {
+      cursor = document.createElement('div');
+      cursor.id = CURSOR_ID;
+      cursor.style.cssText = [
+        'position:fixed',
+        'z-index:2147483647',
+        'width:14px',
+        'height:14px',
+        'border:2px solid #2563eb',
+        'border-radius:999px',
+        'background:#fff',
+        'box-shadow:0 4px 14px rgba(37,99,235,.35)',
+        'pointer-events:none',
+        'transition:left .15s ease,top .15s ease'
+      ].join(';');
+      document.body.append(cursor);
+    }
+
+    const rect = node.getBoundingClientRect();
+    cursor.style.left = `${Math.max(8, rect.left + Math.min(rect.width - 8, 16))}px`;
+    cursor.style.top = `${Math.max(8, rect.top + Math.min(rect.height - 8, 12))}px`;
+  };
+
+  const highlight = (node) => {
+    clearHighlights();
+    node.setAttribute?.(HIGHLIGHT_ATTR, 'true');
+    node.style.outline = '3px solid #2563eb';
+    node.style.boxShadow = '0 0 0 6px rgba(37,99,235,.18)';
+    node.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+    showCursorFor(node);
+  };
 
   const findByText = (root, selectors, patterns, rejectPatterns = []) => {
     const nodes = [...root.querySelectorAll(selectors.join(','))].filter(visible);
@@ -373,113 +473,208 @@ function clickResumeRefreshScript() {
     });
   };
 
+  const findControl = (patterns, rejectPatterns = []) =>
+    findByText(document, ['button', 'a', '[role="button"]', 'input[type="submit"]'], patterns, rejectPatterns);
+
   const isUnsafePage =
     /\/account\/login|\/account\/signup/.test(location.pathname) ||
     /captcha|подтвердите, что вы не робот|не робот/i.test(document.body.innerText || '');
 
-  if (isUnsafePage) {
-    return { ok: false, error: 'Login or captcha page detected' };
-  }
-
   return (async () => {
-    const button = findByText(document, ['button', 'a', '[role="button"]'], [
-      /^обновить$/i,
-      /поднять(?:\s+резюме)?(?:\s+в\s+поиске)?/i,
-      /обновить\s+(?:дату|резюме)/i,
-      /обновить\s+в\s+поиске/i
-    ], [
-      /редактировать/i,
-      /сохранить/i,
-      /создать/i
-    ]);
-    if (!button) return { ok: false, error: 'No resume refresh button found' };
-    button.click();
-    await sleep(1500);
-    return { ok: true, title: document.title, action: 'clicked_resume_button' };
+    if (kind === 'status') {
+      ensureOverlay(actionText, status);
+      return { ok: true, title: document.title, action: 'status' };
+    }
+
+    if (kind === 'complete') {
+      clearHighlights();
+      ensureOverlay(actionText || 'Готово', 'complete');
+      return { ok: true, title: document.title, action: 'complete' };
+    }
+
+    if (kind === 'error') {
+      ensureOverlay(actionText || 'Ошибка', 'error');
+      return { ok: true, title: document.title, action: 'error' };
+    }
+
+    if (isUnsafePage) {
+      ensureOverlay('Login or captcha page detected', 'error');
+      return { ok: false, error: 'Login or captcha page detected' };
+    }
+
+    if (kind === 'click_edit') {
+      ensureOverlay(actionText || 'Нажимаю Редактировать');
+      const button = findControl([/редактировать/i, /изменить/i], [/видимость/i, /настро/i]);
+      if (!button) return { ok: false, error: 'Edit button not found' };
+      highlight(button);
+      await sleep(500);
+      button.click();
+      await sleep(1000);
+      return { ok: true, title: document.title, action: 'clicked_edit', href: button.href || '' };
+    }
+
+    if (kind === 'click_save') {
+      ensureOverlay(actionText || 'Сохраняю без изменений');
+      const button = findControl([/сохранить/i, /^готово$/i, /save/i], [/отмена/i, /cancel/i]);
+      if (!button) return { ok: false, error: 'Save button not found' };
+      highlight(button);
+      await sleep(500);
+      button.click();
+      await sleep(1500);
+      return { ok: true, title: document.title, action: 'clicked_save' };
+    }
+
+    if (kind === 'find_raise' || kind === 'click_raise') {
+      ensureOverlay(actionText || 'Проверяю возможность поднятия');
+      const button = findControl(
+        [
+          /^обновить$/i,
+          /поднять(?:\s+резюме)?(?:\s+в\s+поиске)?/i,
+          /обновить\s+(?:дату|резюме)/i,
+          /обновить\s+в\s+поиске/i
+        ],
+        [/редактировать/i, /сохранить/i, /создать/i]
+      );
+      if (!button) {
+        return { ok: true, title: document.title, action: 'raise_not_available', raiseSkipped: true };
+      }
+      highlight(button);
+      if (kind === 'find_raise') {
+        return { ok: true, title: document.title, action: 'raise_available', raiseSkipped: false };
+      }
+      await sleep(500);
+      button.click();
+      await sleep(1500);
+      return { ok: true, title: document.title, action: 'clicked_raise', raiseSkipped: false };
+    }
+
+    return { ok: false, error: `Unknown resume refresh action: ${kind || 'empty'}` };
   })();
 }
 
-async function runResumeRefresh() {
-  await setRunState({ state: 'refreshing_resumes', lastError: '' });
+async function getActiveHhTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !isHhUrl(tab.url)) {
+    throw new Error('Откройте вкладку hh.ru и повторите');
+  }
+  return tab;
+}
 
-  const tab = await chrome.tabs.create({
-    url: 'https://hh.ru/applicant/resumes',
-    active: false
+async function executeResumeRefreshPageAction(tabId, kind, actionText = '', status = 'running') {
+  const [execution] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: resumeRefreshPageActionScript,
+    args: [kind, actionText, status]
   });
+  return execution?.result || { ok: false, error: 'No resume refresh page action result' };
+}
+
+async function setResumeRefreshAction(tabId, currentAction, status = 'running') {
+  await setRunState({ state: 'refreshing_resumes', currentAction, lastError: '' });
+  await executeResumeRefreshPageAction(tabId, 'status', currentAction, status).catch(() => {});
+}
+
+async function runCheckedResumePageAction(tabId, kind, currentAction) {
+  await setResumeRefreshAction(tabId, currentAction);
+  const result = await executeResumeRefreshPageAction(tabId, kind, currentAction);
+  if (!result.ok) {
+    throw new Error(result.error || `${currentAction} failed`);
+  }
+  return result;
+}
+
+async function runResumeRefresh() {
+  let tabId = null;
+  let currentAction = 'Открываю резюме';
+  let normalizedUrl = '';
 
   try {
-    await waitForTabReady(tab.id);
+    const { resumeUrl = '' } = await storageGet(['resumeUrl']);
+    normalizedUrl = normalizeResumeUrl(resumeUrl);
+    if (!normalizedUrl) {
+      throw new Error('Укажите Resume URL в настройках');
+    }
 
-    const [execution] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: collectResumeLinksScript
+    const tab = await getActiveHhTab();
+    tabId = tab.id;
+
+    await setRunState({
+      state: 'refreshing_resumes',
+      found: 1,
+      processed: 0,
+      skipped: 0,
+      errors: 0,
+      currentAction,
+      lastError: ''
     });
+    await executeResumeRefreshPageAction(tabId, 'status', currentAction).catch(() => {});
 
-    const collected = execution?.result || { ok: false, error: 'No resume links result', links: [] };
-    if (!collected.ok) {
-      throw new Error(collected.error || 'Resume link collection failed');
+    await chrome.tabs.update(tabId, { url: normalizedUrl });
+    await waitForTabReady(tabId, 30000);
+    await sleep(1000);
+    await executeResumeRefreshPageAction(tabId, 'status', currentAction).catch(() => {});
+
+    currentAction = 'Нажимаю Редактировать';
+    const editResult = await runCheckedResumePageAction(tabId, 'click_edit', currentAction);
+    await waitForTabReady(tabId, 30000);
+    await sleep(1000);
+
+    currentAction = 'Сохраняю без изменений';
+    const saveResult = await runCheckedResumePageAction(tabId, 'click_save', currentAction);
+    await waitForTabReady(tabId, 30000);
+    await sleep(1500);
+
+    currentAction = 'Проверяю возможность поднятия';
+    await setResumeRefreshAction(tabId, currentAction);
+    const raiseCheck = await executeResumeRefreshPageAction(tabId, 'find_raise', currentAction);
+    if (!raiseCheck.ok) {
+      throw new Error(raiseCheck.error || 'Raise check failed');
     }
 
-    const links = collected.links.length > 0 ? collected.links : ['https://hh.ru/applicant/resumes'];
-    const results = [];
-
-    for (const href of links) {
-      const resumeTab = await chrome.tabs.create({ url: href, active: false });
-      try {
-        await waitForTabReady(resumeTab.id, 30000);
-        const [resumeExecution] = await chrome.scripting.executeScript({
-          target: { tabId: resumeTab.id },
-          func: clickResumeRefreshScript
-        });
-        results.push({
-          href,
-          ...(resumeExecution?.result || { ok: false, error: 'No resume click result' })
-        });
-      } catch (error) {
-        results.push({
-          href,
-          ok: false,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      } finally {
-        if (resumeTab.id) {
-          await chrome.tabs.remove(resumeTab.id).catch(() => {});
-        }
-      }
+    let raiseResult = raiseCheck;
+    if (!raiseCheck.raiseSkipped) {
+      currentAction = 'Поднимаю резюме';
+      raiseResult = await runCheckedResumePageAction(tabId, 'click_raise', currentAction);
+      await waitForTabReady(tabId, 30000);
+      await sleep(1000);
     }
 
-    const failed = results.filter((item) => !item.ok);
     const result = {
-      ok: failed.length === 0,
-      results,
-      error: failed.length > 0 ? `${failed.length} resume refresh actions failed` : ''
+      ok: true,
+      results: [
+        {
+          href: normalizedUrl,
+          edit: editResult.action,
+          save: saveResult.action,
+          raise: raiseResult.action,
+          raiseSkipped: Boolean(raiseResult.raiseSkipped)
+        }
+      ],
+      raiseSkipped: Boolean(raiseResult.raiseSkipped),
+      error: ''
     };
 
     await appendRunResult({
       index: 0,
       vacancyId: '',
       title: 'Resume refresh',
-      url: tab.url || '',
-      status: result.ok ? 'resume_refresh_complete' : 'resume_refresh_error',
+      url: normalizedUrl,
+      status: result.raiseSkipped ? 'resume_refresh_saved' : 'resume_refresh_complete',
       coverLetterUsed: false,
       testDetected: false,
-      error: result.ok ? '' : result.error || 'Unknown refresh error'
+      error: ''
     });
 
-    if (!result.ok) {
-      throw new Error(result.error || 'Resume refresh failed');
-    }
-
-    await setRunState({ state: 'idle', lastError: '' });
+    await setRunState({ state: 'idle', processed: 1, currentAction: 'Готово', lastError: '' });
+    await executeResumeRefreshPageAction(tabId, 'complete', 'Готово', 'complete').catch(() => {});
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await setRunState({ state: 'error', errors: 1, lastError: message });
-    return { ok: false, error: message };
-  } finally {
-    if (tab.id) {
-      await chrome.tabs.remove(tab.id).catch(() => {});
+    await setRunState({ state: 'error', errors: 1, currentAction, lastError: message });
+    if (tabId) {
+      await executeResumeRefreshPageAction(tabId, 'error', `${currentAction}\n${message}`, 'error').catch(() => {});
     }
+    return { ok: false, error: message };
   }
 }
 

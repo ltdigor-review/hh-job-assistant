@@ -40,6 +40,9 @@ function renderState(runState = {}) {
   nodes.skipped.textContent = runState.skipped ?? 0;
   nodes.errors.textContent = runState.errors ?? 0;
   nodes.lastError.textContent = runState.lastError || '';
+  if (runState.currentAction) {
+    setStatus(runState.currentAction, runState.state === 'error');
+  }
 }
 
 function resultMessage(item) {
