@@ -25,7 +25,7 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 7. Закрепите расширение через значок пазла.
 
 <details>
-<summary>Скриншот страницы расширений Chrome</summary>
+<summary>**Скриншот страницы расширений Chrome**</summary>
 
 ![Chrome Developer mode and Load unpacked](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png)
 
