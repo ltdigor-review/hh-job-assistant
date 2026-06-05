@@ -308,7 +308,7 @@ function getOptionLabel(control) {
   const ariaLabel = control.getAttribute?.('aria-label') || '';
   const marker = textOf(label || control.parentElement || control);
   const value = control.value || control.getAttribute?.('value') || '';
-  return cleanText([...new Set([ariaLabel, marker, value].map(cleanText).filter(Boolean))].join('\n'));
+  return cleanText([...new Set([ariaLabel, marker, marker ? '' : value].map(cleanText).filter(Boolean))].join('\n'));
 }
 
 function getControlGroupKey(control, index) {
@@ -392,6 +392,13 @@ function findFollowupConfirmButton(root = getDialogRoot()) {
   ]);
 }
 
+async function clickFollowupConfirmButton(confirmButton, counters) {
+  await setRunState({ state: 'submitting', ...counters });
+  await waitBeforeClick();
+  confirmButton.click();
+  await sleep(window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 1800);
+}
+
 async function confirmFollowupIfNeeded(previousText, counters) {
   if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
     const confirmButton = findFollowupConfirmButton(getDialogRoot());
@@ -399,9 +406,7 @@ async function confirmFollowupIfNeeded(previousText, counters) {
       return false;
     }
 
-    await setRunState({ state: 'submitting', ...counters });
-    confirmButton.click();
-    await sleep(0);
+    await clickFollowupConfirmButton(confirmButton, counters);
     return true;
   }
 
@@ -411,10 +416,7 @@ async function confirmFollowupIfNeeded(previousText, counters) {
     return false;
   }
 
-  await setRunState({ state: 'submitting', ...counters });
-  await waitBeforeClick();
-  confirmButton.click();
-  await sleep(1800);
+  await clickFollowupConfirmButton(confirmButton, counters);
   return true;
 }
 
@@ -501,6 +503,14 @@ async function sendRuntimeMessage(message) {
 }
 
 async function setRunState(patch) {
+  const nextState = patch?.state || '';
+  if (nextState) {
+    setBusyCursor(
+      /^(scanning|applying|waiting_for_dialog|generating_cover_letter|filling_cover_letter|submitting|refreshing_resumes|scanning_chat|processing_chat|generating_chat_reply|sending_chat_reply)$/.test(
+        nextState
+      )
+    );
+  }
   await sendRuntimeMessage({ type: 'SET_RUN_STATE', patch });
 }
 
@@ -526,6 +536,12 @@ async function appendSkippedResponse(item, counters, status, error) {
 
 async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected }) {
   const root = getDialogRoot();
+  const followupConfirmButton = findFollowupConfirmButton(root);
+  if (followupConfirmButton) {
+    await clickFollowupConfirmButton(followupConfirmButton, counters);
+    return true;
+  }
+
   const blockedReason = detectBlockedResponseReason(root);
   if (blockedReason) {
     await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
@@ -724,7 +740,7 @@ function fillQuestionControls(groups, answerText) {
   for (const group of groups) {
     const scored = group.options
       .map((option) => ({ ...option, score: scoreChoice(option.label, answerText) }))
-      .filter((option) => option.score > 0);
+      .filter((option) => option.score >= 0.5);
 
     if (group.type === 'radio') {
       const best = scored.sort((left, right) => right.score - left.score)[0];
@@ -1016,8 +1032,15 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
     const root = getDialogRoot();
     const currentText = textOf(root);
     if (root !== document && currentText) return root;
-    if (currentText && currentText !== previousText && /отправить|сопровод|тест|отклик/i.test(currentText)) {
+    if (
+      currentText &&
+      currentText !== previousText &&
+      /отправить|сопровод|тест|отклик|ответить|ответьте|вопрос|работодател/i.test(currentText)
+    ) {
       return root;
+    }
+    if (isResponseFormPage() || findQuestionFields(document).length > 0 || findQuestionControlGroups(document).length > 0) {
+      return document;
     }
     await sleep(250);
   }
@@ -1093,6 +1116,7 @@ async function applyToVacancy(item, counters) {
     item.responseButton.click();
 
     root = await waitForDialogOrChange(beforeText);
+    await setRunState({ state: 'applying', ...counters, currentAction: `Проверяю форму отклика: ${item.title || item.vacancyId || 'вакансия'}` });
     await sleep(700);
   }
 

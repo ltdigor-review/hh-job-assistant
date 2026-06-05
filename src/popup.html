@@ -164,11 +164,20 @@
         gap: 8px;
       }
 
+      .run-panel,
+      .logs-panel {
+        margin-top: 12px;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
       dl {
         display: grid;
         grid-template-columns: 1fr auto;
         gap: 6px 12px;
-        margin: 14px 0 0;
+        margin: 0;
         padding: 10px;
         border: 1px solid #d8e0ea;
         border-radius: 8px;
@@ -199,10 +208,25 @@
         font-size: 12px;
       }
 
+      .logs-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .logs-head h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+
       #recentResults {
         display: grid;
         gap: 6px;
-        margin-top: 10px;
+        max-height: 170px;
+        overflow-y: auto;
+        padding-right: 2px;
       }
 
       .result {
@@ -306,22 +330,30 @@
       </div>
     </section>
 
-    <dl>
-      <dt>Статус</dt>
-      <dd id="state">Ожидание</dd>
-      <dt>Найдено</dt>
-      <dd id="found">0</dd>
-      <dt>Отправлено</dt>
-      <dd id="applied">0</dd>
-      <dt>Пропущено</dt>
-      <dd id="skipped">0</dd>
-      <dt>Ошибки</dt>
-      <dd id="errors">0</dd>
-    </dl>
+    <section id="runPanel" class="run-panel hidden" aria-label="Run status">
+      <dl>
+        <dt>Статус</dt>
+        <dd id="state">Ожидание</dd>
+        <dt>Найдено</dt>
+        <dd id="found">0</dd>
+        <dt>Отправлено</dt>
+        <dd id="applied">0</dd>
+        <dt>Пропущено</dt>
+        <dd id="skipped">0</dd>
+        <dt>Ошибки</dt>
+        <dd id="errors">0</dd>
+      </dl>
 
-    <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
-    <div id="lastError"></div>
-    <div id="recentResults" aria-live="polite"></div>
+      <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
+      <div id="lastError"></div>
+    </section>
+
+    <section id="logsPanel" class="logs-panel hidden" aria-label="Apply logs">
+      <div class="logs-head">
+        <h2>Логи</h2>
+      </div>
+      <div id="recentResults" aria-live="polite"></div>
+    </section>
     <section aria-label="Chat reports">
       <div class="reports-head">
         <h2>Chat reports</h2>

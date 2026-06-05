@@ -7,6 +7,8 @@ const nodes = {
   lastError: document.getElementById('lastError'),
   statusLine: document.getElementById('statusLine'),
   recentResults: document.getElementById('recentResults'),
+  runPanel: document.getElementById('runPanel'),
+  logsPanel: document.getElementById('logsPanel'),
   chatReports: document.getElementById('chatReports'),
   groqApiKey: document.getElementById('groqApiKey'),
   version: document.getElementById('version'),
@@ -35,6 +37,26 @@ const STATE_LABELS = {
 };
 
 nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
+let runPanelsRequested = false;
+
+function showRunPanels(showLogs = true) {
+  runPanelsRequested = true;
+  nodes.runPanel.classList.remove('hidden');
+  if (showLogs) {
+    nodes.logsPanel.classList.remove('hidden');
+  }
+}
+
+function updateRunPanelVisibility(runState = {}, runResults = []) {
+  const state = runState.state || 'idle';
+  const isActiveState = ['scanning', 'applying', 'waiting_for_dialog', 'generating_cover_letter', 'filling_cover_letter', 'submitting'].includes(state);
+  const shouldShow =
+    runPanelsRequested ||
+    isActiveState ||
+    Boolean(runState.lastError);
+  nodes.runPanel.classList.toggle('hidden', !shouldShow);
+  nodes.logsPanel.classList.toggle('hidden', !shouldShow);
+}
 
 function setHealth(node, text, state) {
   const dot = node.querySelector('.health-dot') || document.createElement('span');
@@ -97,7 +119,15 @@ function resultClass(item) {
 }
 
 function renderResults(runResults = []) {
-  const items = runResults.slice(-4).reverse();
+  const items = runResults.slice(-100).reverse();
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'result';
+    empty.textContent = 'Лог пуст.';
+    nodes.recentResults.replaceChildren(empty);
+    return;
+  }
+
   nodes.recentResults.replaceChildren(
     ...items.map((item) => {
       const node = document.createElement('div');
@@ -232,6 +262,7 @@ async function refreshStatus() {
   if (response?.ok) {
     renderState(response.runState);
     renderResults(response.runResults || []);
+    updateRunPanelVisibility(response.runState, response.runResults || []);
   }
 
   const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });
@@ -241,6 +272,7 @@ async function refreshStatus() {
 }
 
 async function runContentAction(type, label) {
+  showRunPanels();
   setStatus(label);
   const response = await sendToActiveTab(type);
   if (!response?.ok) {
@@ -252,6 +284,7 @@ async function runContentAction(type, label) {
 }
 
 async function runRuntimeAction(type, label) {
+  showRunPanels(type === 'START_CHAT_ASSIST' ? false : true);
   setStatus(label);
   const response = await chrome.runtime.sendMessage({ type });
   if (!response?.ok) {
@@ -279,6 +312,7 @@ document.getElementById('stop').addEventListener('click', () => {
 
 document.getElementById('refreshResumes').addEventListener('click', async () => {
   try {
+    showRunPanels(false);
     setStatus('Обновляю резюме...');
     const response = await chrome.runtime.sendMessage({ type: 'REFRESH_RESUMES_NOW' });
     if (!response?.ok) {

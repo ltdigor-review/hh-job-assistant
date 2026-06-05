@@ -19,6 +19,7 @@ async function runContentAutoApply({
   disabledSubmit = false,
   keepDialogOpenAfterSubmit = false,
   postSubmitDialogText = '',
+  hideDialogReadsAfterSubmit = 0,
   nextPageUrl = '',
   dailyLimit = 1,
   questionControls = [],
@@ -32,6 +33,7 @@ async function runContentAutoApply({
   let navigateUrl = '';
   let listener = null;
   let dialog = null;
+  let hiddenDialogReads = 0;
   const localStore = {};
 
   const textarea = new FakeElement({
@@ -45,8 +47,8 @@ async function runContentAutoApply({
   const selectableControls = questionControls.map((item) => {
     const input = new FakeElement({
       type: item.type,
-      value: item.label,
-      attrs: { type: item.type, name: item.name || '', value: item.label }
+      value: item.value || item.label,
+      attrs: { type: item.type, name: item.name || '', value: item.value || item.label }
     });
     input.parentElement = new FakeElement({ text: item.label });
     return { ...item, input };
@@ -78,6 +80,7 @@ async function runContentAutoApply({
             button: [followupConfirmButton, closeButton]
           }
         });
+        hiddenDialogReads = hideDialogReadsAfterSubmit;
       } else if (postSubmitDialogText) {
         dialog = new FakeElement({
           text: postSubmitDialogText,
@@ -89,6 +92,7 @@ async function runContentAutoApply({
             button: [submitButton, closeButton]
           }
         });
+        hiddenDialogReads = hideDialogReadsAfterSubmit;
       } else if (!keepDialogOpenAfterSubmit) {
         dialog = null;
       }
@@ -190,7 +194,13 @@ async function runContentAutoApply({
         return selectableControls.filter((item) => item.type === 'radio').map((item) => item.input);
       }
       if (startOnResponseForm && selector === 'button') return [submitButton];
-      if (selector === '[role="dialog"]') return dialog ? [dialog] : [];
+      if (selector === '[role="dialog"]') {
+        if (dialog && hiddenDialogReads > 0) {
+          hiddenDialogReads -= 1;
+          return [];
+        }
+        return dialog ? [dialog] : [];
+      }
       if (selector === '[data-qa*="modal"]') return [];
       if (selector === '.bloko-modal') return [];
       if (selector === '.magritte-modal') return [];
@@ -574,6 +584,28 @@ test('auto apply confirms country warning follow-up modal', async () => {
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
+test('auto apply confirms country warning that remains open during submit verification', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    followupDialogText: [
+      'Вы откликаетесь на вакансию в другой стране',
+      'Если это не удалённая работа и вы не указали, что хотите переехать, скорее всего, будет отказ',
+      'Все равно откликнуться',
+      'Отменить'
+    ].join('\n'),
+    hideDialogReadsAfterSubmit: 1
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.followupClicks, 1);
+  assert.equal(result.dialogOpen, false);
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
 test('auto apply fills required question on open response form', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
@@ -618,14 +650,17 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
     startOnResponseForm: true,
     hasQuestionField: true,
     questionControls: [
-      { type: 'checkbox', name: 'experience', label: 'управление продуктом / внутренним продуктом' },
-      { type: 'checkbox', name: 'experience', label: 'автоматизация бизнес-процессов' },
-      { type: 'checkbox', name: 'experience', label: 'разработка и внедрение AI / ML / LLM-решений' },
-      { type: 'radio', name: 'team_size', label: 'не управлял(а) командой' },
-      { type: 'radio', name: 'team_size', label: '4-7 человек' },
-      { type: 'checkbox', name: 'ai_tools', label: 'AI-агенты' },
-      { type: 'checkbox', name: 'ai_tools', label: 'поиск по базе знаний / RAG' },
-      { type: 'radio', name: 'hybrid', label: 'Да' },
+      { type: 'checkbox', name: 'experience', label: 'управление продуктом / внутренним продуктом', value: '361448749' },
+      { type: 'checkbox', name: 'experience', label: 'автоматизация бизнес-процессов', value: '361448750' },
+      { type: 'checkbox', name: 'experience', label: 'разработка и внедрение AI / ML / LLM-решений', value: '361448751' },
+      { type: 'radio', name: 'team_size', label: 'не управлял(а) командой', value: '361448754' },
+      { type: 'radio', name: 'team_size', label: '4-7 человек', value: '361448756' },
+      { type: 'checkbox', name: 'ai_tools', label: 'AI-агенты', value: '361448761' },
+      { type: 'checkbox', name: 'ai_tools', label: 'поиск по базе знаний / RAG', value: '361448762' },
+      { type: 'checkbox', name: 'ai_delivery', label: 'да, руководил(а) командой внедрения', value: '361448768' },
+      { type: 'checkbox', name: 'ai_delivery', label: 'был опыт пилотов / тестирования, но без внедрения в регулярную работу', value: '361448770' },
+      { type: 'checkbox', name: 'ai_delivery', label: 'нет, но есть опыт автоматизации без AI', value: '361448771' },
+      { type: 'radio', name: 'hybrid', label: 'Да', value: '361448774' },
       { type: 'radio', name: 'hybrid', label: 'Свой вариант' }
     ],
     groqResponse: {
@@ -634,6 +669,7 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
         'Основной опыт: управление продуктом / внутренним продуктом; автоматизация бизнес-процессов; разработка и внедрение AI / ML / LLM-решений.',
         'Команда: 4-7 человек.',
         'AI-инструменты: AI-агенты; поиск по базе знаний / RAG.',
+        'Внедрение AI / ML / LLM: да, руководил(а) командой внедрения.',
         'Кейс: проблема бизнеса -> решение -> команда -> результат: автоматизировал обработку документов, сократил ручную работу.',
         'Гибридный график: Да.',
         'Доход: 250 000 руб. на руки.'
@@ -652,6 +688,7 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
     '4-7 человек',
     'AI-агенты',
     'поиск по базе знаний / RAG',
+    'да, руководил(а) командой внедрения',
     'Да'
   ]);
   assert.match(result.textareaValue, /Основной опыт|Доход/);
