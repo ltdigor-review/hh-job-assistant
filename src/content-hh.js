@@ -1693,6 +1693,37 @@ async function startRun(mode) {
   return handleAutoApply(limit);
 }
 
+function consumeAutoStartParam() {
+  try {
+    const url = new URL(location.href);
+    const mode = url.searchParams.get('hhjaAutoStart');
+    if (mode !== 'live' && mode !== 'dry') {
+      return '';
+    }
+    url.searchParams.delete('hhjaAutoStart');
+    window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return mode;
+  } catch {
+    return '';
+  }
+}
+
+async function maybeStartFromUrlParam() {
+  const mode = consumeAutoStartParam();
+  if (!mode) {
+    return;
+  }
+
+  try {
+    await appendAgentLog('url_trigger_start', { mode, url: location.href });
+    await startRun(mode === 'dry' ? 'dry' : 'live');
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
+    await setRunState({ state: 'error', lastError: messageText });
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
@@ -1737,6 +1768,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async () => {
+  try {
+    await appendAgentLog('page_trigger_start_auto_apply', { url: location.href });
+    await startRun('live');
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
+    await setRunState({ state: 'error', lastError: messageText });
+  }
+});
+
 continueQueuedAutoApply().catch(async (error) => {
   const messageText = error instanceof Error ? error.message : String(error);
   await chrome.storage.local.set({ autoApplyQueue: { active: false } });
@@ -1746,5 +1788,10 @@ continueQueuedAutoApply().catch(async (error) => {
 continueSearchAutoApply().catch(async (error) => {
   const messageText = error instanceof Error ? error.message : String(error);
   await chrome.storage.local.set({ autoApplySearchQueue: { active: false } });
+  await setRunState({ state: 'error', lastError: messageText });
+});
+
+maybeStartFromUrlParam().catch(async (error) => {
+  const messageText = error instanceof Error ? error.message : String(error);
   await setRunState({ state: 'error', lastError: messageText });
 });

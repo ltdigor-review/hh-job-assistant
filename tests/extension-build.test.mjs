@@ -81,6 +81,8 @@ test('javascript files parse', async () => {
     'src/content-hh.js',
     'src/options.js',
     'src/popup.js',
+    'scripts/inspect-extension-log.mjs',
+    'scripts/start-extension-auto-apply.mjs',
     'scripts/hh-live-smoke.mjs'
   ];
 
@@ -521,6 +523,28 @@ test('content script registers one message listener', async () => {
 
   assert.equal(listenerCount, 1);
   assert.match(source, /GET_CONTENT_STATUS/);
+  assert.match(source, /hh-job-assistant:start-auto-apply/);
+  assert.match(source, /page_trigger_start_auto_apply/);
+  assert.match(source, /hhjaAutoStart/);
+  assert.match(source, /url_trigger_start/);
+});
+
+test('repo script opens hh auto-start URL for extension auto apply', async () => {
+  const js = await readFile(new URL('scripts/start-extension-auto-apply.mjs', root), 'utf8');
+
+  assert.match(js, /hhjaAutoStart/);
+  assert.doesNotMatch(js, /execute targetTab javascript/);
+  assert.match(js, /HHJA_CHROME_PROFILE/);
+  assert.match(js, /--profile-directory/);
+  assert.match(js, /URL must be an hh\.ru vacancy search page/);
+});
+
+test('extension log inspector reads Chrome profile storage', async () => {
+  const js = await readFile(new URL('scripts/inspect-extension-log.mjs', root), 'utf8');
+
+  assert.match(js, /Local Extension Settings/);
+  assert.match(js, /run_result/);
+  assert.match(js, /HHJA_EXTENSION_ID/);
 });
 
 test('popup has ordered controls wired to Groq key, version, results, and actions', async () => {
