@@ -70,6 +70,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function appendAgentLog(event, details = {}) {
+  await globalThis.HHJobAssistantLog?.append?.('content', event, details);
+}
+
 function randomDelay(minMs, maxMs) {
   const min = Math.max(0, Number(minMs) || 0);
   const max = Math.max(min, Number(maxMs) || min);
@@ -1681,6 +1685,7 @@ async function startRun(mode) {
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   await chrome.storage.local.set({ runResults: [], autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
+  await appendAgentLog('start_run', { mode, limit, url: location.href });
 
   if (mode === 'dry') {
     return handleDryRun(limit);
@@ -1715,6 +1720,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         stopRequested = true;
         stopReason = 'user_stop';
         await chrome.storage.local.set({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
+        await appendAgentLog('stop_run', { activeRunId, url: location.href });
         await setRunState({ state: 'stopped' });
         sendResponse({ ok: true, activeRunId });
         break;
@@ -1723,6 +1729,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   })().catch(async (error) => {
     const messageText = error instanceof Error ? error.message : String(error);
+    await appendAgentLog('content_message_error', { type: message?.type || '', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
     sendResponse({ ok: false, error: messageText });
   });

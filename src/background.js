@@ -1,3 +1,5 @@
+import './agent-log.js';
+
 const DEFAULTS = {
   groqModel: 'llama-3.3-70b-versatile',
   resumeText: '',
@@ -48,6 +50,10 @@ async function storageSet(value) {
   return chrome.storage.local.set(value);
 }
 
+async function appendAgentLog(event, details = {}) {
+  await globalThis.HHJobAssistantLog?.append?.('background', event, details);
+}
+
 async function ensureDefaults() {
   const current = await storageGet(Object.keys(DEFAULTS));
   const patch = {};
@@ -78,52 +84,67 @@ async function ensureDefaults() {
 
 async function setRunState(patch) {
   const { runState = DEFAULTS.runState } = await storageGet(['runState']);
+  const nextRunState = {
+    ...DEFAULTS.runState,
+    ...runState,
+    ...patch,
+    updatedAt: nowIso()
+  };
   await storageSet({
-    runState: {
-      ...DEFAULTS.runState,
-      ...runState,
-      ...patch,
-      updatedAt: nowIso()
-    }
+    runState: nextRunState
+  });
+  await appendAgentLog('run_state', {
+    state: nextRunState.state,
+    found: nextRunState.found,
+    processed: nextRunState.processed,
+    applied: nextRunState.applied,
+    skipped: nextRunState.skipped,
+    errors: nextRunState.errors,
+    currentAction: nextRunState.currentAction,
+    lastError: nextRunState.lastError
   });
 }
 
 async function appendRunResult(item) {
   const { runResults = [] } = await storageGet(['runResults']);
+  const result = {
+    ...item,
+    timestamp: item.timestamp || nowIso()
+  };
   await storageSet({
     runResults: [
       ...runResults.slice(-199),
-      {
-        ...item,
-        timestamp: item.timestamp || nowIso()
-      }
+      result
     ]
   });
+  await appendAgentLog('run_result', result);
 }
 
 async function appendChatReport(item) {
   const { chatReports = [] } = await storageGet(['chatReports']);
+  const report = {
+    id: item.id || `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    timestamp: item.timestamp || nowIso(),
+    chatUrl: item.chatUrl || '',
+    employerName: item.employerName || '',
+    vacancyTitle: item.vacancyTitle || '',
+    vacancyUrl: item.vacancyUrl || '',
+    status: item.status || 'reported',
+    reason: item.reason || '',
+    contactType: item.contactType || '',
+    contactText: item.contactText || '',
+    questionText: item.questionText || '',
+    draftAnswer: item.draftAnswer || '',
+    sent: Boolean(item.sent),
+    error: item.error || ''
+  };
   await storageSet({
     chatReports: [
       ...chatReports.slice(-199),
-      {
-        id: item.id || `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-        timestamp: item.timestamp || nowIso(),
-        chatUrl: item.chatUrl || '',
-        employerName: item.employerName || '',
-        vacancyTitle: item.vacancyTitle || '',
-        vacancyUrl: item.vacancyUrl || '',
-        status: item.status || 'reported',
-        reason: item.reason || '',
-        contactType: item.contactType || '',
-        contactText: item.contactText || '',
-        questionText: item.questionText || '',
-        draftAnswer: item.draftAnswer || '',
-        sent: Boolean(item.sent),
-        error: item.error || ''
-      }
+      report
     ]
   });
+  await appendAgentLog('chat_report', report);
 }
 
 function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vacancyText, extraText }) {
@@ -366,6 +387,13 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   }
 
   const resumeText = await getResumeContext();
+  await appendAgentLog('groq_request_start', {
+    task,
+    model: groqModel || DEFAULTS.groqModel,
+    vacancyTextLength: String(vacancyText).length,
+    extraTextLength: String(extraText).length,
+    resumeTextLength: String(resumeText).length
+  });
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -390,14 +418,21 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
+    await appendAgentLog('groq_request_error', {
+      task,
+      status: response.status,
+      responseText: text.slice(0, 200)
+    });
     throw new Error(`Groq request failed: ${response.status} ${text.slice(0, 200)}`);
   }
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content?.trim();
   if (!content) {
+    await appendAgentLog('groq_request_error', { task, status: response.status, error: 'empty_response' });
     throw new Error('Groq returned an empty response');
   }
+  await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
   return content;
 }
 
