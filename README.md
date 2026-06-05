@@ -4,8 +4,6 @@
 
 Chrome extension for hh.ru. Works only in a Chrome profile where you are already signed in to hh.ru.
 
-![Chrome Developer mode and Load unpacked](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png)
-
 ## Русский
 
 ### Что умеет
@@ -25,6 +23,13 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 5. Нажмите `Load unpacked` / `Загрузить распакованное расширение`.
 6. Выберите папку, где лежит `manifest.json`.
 7. Закрепите расширение через значок пазла.
+
+<details>
+<summary>Скриншот страницы расширений Chrome</summary>
+
+![Chrome Developer mode and Load unpacked](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png)
+
+</details>
 
 После обновления файлов нажмите `Reload` у расширения на `chrome://extensions`.
 
@@ -75,6 +80,13 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 5. Click `Load unpacked`.
 6. Select the folder containing `manifest.json`.
 7. Pin the extension with the puzzle icon.
+
+<details>
+<summary>Chrome extensions page screenshot</summary>
+
+![Chrome Developer mode and Load unpacked](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png)
+
+</details>
 
 After changing files, click `Reload` for the extension on `chrome://extensions`.
 
