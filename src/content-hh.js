@@ -56,8 +56,8 @@ const HH_SELECTORS = {
   ]
 };
 
-const CLICK_DELAY_MIN_MS = 2000;
-const CLICK_DELAY_MAX_MS = 4000;
+const CLICK_DELAY_MIN_MS = 500;
+const CLICK_DELAY_MAX_MS = 1200;
 
 let stopRequested = false;
 let stopReason = '';
@@ -522,8 +522,8 @@ async function getConfig() {
   ]);
   return {
     dailyLimit: Number(values.dailyLimit) || 20,
-    delayMinMs: Number(values.delayMinMs) || 8000,
-    delayMaxMs: Number(values.delayMaxMs) || 15000,
+    delayMinMs: Number(values.delayMinMs) || 2500,
+    delayMaxMs: Number(values.delayMaxMs) || 5000,
     chatUnreadOnly: values.chatUnreadOnly !== false,
     chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : 'draft',
     chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || 10, 100))

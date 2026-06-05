@@ -7,8 +7,8 @@ const DEFAULTS = {
   expectedSalary: '',
   coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
-  delayMinMs: 8000,
-  delayMaxMs: 15000,
+  delayMinMs: 2500,
+  delayMaxMs: 5000,
   chatUnreadOnly: true,
   chatReplyMode: 'draft',
   chatLimit: 10,
@@ -28,6 +28,8 @@ const DEFAULTS = {
 };
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
+const OLD_DEFAULT_DELAY_MIN_MS = 8000;
+const OLD_DEFAULT_DELAY_MAX_MS = 15000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -62,6 +64,11 @@ async function ensureDefaults() {
 
   if (current.coverPrompt === OLD_DEFAULT_COVER_PROMPT) {
     patch.coverPrompt = DEFAULTS.coverPrompt;
+  }
+
+  if (current.delayMinMs === OLD_DEFAULT_DELAY_MIN_MS && current.delayMaxMs === OLD_DEFAULT_DELAY_MAX_MS) {
+    patch.delayMinMs = DEFAULTS.delayMinMs;
+    patch.delayMaxMs = DEFAULTS.delayMaxMs;
   }
 
   if (Object.keys(patch).length > 0) {
