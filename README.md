@@ -21,8 +21,7 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 3. Откройте в Chrome `chrome://extensions`.
 4. Включите `Developer mode` / `Режим разработчика`.
 5. Нажмите `Load unpacked` / `Загрузить распакованное расширение`.
-6. Выберите папку, где лежит `manifest.json`.
-7. Закрепите расширение через значок пазла.
+6. Выберите папку с расширением (не архив).
 
 <details>
 <summary>Скриншот страницы расширений Chrome</summary>
