@@ -207,7 +207,7 @@ async function sendToActiveTab(type) {
 async function refreshHealth() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
-    setHealth(nodes.extensionStatus, response?.ok ? 'Запущено' : 'Ошибка', response?.ok ? 'ok' : 'error');
+    setHealth(nodes.extensionStatus, response?.ok ? 'Готово к работе' : 'Ошибка', response?.ok ? 'ok' : 'error');
   } catch (error) {
     setHealth(nodes.extensionStatus, 'Не отвечает', 'error');
   }
@@ -221,7 +221,7 @@ async function refreshHealth() {
     }
 
     const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CONTENT_STATUS' });
-    setHealth(nodes.tabStatus, response?.ok ? 'hh.ru подключена' : 'Нет связи', response?.ok ? 'ok' : 'error');
+    setHealth(nodes.tabStatus, response?.ok ? 'hh.ru подключен' : 'Нет связи', response?.ok ? 'ok' : 'error');
   } catch (error) {
     setHealth(nodes.tabStatus, 'Нет связи', 'error');
   }

@@ -1797,7 +1797,7 @@ test('auto apply counts already confirmed response page as applied', async () =>
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
 });
 
-test('auto apply queues hh response link and opens employer question page', async () => {
+test('auto apply clicks hh response button before using response link recovery queue', async () => {
   const responseHref = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&hhtmFrom=vacancy_search_list';
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
@@ -1806,12 +1806,14 @@ test('auto apply queues hh response link and opens employer question page', asyn
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.queued, true);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.navigateUrl, responseHref);
-  assert.equal(result.localStore.autoApplyQueue.active, true);
-  assert.equal(result.localStore.autoApplyQueue.sourceUrl, 'https://hh.ru/search/vacancy?text=java');
-  assert.equal(result.localStore.autoApplyQueue.items[0].responseUrl, responseHref);
+  assert.equal(result.response.queued, undefined);
+  assert.equal(result.response.navigated, undefined);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.ok(result.states.some((state) => /Открываю форму отклика: Java Developer/.test(state.currentAction || '')));
+  assert.ok(!result.states.some((state) => /Открываю страницу вопросов HH/.test(state.currentAction || '')));
 });
 
 test('auto apply navigates to next hh search page when limit remains', async () => {

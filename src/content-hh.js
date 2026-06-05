@@ -942,7 +942,11 @@ async function applyToVacancy(item, counters) {
   if (item.responseFormOpen) {
     root = document;
   } else {
-    await setRunState({ state: 'waiting_for_dialog', ...counters });
+    await setRunState({
+      state: 'waiting_for_dialog',
+      ...counters,
+      currentAction: `Открываю форму отклика: ${item.title || item.vacancyId || 'вакансия'}`
+    });
     const beforeText = textOf(document.body);
     item.responseButton.scrollIntoView({ block: 'center', inline: 'center' });
     await sleep(250);
@@ -1417,18 +1421,21 @@ async function handleAutoApply(limit, existingCounters = null) {
         counters,
         config
       });
-      await setRunState({ state: 'applying', ...counters, currentAction: 'Открываю страницу вопросов HH', lastError: '' });
-      navigateTo(item.responseUrl);
-      return { ok: true, ...counters, queued: true, navigated: true, nextPageUrl: item.responseUrl };
     }
 
     counters.processed += 1;
 
     try {
       await applyToVacancy(item, counters);
+      if (item.responseUrl) {
+        await saveQueue({ active: false });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       counters.errors += 1;
+      if (item.responseUrl) {
+        await saveQueue({ active: false });
+      }
       await appendResult({
         index: item.index,
         vacancyId: item.vacancyId,
