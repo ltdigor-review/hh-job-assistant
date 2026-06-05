@@ -1,228 +1,108 @@
 # HH Job Assistant
 
-Chrome extension for applying to hh.ru vacancies from an already signed-in account.
+[Русский](#русский) | [English](#english)
+
+Chrome extension for hh.ru. Works only in a Chrome profile where you are already signed in to hh.ru.
 
 ## Русский
 
-HH Job Assistant помогает:
+### Что умеет
 
-- находить вакансии на открытой странице hh.ru;
-<<<<<<< ours
-- отправлять отклики до заданного лимита, по умолчанию `20`;
-- продолжать отклики через страницы `/applicant/vacancy_response`, когда hh.ru открывает отдельную форму;
-- писать сопроводительные письма через Groq;
-- отвечать на вопросы работодателя через Groq;
-- подставлять `Expected salary for questions` в вопросы про зарплату;
-- показывать в popup последние результаты, ошибки и пропуски;
-- обновлять резюме вручную или по расписанию, пока Chrome открыт.
-=======
-- отправлять отклики до заданного лимита;
-- писать короткие сопроводительные письма через Groq;
-- обновлять резюме вручную или по расписанию, пока Chrome открыт;
-- показывать подсказки по тестам через Groq.
->>>>>>> theirs
+- Находит вакансии на открытой странице hh.ru.
+- Показывает предпросмотр перед откликами.
+- Отправляет отклики до лимита, по умолчанию `20`.
+- Заполняет сопроводительные письма и вопросы через Groq.
+- Может вручную обновить резюме на hh.ru.
 
 ### Установка
 
-1. Скачайте проект с GitHub через `Code` -> `Download ZIP`.
-2. Распакуйте ZIP в обычную папку. Не удаляйте ее после установки.
+1. Скачайте репозиторий: `Code` -> `Download ZIP`.
+2. Распакуйте ZIP в папку и не удаляйте ее.
 3. Откройте в Chrome `chrome://extensions`.
 4. Включите `Developer mode` / `Режим разработчика`.
 5. Нажмите `Load unpacked` / `Загрузить распакованное расширение`.
-6. Выберите папку `hh-job-assistant`, где лежит `manifest.json`.
-7. Закрепите расширение через значок пазла в Chrome.
+6. Выберите папку, где лежит `manifest.json`.
+7. Закрепите расширение через значок пазла.
 
-<<<<<<< ours
-После изменения файлов расширения нажмите reload у расширения на странице `chrome://extensions`, иначе Chrome продолжит использовать старую версию.
+После обновления файлов нажмите `Reload` у расширения на `chrome://extensions`.
 
-### Быстрая настройка в popup
-
-1. Нажмите иконку `HH Job Assistant`.
-2. В поле `Groq API key` вставьте ключ вида `gsk_...`.
-3. Нажмите `Save key`.
-4. Нажмите `Test Groq`.
-
-Если тест успешен, popup покажет `Groq OK`.
-
-### Полная настройка
-=======
 ### Настройка
->>>>>>> theirs
 
-Откройте `Настройки` расширения и заполните нужные поля:
+1. Нажмите иконку расширения.
+2. Вставьте `Groq API key`, если нужны письма и ответы на вопросы.
+3. Нажмите `Save key`, затем `Test Groq`.
+4. Откройте `Настройки`.
+5. Укажите `Resume URL on hh.ru`: ссылку вида `https://hh.ru/resume/...`.
+6. Проверьте лимит откликов, задержки и зарплату для вопросов.
+7. Нажмите `Save`.
 
-- `Groq API key` — ключ из [Groq Quickstart](https://console.groq.com/docs/quickstart);
-- `Groq model` — модель, по умолчанию `llama-3.3-70b-versatile`;
-- `Resume text` — краткий текст резюме;
-- `Expected salary for questions` — зарплата для ответов на вопросы работодателя;
-- `Cover-letter prompt` — инструкция для сопроводительного письма;
-<<<<<<< ours
-- `Daily apply limit` — лимит откликов, по умолчанию `20`;
-=======
-- `Daily apply limit` — лимит откликов;
->>>>>>> theirs
-- `Delay min/max` — пауза между действиями;
-- `Enable daily resume refresh` — ежедневное обновление резюме, пока Chrome открыт.
-
-Нажмите `Save`. Если добавили Groq key, нажмите `Test Groq`.
+Groq key можно взять в [Groq Console](https://console.groq.com/docs/quickstart).
 
 ### Использование
 
-1. Войдите в аккаунт на [hh.ru](https://hh.ru).
-2. Откройте страницу с вакансиями, лучше рекомендации по резюме.
-<<<<<<< ours
-3. Нажмите иконку `HH Job Assistant`.
-=======
-3. Нажмите иконку HH Job Assistant.
->>>>>>> theirs
-4. Нажмите `Предпросмотр`, чтобы проверить найденные вакансии.
-5. Нажмите `Запустить отклики`.
-6. Для остановки нажмите `Стоп`.
-
-<<<<<<< ours
-Popup показывает:
-
-- счетчики найденных, проверенных, отправленных, пропущенных и ошибочных откликов;
-- последний статус;
-- последние результаты;
-- явные предупреждения, например `Skipped: ... needs a cover letter, but Groq API key is missing`.
-
-### Что будет без Groq key
-
-Обычные отклики без письма работают.
-
-Если вакансия задает вопрос про зарплату, расширение использует `Expected salary for questions`.
-
-Если вакансия требует сопроводительное письмо, расширение может вставить короткий fallback-текст. Для нормального письма под конкретную вакансию нужен Groq key.
-
-Если вакансия требует сложные ответы или тест, а ключа Groq нет и fallback невозможен, вакансия пропускается. Popup явно покажет причину пропуска:
-
-`Skipped because Groq API key is missing: vacancy needs employer questions/test assistance.`
+1. Войдите в [hh.ru](https://hh.ru) в Chrome.
+2. Откройте страницу с вакансиями.
+3. Нажмите `Предпросмотр`.
+4. Если все нормально, нажмите `Запустить отклики`.
+5. Для остановки нажмите `Стоп`.
+6. Для ручного поднятия резюме нажмите `Обновить резюме`.
 
 ### Важно
 
 - Расширение не хранит логин и пароль hh.ru.
-- Нужно заранее войти в hh.ru в Chrome.
 - Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную.
+- Без Groq key обычные отклики работают, но сложные письма, вопросы и тесты могут быть пропущены.
 - Не публикуйте Groq key в GitHub, чатах, скриншотах или логах.
-- После обновления кода расширения всегда нажимайте reload в `chrome://extensions`.
-=======
-Без Groq key обычные отклики работают, но вакансии с обязательным письмом или тестом пропускаются.
-
-Важно: расширение не хранит логин и пароль hh.ru. Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную. Не публикуйте Groq key в GitHub, чатах, скриншотах или логах.
->>>>>>> theirs
-
----
 
 ## English
 
-HH Job Assistant helps you:
+### Features
 
-- detect vacancies on the current hh.ru page;
-<<<<<<< ours
-- submit applications up to the configured limit, default `20`;
-- continue through `/applicant/vacancy_response` pages when hh.ru opens a separate response form;
-- write cover letters with Groq;
-- answer employer questions with Groq;
-- use `Expected salary for questions` for salary questions;
-- show recent results, errors, and skipped vacancies in the popup;
-- refresh resumes manually or on schedule while Chrome is open.
-=======
-- submit applications up to a configured limit;
-- write short cover letters with Groq;
-- refresh resumes manually or on schedule while Chrome is open;
-- show Groq hints for tests.
->>>>>>> theirs
+- Finds vacancies on the current hh.ru page.
+- Shows a preview before applying.
+- Sends applications up to the configured limit, default `20`.
+- Fills cover letters and employer questions with Groq.
+- Can manually refresh your hh.ru resume.
 
 ### Install
 
-1. Download the project from GitHub: `Code` -> `Download ZIP`.
-2. Unzip it into a normal folder. Keep this folder after installation.
+1. Download the repository: `Code` -> `Download ZIP`.
+2. Unzip it into a folder and keep that folder.
 3. Open `chrome://extensions` in Chrome.
-4. Turn on `Developer mode`.
+4. Enable `Developer mode`.
 5. Click `Load unpacked`.
-6. Select the `hh-job-assistant` folder containing `manifest.json`.
-7. Pin the extension through the Chrome puzzle icon.
+6. Select the folder containing `manifest.json`.
+7. Pin the extension with the puzzle icon.
 
-<<<<<<< ours
-After changing extension files, click reload for the extension on `chrome://extensions`; otherwise Chrome keeps using the old version.
+After changing files, click `Reload` for the extension on `chrome://extensions`.
 
-### Quick Popup Setup
+### Setup
 
-1. Click the `HH Job Assistant` icon.
-2. Paste a `gsk_...` key into `Groq API key`.
-3. Click `Save key`.
-4. Click `Test Groq`.
+1. Click the extension icon.
+2. Paste a `Groq API key` if you need letters and question answers.
+3. Click `Save key`, then `Test Groq`.
+4. Open `Настройки`.
+5. Set `Resume URL on hh.ru`: a link like `https://hh.ru/resume/...`.
+6. Check the apply limit, delays, and expected salary for questions.
+7. Click `Save`.
 
-If the test succeeds, the popup shows `Groq OK`.
-
-### Full Configuration
-=======
-### Configure
->>>>>>> theirs
-
-Open extension `Настройки` and set what you need:
-
-- `Groq API key` — key from [Groq Quickstart](https://console.groq.com/docs/quickstart);
-- `Groq model` — default `llama-3.3-70b-versatile`;
-- `Resume text` — short resume text;
-- `Expected salary for questions` — salary used for employer-question answers;
-- `Cover-letter prompt` — cover-letter instruction;
-<<<<<<< ours
-- `Daily apply limit` — application limit, default `20`;
-=======
-- `Daily apply limit` — application limit;
->>>>>>> theirs
-- `Delay min/max` — delay between actions;
-- `Enable daily resume refresh` — daily resume refresh while Chrome is open.
-
-Click `Save`. If you added a Groq key, click `Test Groq`.
+You can create a Groq key in [Groq Console](https://console.groq.com/docs/quickstart).
 
 ### Use
 
-1. Sign in at [hh.ru](https://hh.ru).
-2. Open a vacancies page, preferably resume recommendations.
-<<<<<<< ours
-3. Click the `HH Job Assistant` icon.
-=======
-3. Click the HH Job Assistant icon.
->>>>>>> theirs
-4. Click `Предпросмотр` to check detected vacancies.
-5. Click `Запустить отклики`.
-6. Click `Стоп` to stop.
-
-<<<<<<< ours
-The popup shows:
-
-- found, processed, applied, skipped, and error counters;
-- the latest status;
-- recent results;
-- explicit warnings, such as `Skipped: ... needs a cover letter, but Groq API key is missing`.
-
-### Without a Groq Key
-
-Normal applications without a cover letter work.
-
-For salary questions, the extension uses `Expected salary for questions`.
-
-For required cover letters, the extension can insert a short fallback text. For a proper vacancy-specific letter, configure a Groq key.
-
-If a vacancy needs complex employer answers or a test and no fallback is possible, the vacancy is skipped. The popup shows the reason explicitly:
-
-`Skipped because Groq API key is missing: vacancy needs employer questions/test assistance.`
+1. Sign in to [hh.ru](https://hh.ru) in Chrome.
+2. Open a vacancies page.
+3. Click `Предпросмотр`.
+4. If the preview looks right, click `Запустить отклики`.
+5. Click `Стоп` to stop.
+6. Click `Обновить резюме` to manually refresh your resume.
 
 ### Important
 
 - The extension does not store your hh.ru login or password.
-- You must already be signed in to hh.ru in Chrome.
-- If captcha or login appears, stop the extension and complete the check manually.
+- If captcha or login appears, stop the extension and complete it manually.
+- Without a Groq key, normal applications work, but complex letters, questions, and tests may be skipped.
 - Do not publish your Groq key in GitHub, chats, screenshots, or logs.
-- After updating extension code, always reload it on `chrome://extensions`.
-=======
-Without a Groq key, normal applications work, but vacancies requiring a cover letter or test are skipped.
-
-Important: the extension does not store your hh.ru login or password. If captcha or login appears, stop the extension and complete the check manually. Do not publish your Groq key in GitHub, chats, screenshots, or logs.
->>>>>>> theirs
 
 ## Developer Checks
 
