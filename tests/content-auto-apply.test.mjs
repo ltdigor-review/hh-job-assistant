@@ -594,6 +594,71 @@ test('auto apply fills required question on open response form', async () => {
   assert.equal(result.bodyCursor, '');
 });
 
+test('auto apply fills mixed checkbox radio and open employer questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Для отклика необходимо ответить на несколько вопросов работодателя',
+      'Какой у вас основной опыт за последние 2-3 года?',
+      'Можно выбрать несколько вариантов:',
+      'управление продуктом / внутренним продуктом',
+      'автоматизация бизнес-процессов',
+      'разработка и внедрение AI / ML / LLM-решений',
+      'Командой какого размера вы управляли напрямую?',
+      '4-7 человек',
+      'Какие AI-инструменты или подходы вы использовали на практике?',
+      'AI-агенты',
+      'поиск по базе знаний / RAG',
+      'Опишите один самый показательный кейс',
+      'Готовы ли вы работать в гибридном графике с посещением офиса у м. Нагатинская?',
+      'Да',
+      'На какой уровень дохода вы ориентируетесь?'
+    ].join('\n'),
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionControls: [
+      { type: 'checkbox', name: 'experience', label: 'управление продуктом / внутренним продуктом' },
+      { type: 'checkbox', name: 'experience', label: 'автоматизация бизнес-процессов' },
+      { type: 'checkbox', name: 'experience', label: 'разработка и внедрение AI / ML / LLM-решений' },
+      { type: 'radio', name: 'team_size', label: 'не управлял(а) командой' },
+      { type: 'radio', name: 'team_size', label: '4-7 человек' },
+      { type: 'checkbox', name: 'ai_tools', label: 'AI-агенты' },
+      { type: 'checkbox', name: 'ai_tools', label: 'поиск по базе знаний / RAG' },
+      { type: 'radio', name: 'hybrid', label: 'Да' },
+      { type: 'radio', name: 'hybrid', label: 'Свой вариант' }
+    ],
+    groqResponse: {
+      ok: true,
+      text: [
+        'Основной опыт: управление продуктом / внутренним продуктом; автоматизация бизнес-процессов; разработка и внедрение AI / ML / LLM-решений.',
+        'Команда: 4-7 человек.',
+        'AI-инструменты: AI-агенты; поиск по базе знаний / RAG.',
+        'Кейс: проблема бизнеса -> решение -> команда -> результат: автоматизировал обработку документов, сократил ручную работу.',
+        'Гибридный график: Да.',
+        'Доход: 250 000 руб. на руки.'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, [
+    'управление продуктом / внутренним продуктом',
+    'автоматизация бизнес-процессов',
+    'разработка и внедрение AI / ML / LLM-решений',
+    '4-7 человек',
+    'AI-агенты',
+    'поиск по базе знаний / RAG',
+    'Да'
+  ]);
+  assert.match(result.textareaValue, /Основной опыт|Доход/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.ok(result.states.some((state) => state.currentAction === 'Filling HH employer choice fields'));
+});
+
 test('auto apply uses expected salary for required question when Groq key is missing', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',

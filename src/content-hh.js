@@ -308,7 +308,7 @@ function getOptionLabel(control) {
   const ariaLabel = control.getAttribute?.('aria-label') || '';
   const marker = textOf(label || control.parentElement || control);
   const value = control.value || control.getAttribute?.('value') || '';
-  return cleanText([ariaLabel, marker, value].filter(Boolean).join('\n'));
+  return cleanText([...new Set([ariaLabel, marker, value].map(cleanText).filter(Boolean))].join('\n'));
 }
 
 function getControlGroupKey(control, index) {
@@ -689,7 +689,7 @@ function choiceTokens(value) {
   ]);
   return normalizeChoiceText(value)
     .split(/\s+/)
-    .filter((token) => token.length >= 2 && !stopWords.has(token));
+    .filter((token) => (token.length >= 2 || /^\d+$/.test(token)) && !stopWords.has(token));
 }
 
 function scoreChoice(label, answerText) {
@@ -698,8 +698,8 @@ function scoreChoice(label, answerText) {
   if (!normalizedLabel || !normalizedAnswer || /свой вариант|другое/i.test(label)) return 0;
   if (normalizedAnswer.includes(normalizedLabel)) return 100;
 
-  if (/^да$/i.test(label.trim()) && /\bда\b/i.test(answerText)) return 90;
-  if (/^нет/i.test(label.trim()) && /\bнет\b/i.test(answerText)) return 90;
+  if (/^да(?:\s+да)*$/.test(normalizedLabel) && normalizeChoiceText(answerText).split(/\s+/).includes('да')) return 90;
+  if (/^нет(?:\s+нет)*$/.test(normalizedLabel) && normalizeChoiceText(answerText).split(/\s+/).includes('нет')) return 90;
 
   const labelTokens = choiceTokens(label);
   if (labelTokens.length === 0) return 0;
