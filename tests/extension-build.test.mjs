@@ -95,6 +95,10 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.expectedSalary, '');
   assert.equal(localData.resumeUrl, '');
   assert.equal(localData.dailyLimit, 20);
+  assert.equal(localData.chatUnreadOnly, true);
+  assert.equal(localData.chatReplyMode, 'draft');
+  assert.equal(localData.chatLimit, 10);
+  assert.deepEqual(localData.chatReports, []);
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
 });
 
@@ -175,6 +179,160 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /250 000 руб\. на руки/);
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
+});
+
+test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
+  let listener = null;
+  let requestBody = null;
+
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: 'Здравствуйте, готов обсудить.' } }] };
+      }
+    };
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          const data = {
+            groqApiKey: 'gsk_test',
+            groqModel: 'test-model',
+            resumeText: 'Java developer, Spring Boot',
+            expectedSalary: '250 000 руб. на руки',
+            coverPrompt: 'cover prompt'
+          };
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, data[key]]));
+          }
+          return {};
+        },
+        async set() {}
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_CHAT_REPLY',
+        vacancyText: 'Вакансия: Java developer',
+        chatText: 'Работодатель: какие ожидания по зарплате?'
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(requestBody.model, 'test-model');
+  assert.equal(requestBody.max_tokens, 800);
+  const userContent = requestBody.messages.find((message) => message.role === 'user').content;
+  assert.match(userContent, /Java developer, Spring Boot/);
+  assert.match(userContent, /250 000 руб\. на руки/);
+  assert.match(userContent, /Вакансия: Java developer/);
+  assert.match(userContent, /какие ожидания по зарплате/);
+});
+
+test('background stores capped chat reports with direct chat links', async () => {
+  let listener = null;
+  const localData = {
+    chatReports: Array.from({ length: 205 }, (_, index) => ({
+      id: `old-${index}`,
+      chatUrl: `https://hh.ru/chat/${index}`,
+      status: 'drafted'
+    }))
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const appendResponse = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'APPEND_CHAT_REPORT',
+        item: {
+          chatUrl: 'https://hh.ru/chat/new',
+          employerName: 'ООО Test',
+          status: 'reported_external_contact',
+          contactType: 'telegram',
+          contactText: '@test'
+        }
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  const getResponse = await new Promise((resolve) => {
+    listener({ type: 'GET_CHAT_REPORTS' }, {}, resolve);
+  });
+
+  assert.equal(appendResponse.ok, true);
+  assert.equal(getResponse.ok, true);
+  assert.equal(getResponse.chatReports.length, 200);
+  assert.equal(getResponse.chatReports.at(-1).chatUrl, 'https://hh.ru/chat/new');
+  assert.equal(getResponse.chatReports.at(-1).sent, false);
 });
 
 test('Groq prompt parses configured hh resume URL for resume context', async () => {
@@ -314,7 +472,7 @@ test('popup has ordered controls wired to Groq key, results, and actions', async
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'recentResults']) {
+  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'recentResults', 'chatReports', 'clearReports']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
 
@@ -327,6 +485,16 @@ test('popup has ordered controls wired to Groq key, results, and actions', async
   assert.match(js, /TEST_GROQ/);
   assert.match(js, /skipped_missing_groq_key/);
   assert.match(js, /currentAction/);
+  assert.match(js, /START_AUTO_APPLY/);
+  assert.match(js, /START_CHAT_ASSIST/);
+  assert.match(js, /GET_CHAT_REPORTS/);
+  assert.match(js, /CLEAR_CHAT_REPORTS/);
+  assert.match(js, /chatReports/);
+  assert.match(js, /isAutoApplyStartUrl/);
+  assert.match(js, /url\?\.protocol === 'https:'/);
+  assert.match(js, /url\.hostname === 'hh\.ru'/);
+  assert.match(js, /url\.pathname === '\/search\/vacancy'/);
+  assert.match(js, /url\.search\.length > 0/);
 });
 
 test('options use hh resume URL instead of pasted resume text or daily refresh toggle', async () => {
@@ -334,7 +502,14 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   const js = await readFile(new URL('src/options.js', root), 'utf8');
 
   assert.match(html, /id="resumeUrl"/);
+  assert.match(html, /id="chatUnreadOnly"/);
+  assert.match(html, /id="chatReplyMode"/);
+  assert.match(html, /id="chatLimit"/);
   assert.match(js, /resumeUrl/);
+  assert.match(js, /chatUnreadOnly/);
+  assert.match(js, /chatReplyMode/);
+  assert.match(js, /chatLimit/);
+  assert.match(js, /auto_send/);
   assert.doesNotMatch(html, /id="resumeText"|Resume text|resumeRefreshEnabled|Enable daily resume refresh/);
   assert.doesNotMatch(js, /resumeText|resumeRefreshEnabled/);
 });
@@ -879,6 +1054,173 @@ async function runContentAutoApply({
   };
 }
 
+async function runContentChatAssist({
+  chats,
+  chatUnreadOnly = true,
+  chatReplyMode = 'draft',
+  chatLimit = 10,
+  groqText = 'Здравствуйте, готов ответить по вакансии.'
+}) {
+  const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
+  const reports = [];
+  const states = [];
+  const groqCalls = [];
+  let listener = null;
+  let activeChatIndex = -1;
+  let sendClicks = 0;
+
+  const messageInput = new FakeElement({
+    attrs: { 'data-qa': 'chat-message-input' }
+  });
+  const sendButton = new FakeElement({
+    text: 'Отправить',
+    click() {
+      sendClicks += 1;
+    }
+  });
+
+  const chatItems = chats.map((chat, index) => new FakeElement({
+    text: chat.itemText || [chat.employerName, chat.vacancyTitle, chat.previewText].filter(Boolean).join('\n'),
+    href: chat.chatUrl,
+    attrs: { class: chat.unread ? 'unread' : '' },
+    selectorMap: {
+      'a[href*="/vacancy/"]': chat.vacancyUrl ? [new FakeElement({ text: chat.vacancyTitle, href: chat.vacancyUrl })] : [],
+      'a[href*="/chat"]': []
+    },
+    click() {
+      activeChatIndex = index;
+      globalThis.location.href = chat.chatUrl;
+      globalThis.location.pathname = new URL(chat.chatUrl).pathname;
+    }
+  }));
+
+  globalThis.location = {
+    href: 'https://hh.ru/chat',
+    pathname: '/chat'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      globalThis.location.href = url;
+      globalThis.location.pathname = new URL(url).pathname;
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.Event = class Event {
+    constructor(type) {
+      this.type = type;
+    }
+  };
+
+  function currentChat() {
+    return chats[Math.max(0, activeChatIndex)] || chats[0];
+  }
+
+  globalThis.document = {
+    title: 'HH chat test page',
+    body: new FakeElement({ text: 'Чаты' }),
+    querySelectorAll(selector) {
+      if (selector.includes(',')) {
+        return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+      }
+      if (selector === '[data-qa="chat-list-item"]') return chatItems;
+      if (selector === '[data-qa*="chat-item"]') return [];
+      if (selector === 'a[href*="/chat"]') return [];
+      if (selector === '[role="listitem"]') return [];
+      if (selector === '[data-qa="chat-message-input"] textarea') return [messageInput];
+      if (selector === '[data-qa="chat-message-input"] [contenteditable="true"]') return [];
+      if (selector === 'textarea') return [messageInput];
+      if (selector === '[contenteditable="true"]') return [];
+      if (selector === '[role="textbox"]') return [];
+      if (selector === '[data-qa="chat-send-message"]') return [sendButton];
+      if (selector === '[data-qa*="send"]') return [sendButton];
+      if (selector === 'button') return [sendButton];
+      if (selector === 'main') {
+        const chat = currentChat();
+        return [new FakeElement({
+          text: chat.chatText,
+          selectorMap: {
+            'a[href*="/vacancy/"]': chat.vacancyUrl ? [new FakeElement({ text: chat.vacancyTitle, href: chat.vacancyUrl })] : []
+          }
+        })];
+      }
+      if (selector === 'h1') return [new FakeElement({ text: currentChat().employerName })];
+      if (selector === 'a[href*="/vacancy/"]') {
+        const chat = currentChat();
+        return chat.vacancyUrl ? [new FakeElement({ text: chat.vacancyTitle, href: chat.vacancyUrl })] : [];
+      }
+      return [];
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    getElementById() {
+      return null;
+    },
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+          return Promise.resolve({ ok: true });
+        }
+        if (message.type === 'APPEND_CHAT_REPORT') {
+          reports.push(message.item);
+          return Promise.resolve({ ok: true });
+        }
+        if (message.type === 'GENERATE_CHAT_REPLY') {
+          groqCalls.push(message);
+          return Promise.resolve({ ok: true, text: groqText });
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return {
+            delayMinMs: 1,
+            delayMaxMs: 1,
+            chatUnreadOnly,
+            chatReplyMode,
+            chatLimit
+          };
+        },
+        async set() {}
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#chat-${crypto.randomUUID()}`);
+  assert.ok(listener, 'content script should register a listener');
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'START_CHAT_ASSIST' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  return {
+    response,
+    reports,
+    states,
+    groqCalls,
+    sendClicks,
+    inputValue: messageInput.value
+  };
+}
+
 async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 руб. на руки' } = {}) {
   const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
   const appended = [];
@@ -1031,6 +1373,108 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
   return { appended, states, navigations, submitClicks, localStore };
 }
 
+test('chat assist reports external contact invite with direct chat link and does not send', async () => {
+  const result = await runContentChatAssist({
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/abc',
+        employerName: 'ООО Test',
+        vacancyTitle: 'Java Developer',
+        vacancyUrl: 'https://hh.ru/vacancy/123',
+        previewText: 'Новое сообщение',
+        chatText: 'ООО Test\nJava Developer\nНапишите мне в Telegram @test_hr'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.processed, 1);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.sendClicks, 0);
+  assert.equal(result.groqCalls.length, 0);
+  assert.equal(result.reports.at(-1).status, 'reported_external_contact');
+  assert.equal(result.reports.at(-1).chatUrl, 'https://hh.ru/chat/abc');
+  assert.equal(result.reports.at(-1).contactType, 'telegram');
+});
+
+test('chat assist skips read chats when unread-only setting is enabled', async () => {
+  const result = await runContentChatAssist({
+    chats: [
+      {
+        unread: false,
+        chatUrl: 'https://hh.ru/chat/read',
+        employerName: 'Read Employer',
+        vacancyTitle: 'Java Developer',
+        previewText: 'Старое сообщение',
+        chatText: 'Read Employer\nРасскажите про опыт?'
+      },
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/unread',
+        employerName: 'Unread Employer',
+        vacancyTitle: 'Backend Developer',
+        previewText: 'Новое сообщение',
+        chatText: 'Unread Employer\nКакая зарплата интересна?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.found, 1);
+  assert.equal(result.reports.length, 1);
+  assert.equal(result.reports[0].chatUrl, 'https://hh.ru/chat/unread');
+  assert.equal(result.groqCalls.length, 1);
+});
+
+test('chat assist drafts reply without sending by default', async () => {
+  const result = await runContentChatAssist({
+    chatReplyMode: 'draft',
+    groqText: 'Здравствуйте, ожидаю 250 000 руб. на руки.',
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/draft',
+        employerName: 'ООО Draft',
+        vacancyTitle: 'Java Developer',
+        vacancyUrl: 'https://hh.ru/vacancy/456',
+        previewText: 'Вопрос',
+        chatText: 'ООО Draft\nJava Developer\nКакие ожидания по зарплате?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.sendClicks, 0);
+  assert.equal(result.inputValue, 'Здравствуйте, ожидаю 250 000 руб. на руки.');
+  assert.equal(result.reports.at(-1).status, 'drafted');
+  assert.equal(result.reports.at(-1).sent, false);
+  assert.equal(result.groqCalls.at(-1).vacancyUrl, 'https://hh.ru/vacancy/456');
+  assert.match(result.groqCalls.at(-1).chatText, /Какие ожидания/);
+});
+
+test('chat assist auto-send mode clicks send button', async () => {
+  const result = await runContentChatAssist({
+    chatReplyMode: 'auto_send',
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/send',
+        employerName: 'ООО Send',
+        vacancyTitle: 'Java Developer',
+        previewText: 'Вопрос',
+        chatText: 'ООО Send\nКогда готовы начать?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.sendClicks, 1);
+  assert.equal(result.reports.at(-1).status, 'sent');
+  assert.equal(result.reports.at(-1).sent, true);
+});
+
 test('auto apply skips cover-letter vacancy when Groq key is missing', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Добавьте сопроводительное письмо\nОтправить',
@@ -1162,7 +1606,7 @@ test('auto apply counts already confirmed response page as applied', async () =>
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
 });
 
-test('auto apply queues hh response links across navigation', async () => {
+test('auto apply clicks list response button before using hh response link navigation', async () => {
   const responseHref = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&hhtmFrom=vacancy_search_list';
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
@@ -1171,12 +1615,11 @@ test('auto apply queues hh response links across navigation', async () => {
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.queued, true);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.navigateUrl, responseHref);
-  assert.equal(result.localStore.autoApplyQueue.active, true);
-  assert.equal(result.localStore.autoApplyQueue.items.length, 1);
-  assert.equal(result.localStore.autoApplyQueue.items[0].responseUrl, responseHref);
+  assert.equal(result.response.queued, undefined);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply continues queued response pages for 20 applications', async () => {

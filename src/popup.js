@@ -8,6 +8,7 @@ const nodes = {
   lastError: document.getElementById('lastError'),
   statusLine: document.getElementById('statusLine'),
   recentResults: document.getElementById('recentResults'),
+  chatReports: document.getElementById('chatReports'),
   groqApiKey: document.getElementById('groqApiKey')
 };
 
@@ -24,7 +25,11 @@ const STATE_LABELS = {
   stopped: 'Остановлено',
   complete: 'Готово',
   error: 'Ошибка',
-  refreshing_resumes: 'Обновление резюме'
+  refreshing_resumes: 'Обновление резюме',
+  scanning_chat: 'Проверка чата',
+  processing_chat: 'Обработка чата',
+  generating_chat_reply: 'Генерация ответа',
+  sending_chat_reply: 'Отправка ответа'
 };
 
 function setStatus(text, isError = false) {
@@ -79,6 +84,56 @@ function renderResults(runResults = []) {
   );
 }
 
+function reportMessage(item) {
+  if (item.status === 'reported_external_contact') {
+    return `External contact: ${item.employerName || item.vacancyTitle || 'chat'}`;
+  }
+  if (item.status === 'sent') {
+    return `Sent: ${item.employerName || item.vacancyTitle || 'chat'}`;
+  }
+  if (item.status === 'drafted') {
+    return `Drafted: ${item.employerName || item.vacancyTitle || 'chat'}`;
+  }
+  if (item.status === 'error') {
+    return `Error: ${item.employerName || item.vacancyTitle || 'chat'} — ${item.error || 'unknown error'}`;
+  }
+  return `${item.status || 'Report'}: ${item.employerName || item.vacancyTitle || 'chat'}`;
+}
+
+function renderChatReports(chatReports = []) {
+  const items = chatReports.slice(-5).reverse();
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'report';
+    empty.textContent = 'No chat reports yet.';
+    nodes.chatReports.replaceChildren(empty);
+    return;
+  }
+
+  nodes.chatReports.replaceChildren(
+    ...items.map((item) => {
+      const node = document.createElement('div');
+      node.className = 'report';
+
+      const title = document.createElement('div');
+      title.textContent = reportMessage(item);
+
+      const link = document.createElement('a');
+      link.href = item.chatUrl || 'https://hh.ru/chat';
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = item.chatUrl || 'https://hh.ru/chat';
+
+      const detail = document.createElement('div');
+      detail.textContent = item.contactText || item.reason || item.vacancyTitle || '';
+
+      node.append(title, link);
+      if (detail.textContent) node.append(detail);
+      return node;
+    })
+  );
+}
+
 async function loadPopupSettings() {
   const values = await chrome.storage.local.get(['groqApiKey']);
   nodes.groqApiKey.value = values.groqApiKey ? '********' : '';
@@ -93,16 +148,30 @@ async function getActiveTab() {
   return tab;
 }
 
+function parseTabUrl(tab) {
+  try {
+    return new URL(tab.url || '');
+  } catch {
+    return null;
+  }
+}
+
+function isAutoApplyStartUrl(url) {
+  return url?.protocol === 'https:' &&
+    url.hostname === 'hh.ru' &&
+    url.pathname === '/search/vacancy' &&
+    url.search.length > 0;
+}
+
 async function sendToActiveTab(type) {
   const tab = await getActiveTab();
-  let hostname = '';
-  try {
-    hostname = new URL(tab.url || '').hostname;
-  } catch {
-    hostname = '';
-  }
+  const url = parseTabUrl(tab);
+  const hostname = url?.hostname || '';
   if (hostname !== 'hh.ru' && !hostname.endsWith('.hh.ru')) {
     throw new Error('Сначала откройте вкладку hh.ru');
+  }
+  if (type === 'START_AUTO_APPLY' && !isAutoApplyStartUrl(url)) {
+    throw new Error('Запуск откликов доступен только со страницы https://hh.ru/search/vacancy?...');
   }
   return chrome.tabs.sendMessage(tab.id, { type });
 }
@@ -112,6 +181,11 @@ async function refreshStatus() {
   if (response?.ok) {
     renderState(response.runState);
     renderResults(response.runResults || []);
+  }
+
+  const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });
+  if (reportsResponse?.ok) {
+    renderChatReports(reportsResponse.chatReports || []);
   }
 }
 
@@ -124,6 +198,18 @@ async function runContentAction(type, label) {
     return;
   }
   setStatus('Готово.');
+  await refreshStatus();
+}
+
+async function runRuntimeAction(type, label) {
+  setStatus(label);
+  const response = await chrome.runtime.sendMessage({ type });
+  if (!response?.ok) {
+    setStatus(response?.error || 'Действие не выполнено', true);
+    await refreshStatus();
+    return;
+  }
+  setStatus(response.navigated ? 'Открыл чат. Запустите еще раз после загрузки.' : 'Готово.');
   await refreshStatus();
 }
 
@@ -148,6 +234,20 @@ document.getElementById('refreshResumes').addEventListener('click', async () => 
     } else {
       setStatus('Резюме обновлены.');
     }
+    await refreshStatus();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+});
+
+document.getElementById('chatAssist').addEventListener('click', () => {
+  runRuntimeAction('START_CHAT_ASSIST', 'Обрабатываю чат...').catch((error) => setStatus(error.message, true));
+});
+
+document.getElementById('clearReports').addEventListener('click', async () => {
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_CHAT_REPORTS' });
+    setStatus('Chat reports cleared.');
     await refreshStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);

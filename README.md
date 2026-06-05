@@ -12,6 +12,7 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 - Показывает предпросмотр перед откликами.
 - Отправляет отклики до лимита, по умолчанию `20`.
 - Заполняет сопроводительные письма и вопросы через Groq.
+- Разгребает `https://hh.ru/chat`: по умолчанию обрабатывает только непрочитанные чаты, готовит ответы на вопросы и сохраняет отчеты по приглашениям созвониться или перейти в другой канал связи.
 - Может вручную обновить резюме на hh.ru.
 
 ### Установка
@@ -41,7 +42,8 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 5. Выберите `Groq model`. По умолчанию используется `llama-3.3-70b-versatile`.
 6. Укажите `Resume URL on hh.ru`: ссылку вида `https://hh.ru/resume/...`.
 7. Проверьте лимит откликов, задержки и зарплату для вопросов.
-8. Нажмите `Save`.
+8. Для чатов проверьте `Chat assistant`: по умолчанию включены `Process unread chats only`, `Draft only`, лимит `10`.
+9. Нажмите `Save`.
 
 Groq key можно взять в [Groq Console](https://console.groq.com/docs/quickstart).
 
@@ -54,12 +56,16 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 5. Если все нормально, нажмите `Запустить отклики`.
 6. Для остановки нажмите `Стоп`.
 7. Для ручного поднятия резюме нажмите `Обновить резюме`.
+8. Для обработки чатов нажмите `Разгрести чат`. Расширение откроет `https://hh.ru/chat`, пройдет по видимым чатам до лимита и в режиме `Draft only` только заполнит черновик ответа.
+9. Отчеты по чатам отображаются в popup в блоке `Chat reports`. Каждый отчет содержит прямую ссылку на чат.
 
 ### Важно
 
 - Авторизацию нужно проходить самостоятельно
 - Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную.
 - Без Groq key обычные отклики работают, но сложные письма, вопросы и тесты будут пропущены.
+- Если работодатель просит позвонить, перейти в Telegram/WhatsApp/email или другой внешний канал, расширение сохраняет отчет и не отвечает автоматически.
+- `Auto-send` для чатов отправляет сгенерированный ответ без ручной проверки. Используйте только если готовы к этому риску.
 
 ## English
 
@@ -69,6 +75,7 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 - Shows a preview before applying.
 - Sends applications up to the configured limit, default `20`.
 - Fills cover letters and employer questions with Groq.
+- Processes `https://hh.ru/chat`: unread chats by default, drafts answers to employer questions, and saves reports for call or external-contact invitations.
 - Can manually refresh your hh.ru resume.
 
 ### Install
@@ -99,7 +106,8 @@ After changing files, click `Reload` for the extension on `chrome://extensions`.
 5. Select `Groq model`. The default is `llama-3.3-70b-versatile`.
 6. Set `Resume URL on hh.ru`: a link like `https://hh.ru/resume/...`.
 7. Check the apply limit, delays, and expected salary for questions.
-8. Click `Save`.
+8. Check `Chat assistant`: defaults are `Process unread chats only`, `Draft only`, and limit `10`.
+9. Click `Save`.
 
 You can create a Groq key in [Groq Console](https://console.groq.com/docs/quickstart).
 
@@ -112,6 +120,8 @@ You can create a Groq key in [Groq Console](https://console.groq.com/docs/quicks
 5. If the preview looks right, click `Запустить отклики`.
 6. Click `Стоп` to stop.
 7. Click `Обновить резюме` to manually refresh your resume.
+8. Click `Разгрести чат` to process chats. The extension opens `https://hh.ru/chat`, processes visible chats up to the configured limit, and in `Draft only` mode only fills a draft reply.
+9. Review saved chat reports in the popup `Chat reports` section. Every report includes a direct chat link.
 
 ### Important
 
@@ -119,6 +129,8 @@ You can create a Groq key in [Groq Console](https://console.groq.com/docs/quicks
 - If captcha or login appears, stop the extension and complete it manually.
 - Without a Groq key, normal applications work, but complex letters, questions, and tests may be skipped.
 - Do not publish your Groq key in GitHub, chats, screenshots, or logs.
+- If an employer asks to call or move to Telegram, WhatsApp, email, or another external channel, the extension saves a report and skips the reply.
+- Chat `Auto-send` sends generated text without manual review. Use only when you accept that risk.
 
 ## Developer Checks
 

@@ -5,7 +5,10 @@ const DEFAULTS = {
   coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
   delayMinMs: 8000,
-  delayMaxMs: 15000
+  delayMaxMs: 15000,
+  chatUnreadOnly: true,
+  chatReplyMode: 'draft',
+  chatLimit: 10
 };
 
 const GROQ_MODELS = new Set([
@@ -25,7 +28,10 @@ const fields = {
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
-  delayMaxMs: document.getElementById('delayMaxMs')
+  delayMaxMs: document.getElementById('delayMaxMs'),
+  chatUnreadOnly: document.getElementById('chatUnreadOnly'),
+  chatReplyMode: document.getElementById('chatReplyMode'),
+  chatLimit: document.getElementById('chatLimit')
 };
 
 const statusNode = document.getElementById('status');
@@ -49,6 +55,9 @@ async function loadOptions() {
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
+  fields.chatUnreadOnly.checked = values.chatUnreadOnly !== false;
+  fields.chatReplyMode.value = values.chatReplyMode === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode;
+  fields.chatLimit.value = values.chatLimit ?? DEFAULTS.chatLimit;
 }
 
 async function saveOptions() {
@@ -60,7 +69,10 @@ async function saveOptions() {
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(1000, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
-    delayMaxMs: Math.max(1000, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs)
+    delayMaxMs: Math.max(1000, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
+    chatUnreadOnly: fields.chatUnreadOnly.checked,
+    chatReplyMode: fields.chatReplyMode.value === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
+    chatLimit: Math.max(1, Math.min(Number(fields.chatLimit.value) || DEFAULTS.chatLimit, 100))
   };
 
   if (patch.delayMaxMs < patch.delayMinMs) {
