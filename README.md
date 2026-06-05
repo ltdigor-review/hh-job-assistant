@@ -56,7 +56,7 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 5. Если все нормально, нажмите `Запустить отклики`.
 6. Для остановки нажмите `Стоп`.
 7. Для ручного поднятия резюме нажмите `Обновить резюме`.
-8. Для обработки чатов нажмите `Ассистент чата`. Расширение откроет `https://hh.ru/chat`, пройдет по видимым чатам до лимита и в режиме `Draft only` только заполнит черновик ответа.
+8. Для обработки чатов нажмите `Обработка чатов`. Расширение откроет `https://hh.ru/chat`, пройдет по видимым чатам до лимита и в режиме `Draft only` только заполнит черновик ответа.
 9. Отчеты по чатам отображаются в popup в блоке `Chat reports`. Каждый отчет содержит прямую ссылку на чат.
 
 ### Важно
@@ -120,7 +120,7 @@ You can create a Groq key in [Groq Console](https://console.groq.com/docs/quicks
 5. If the preview looks right, click `Запустить отклики`.
 6. Click `Стоп` to stop.
 7. Click `Обновить резюме` to manually refresh your resume.
-8. Click `Ассистент чата` to process chats. The extension opens `https://hh.ru/chat`, processes visible chats up to the configured limit, and in `Draft only` mode only fills a draft reply.
+8. Click `Обработка чатов` to process chats. The extension opens `https://hh.ru/chat`, processes visible chats up to the configured limit, and in `Draft only` mode only fills a draft reply.
 9. Review saved chat reports in the popup `Chat reports` section. Every report includes a direct chat link.
 
 ### Important
