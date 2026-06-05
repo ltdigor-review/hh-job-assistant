@@ -38,6 +38,7 @@
       }
 
       input,
+      select,
       textarea {
         box-sizing: border-box;
         width: 100%;
@@ -108,7 +109,12 @@
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
 
       <label for="groqModel">Groq model</label>
-      <input id="groqModel" type="text" placeholder="llama-3.3-70b-versatile">
+      <select id="groqModel">
+        <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
+        <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
+        <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B</option>
+        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B</option>
+      </select>
 
       <label for="resumeUrl">Resume URL on hh.ru</label>
       <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">

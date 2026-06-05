@@ -336,6 +336,23 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.doesNotMatch(js, /resumeText|resumeRefreshEnabled/);
 });
 
+test('options expose Groq production text model choices', async () => {
+  const html = await readFile(new URL('src/options.html', root), 'utf8');
+  const js = await readFile(new URL('src/options.js', root), 'utf8');
+
+  assert.match(html, /<select id="groqModel">/);
+  for (const model of [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b'
+  ]) {
+    assert.match(html, new RegExp(`value="${model.replace('/', '\\/')}"`));
+    assert.match(js, new RegExp(model.replace('/', '\\/')));
+  }
+  assert.doesNotMatch(html, /<input id="groqModel"/);
+});
+
 class FakeElement {
   constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {} } = {}) {
     this.innerText = text;

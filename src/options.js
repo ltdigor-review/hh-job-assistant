@@ -8,6 +8,13 @@ const DEFAULTS = {
   delayMaxMs: 15000
 };
 
+const GROQ_MODELS = new Set([
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-120b',
+  'openai/gpt-oss-20b'
+]);
+
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 
 const fields = {
@@ -33,7 +40,7 @@ async function loadOptions() {
 
   fields.groqApiKey.value = values.groqApiKey ? '********' : '';
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
-  fields.groqModel.value = values.groqModel || DEFAULTS.groqModel;
+  fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
@@ -47,7 +54,7 @@ async function loadOptions() {
 async function saveOptions() {
   const current = await chrome.storage.local.get(['resumeUrl']);
   const patch = {
-    groqModel: fields.groqModel.value.trim() || DEFAULTS.groqModel,
+    groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
     resumeUrl: fields.resumeUrl.value.trim(),
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,

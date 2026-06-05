@@ -38,20 +38,22 @@ Chrome extension for hh.ru. Works only in a Chrome profile where you are already
 2. Вставьте `Groq API key`, если нужны письма и ответы на вопросы.
 3. Нажмите `Save key`, затем `Test Groq`.
 4. Откройте `Настройки`.
-5. Укажите `Resume URL on hh.ru`: ссылку вида `https://hh.ru/resume/...`.
-6. Проверьте лимит откликов, задержки и зарплату для вопросов.
-7. Нажмите `Save`.
+5. Выберите `Groq model`. По умолчанию используется `llama-3.3-70b-versatile`.
+6. Укажите `Resume URL on hh.ru`: ссылку вида `https://hh.ru/resume/...`.
+7. Проверьте лимит откликов, задержки и зарплату для вопросов.
+8. Нажмите `Save`.
 
 Groq key можно взять в [Groq Console](https://console.groq.com/docs/quickstart).
 
 ### Использование
 
 1. Войдите в [hh.ru](https://hh.ru) в Chrome.
-2. Откройте страницу с вакансиями.
-3. Нажмите `Предпросмотр`.
-4. Если все нормально, нажмите `Запустить отклики`.
-5. Для остановки нажмите `Стоп`.
-6. Для ручного поднятия резюме нажмите `Обновить резюме`.
+2. Сначала настройте расширение через `Настройки`.
+3. Откройте страницу с вакансиями.
+4. Нажмите `Предпросмотр`.
+5. Если все нормально, нажмите `Запустить отклики`.
+6. Для остановки нажмите `Стоп`.
+7. Для ручного поднятия резюме нажмите `Обновить резюме`.
 
 ### Важно
 
@@ -94,20 +96,22 @@ After changing files, click `Reload` for the extension on `chrome://extensions`.
 2. Paste a `Groq API key` if you need letters and question answers.
 3. Click `Save key`, then `Test Groq`.
 4. Open `Настройки`.
-5. Set `Resume URL on hh.ru`: a link like `https://hh.ru/resume/...`.
-6. Check the apply limit, delays, and expected salary for questions.
-7. Click `Save`.
+5. Select `Groq model`. The default is `llama-3.3-70b-versatile`.
+6. Set `Resume URL on hh.ru`: a link like `https://hh.ru/resume/...`.
+7. Check the apply limit, delays, and expected salary for questions.
+8. Click `Save`.
 
 You can create a Groq key in [Groq Console](https://console.groq.com/docs/quickstart).
 
 ### Use
 
 1. Sign in to [hh.ru](https://hh.ru) in Chrome.
-2. Open a vacancies page.
-3. Click `Предпросмотр`.
-4. If the preview looks right, click `Запустить отклики`.
-5. Click `Стоп` to stop.
-6. Click `Обновить резюме` to manually refresh your resume.
+2. First configure the extension through `Настройки`.
+3. Open a vacancies page.
+4. Click `Предпросмотр`.
+5. If the preview looks right, click `Запустить отклики`.
+6. Click `Стоп` to stop.
+7. Click `Обновить резюме` to manually refresh your resume.
 
 ### Important
 
