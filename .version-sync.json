@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "path": "manifest.json",
+      "type": "json",
+      "key": "version"
+    },
+    {
+      "path": "package.json",
+      "type": "json",
+      "key": "version"
+    }
+  ]
+}

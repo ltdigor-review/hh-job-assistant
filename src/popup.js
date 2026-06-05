@@ -1,7 +1,6 @@
 const nodes = {
   state: document.getElementById('state'),
   found: document.getElementById('found'),
-  processed: document.getElementById('processed'),
   applied: document.getElementById('applied'),
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
@@ -9,7 +8,10 @@ const nodes = {
   statusLine: document.getElementById('statusLine'),
   recentResults: document.getElementById('recentResults'),
   chatReports: document.getElementById('chatReports'),
-  groqApiKey: document.getElementById('groqApiKey')
+  groqApiKey: document.getElementById('groqApiKey'),
+  version: document.getElementById('version'),
+  extensionStatus: document.getElementById('extensionStatus'),
+  tabStatus: document.getElementById('tabStatus')
 };
 
 const STATE_LABELS = {
@@ -32,6 +34,18 @@ const STATE_LABELS = {
   sending_chat_reply: 'Отправка ответа'
 };
 
+nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
+
+function setHealth(node, text, state) {
+  const dot = node.querySelector('.health-dot') || document.createElement('span');
+  if (!dot.parentElement) {
+    dot.className = 'health-dot';
+    dot.setAttribute('aria-hidden', 'true');
+  }
+  node.className = `health-value ${state}`;
+  node.replaceChildren(dot, document.createTextNode(text));
+}
+
 function setStatus(text, isError = false) {
   nodes.statusLine.textContent = text;
   nodes.statusLine.style.color = isError ? '#b91c1c' : '#475569';
@@ -40,13 +54,20 @@ function setStatus(text, isError = false) {
 function renderState(runState = {}) {
   nodes.state.textContent = STATE_LABELS[runState.state] || runState.state || 'Ожидание';
   nodes.found.textContent = runState.found ?? 0;
-  nodes.processed.textContent = runState.processed ?? 0;
   nodes.applied.textContent = runState.applied ?? 0;
   nodes.skipped.textContent = runState.skipped ?? 0;
   nodes.errors.textContent = runState.errors ?? 0;
   nodes.lastError.textContent = runState.lastError || '';
   if (runState.currentAction) {
     setStatus(runState.currentAction, runState.state === 'error');
+  } else if (runState.state === 'error') {
+    setStatus('Остановлено из-за ошибки. См. детали ниже.', true);
+  } else if ((runState.errors ?? 0) > 0) {
+    setStatus('Завершено с ошибками. См. детали ниже.', true);
+  } else if ((runState.skipped ?? 0) > 0) {
+    setStatus('Завершено с пропусками. См. лог ниже.');
+  } else if (runState.state === 'complete') {
+    setStatus('Готово.');
   }
 }
 
@@ -56,6 +77,9 @@ function resultMessage(item) {
   }
   if (item.status === 'skipped_test_missing_groq_key') {
     return `Skipped: ${item.title || item.vacancyId || 'vacancy'} needs employer questions/test assistance, but Groq API key is missing.`;
+  }
+  if (/^skipped/.test(item.status || '')) {
+    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} — ${item.error || item.status}`;
   }
   if (item.status === 'error') {
     return `Error: ${item.title || item.vacancyId || 'vacancy'} — ${item.error || 'unknown error'}`;
@@ -67,7 +91,7 @@ function resultMessage(item) {
 }
 
 function resultClass(item) {
-  if (/missing_groq_key/.test(item.status || '')) return 'result warn';
+  if (/^skipped|missing_groq_key/.test(item.status || '')) return 'result warn';
   if (item.status === 'error') return 'result error';
   return 'result';
 }
@@ -163,6 +187,10 @@ function isAutoApplyStartUrl(url) {
     url.search.length > 0;
 }
 
+function isHhUrl(url) {
+  return url?.protocol === 'https:' && (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru'));
+}
+
 async function sendToActiveTab(type) {
   const tab = await getActiveTab();
   const url = parseTabUrl(tab);
@@ -174,6 +202,29 @@ async function sendToActiveTab(type) {
     throw new Error('Запуск откликов доступен только со страницы https://hh.ru/search/vacancy?...');
   }
   return chrome.tabs.sendMessage(tab.id, { type });
+}
+
+async function refreshHealth() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
+    setHealth(nodes.extensionStatus, response?.ok ? 'Готово к работе' : 'Ошибка', response?.ok ? 'ok' : 'error');
+  } catch (error) {
+    setHealth(nodes.extensionStatus, 'Не отвечает', 'error');
+  }
+
+  try {
+    const tab = await getActiveTab();
+    const url = parseTabUrl(tab);
+    if (!isHhUrl(url)) {
+      setHealth(nodes.tabStatus, 'Не hh.ru', 'warn');
+      return;
+    }
+
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CONTENT_STATUS' });
+    setHealth(nodes.tabStatus, response?.ok ? 'hh.ru подключен' : 'Нет связи', response?.ok ? 'ok' : 'error');
+  } catch (error) {
+    setHealth(nodes.tabStatus, 'Нет связи', 'error');
+  }
 }
 
 async function refreshStatus() {
@@ -197,7 +248,6 @@ async function runContentAction(type, label) {
     await refreshStatus();
     return;
   }
-  setStatus('Готово.');
   await refreshStatus();
 }
 
@@ -209,8 +259,10 @@ async function runRuntimeAction(type, label) {
     await refreshStatus();
     return;
   }
-  setStatus(response.navigated ? 'Открыл чат. Запустите еще раз после загрузки.' : 'Готово.');
   await refreshStatus();
+  if (response.navigated) {
+    setStatus('Открыл чат. Запустите еще раз после загрузки.');
+  }
 }
 
 document.getElementById('dryRun').addEventListener('click', () => {
@@ -294,7 +346,9 @@ document.getElementById('openOptions').addEventListener('click', () => {
 });
 
 loadPopupSettings().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
+refreshHealth().catch(() => {});
 refreshStatus().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
 setInterval(() => {
+  refreshHealth().catch(() => {});
   refreshStatus().catch(() => {});
 }, 1000);
