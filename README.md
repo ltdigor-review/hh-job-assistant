@@ -4,6 +4,8 @@
 
 Chrome extension for hh.ru. Works only in a Chrome profile where you are already signed in to hh.ru.
 
+![Chrome Developer mode and Load unpacked](https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png)
+
 ## Русский
 
 ### Что умеет
