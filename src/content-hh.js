@@ -28,6 +28,24 @@ const HH_SELECTORS = {
     '[data-qa="bloko-modal-close"]',
     '[data-qa="modal-close"]',
     'button[aria-label="Закрыть"]'
+  ],
+  chatItems: [
+    '[data-qa="chat-list-item"]',
+    '[data-qa*="chat-item"]',
+    'a[href*="/chat"]',
+    '[role="listitem"]'
+  ],
+  chatMessageInput: [
+    '[data-qa="chat-message-input"] textarea',
+    '[data-qa="chat-message-input"] [contenteditable="true"]',
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]'
+  ],
+  chatSendButtons: [
+    '[data-qa="chat-send-message"]',
+    '[data-qa*="send"]',
+    'button'
   ]
 };
 
@@ -40,6 +58,7 @@ let activeRunId = null;
 let queuedResumeStarted = false;
 
 function sleep(ms) {
+  if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -92,13 +111,6 @@ function findClickableByText(root, patterns) {
 
 function getVacancyId(url) {
   return String(url || '').match(/\/vacancy\/(\d+)/)?.[1] || new URL(String(url || location.href), location.href).searchParams.get('vacancyId') || '';
-}
-
-function getResponseUrl(item) {
-  const href = item?.responseButton?.href || '';
-  if (!href) return '';
-  const url = new URL(href, location.href);
-  return /\/applicant\/vacancy_response/.test(url.pathname) ? url.href : '';
 }
 
 function navigateTo(url) {
@@ -385,17 +397,27 @@ async function appendResult(item) {
   await sendRuntimeMessage({ type: 'APPEND_RUN_RESULT', item });
 }
 
+async function appendChatReport(item) {
+  await sendRuntimeMessage({ type: 'APPEND_CHAT_REPORT', item });
+}
+
 async function getConfig() {
   const values = await chrome.storage.local.get([
     'dailyLimit',
     'delayMinMs',
     'delayMaxMs',
-    'runResults'
+    'runResults',
+    'chatUnreadOnly',
+    'chatReplyMode',
+    'chatLimit'
   ]);
   return {
     dailyLimit: Number(values.dailyLimit) || 20,
     delayMinMs: Number(values.delayMinMs) || 8000,
-    delayMaxMs: Number(values.delayMaxMs) || 15000
+    delayMaxMs: Number(values.delayMaxMs) || 15000,
+    chatUnreadOnly: values.chatUnreadOnly !== false,
+    chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : 'draft',
+    chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || 10, 100))
   };
 }
 
@@ -435,6 +457,19 @@ async function generateTestAssistance(vacancyText, extraText) {
   return response.text;
 }
 
+async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
+  const response = await sendRuntimeMessage({
+    type: 'GENERATE_CHAT_REPLY',
+    vacancyUrl,
+    vacancyText,
+    chatText
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || 'Chat reply generation failed');
+  }
+  return response.text;
+}
+
 async function getExpectedSalary() {
   const { expectedSalary = '' } = await chrome.storage.local.get(['expectedSalary']);
   return String(expectedSalary || '').trim();
@@ -458,6 +493,273 @@ function splitGeneratedAnswers(text, count) {
   }
 
   return Array.from({ length: count }, () => cleaned);
+}
+
+function getChatUrl(value = location.href) {
+  try {
+    return new URL(value || location.href, location.href).href;
+  } catch {
+    return location.href;
+  }
+}
+
+function isUnreadChatItem(node) {
+  const marker = [
+    textOf(node),
+    node?.getAttribute?.('aria-label') || '',
+    node?.getAttribute?.('class') || '',
+    node?.getAttribute?.('data-qa') || ''
+  ].join('\n');
+
+  if (/непрочитан|unread|новое сообщение/i.test(marker)) return true;
+  if (node?.querySelector?.('[data-qa*="unread"], [class*="unread"]')) return true;
+  return Boolean([...(node.querySelectorAll?.('*') || [])].find((child) => /непрочитан|unread/i.test(
+    `${child.getAttribute?.('aria-label') || ''}\n${child.getAttribute?.('class') || ''}\n${textOf(child)}`
+  )));
+}
+
+function getChatItemNodes() {
+  const nodes = queryAll(HH_SELECTORS.chatItems).filter((node) => /\/chat|чат|сообщени|message|отклик/i.test(
+    `${node.href || ''}\n${textOf(node)}`
+  ));
+  const seen = new Set();
+  return nodes.filter((node) => {
+    const key = node.href || textOf(node).slice(0, 120);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function getChatItemInfo(node, index) {
+  const text = textOf(node);
+  const vacancyLink = node.querySelector?.('a[href*="/vacancy/"]') || (/\/vacancy\//.test(node.href || '') ? node : null);
+  const href = node.href || node.querySelector?.('a[href*="/chat"]')?.href || location.href;
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+
+  return {
+    index: index + 1,
+    node,
+    chatUrl: getChatUrl(href),
+    employerName: lines[0] || '',
+    vacancyTitle: lines.find((line) => /developer|разработчик|инженер|manager|менеджер|аналитик/i.test(line)) || '',
+    vacancyUrl: vacancyLink?.href || '',
+    previewText: text,
+    unread: isUnreadChatItem(node)
+  };
+}
+
+async function openChatItem(item) {
+  item.node.scrollIntoView?.({ block: 'center', inline: 'center' });
+  await sleep(250);
+  await waitBeforeClick();
+  const beforeUrl = location.href;
+  item.node.click?.();
+  await sleep(1000);
+  return getChatUrl(location.href === beforeUrl ? item.chatUrl : location.href);
+}
+
+function getCurrentChatText() {
+  const main = document.querySelector('main') || document.body;
+  return textOf(main).slice(0, 12000);
+}
+
+function getCurrentChatMeta(fallback = {}) {
+  const chatText = getCurrentChatText();
+  const vacancyLink = document.querySelector('a[href*="/vacancy/"]');
+  const heading = cleanText(document.querySelector('h1')?.textContent || '');
+  const lines = chatText.split('\n').map((line) => line.trim()).filter(Boolean);
+
+  return {
+    chatUrl: getChatUrl(location.href || fallback.chatUrl),
+    employerName: fallback.employerName || heading || lines[0] || '',
+    vacancyTitle: fallback.vacancyTitle || textOf(vacancyLink) || lines.find((line) => /ваканси|developer|разработчик|инженер/i.test(line)) || '',
+    vacancyUrl: fallback.vacancyUrl || vacancyLink?.href || '',
+    chatText
+  };
+}
+
+function detectExternalContactInvite(text) {
+  const cleaned = cleanText(text);
+  const patterns = [
+    { type: 'phone', pattern: /(?:\+?\d[\d\s().-]{7,}\d)|позвон|созвон|звонк/i },
+    { type: 'telegram', pattern: /telegram|телеграм|@\w{4,}|t\.me\//i },
+    { type: 'whatsapp', pattern: /whats?app|вацап|ватсап/i },
+    { type: 'email', pattern: /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i },
+    { type: 'external_link', pattern: /напишите\s+в|перейдите|свяжитесь|zoom|meet\.google|skype|discord|slack/i }
+  ];
+  const hit = patterns.find(({ pattern }) => pattern.test(cleaned));
+  if (!hit) return null;
+
+  const lines = cleaned.split('\n').filter(Boolean);
+  const contactLine = lines.find((line) => hit.pattern.test(line)) || lines.at(-1) || cleaned;
+  return {
+    contactType: hit.type,
+    contactText: contactLine.slice(0, 1000)
+  };
+}
+
+function findChatInput() {
+  return queryFirst(HH_SELECTORS.chatMessageInput);
+}
+
+function findChatSendButton() {
+  return (
+    queryAll(HH_SELECTORS.chatSendButtons)
+      .filter((button) => !button.disabled && !button.getAttribute('aria-disabled'))
+      .find((button) => /отправить|send/i.test(textOf(button))) ||
+    findClickableByText(document, [/отправить/i, /send/i])
+  );
+}
+
+function fillChatInput(input, text) {
+  if (input.getAttribute?.('contenteditable') === 'true' || input.isContentEditable) {
+    input.textContent = text;
+    input.innerText = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
+
+  setNativeValue(input, text);
+}
+
+async function processChatItem(item, config, counters) {
+  await setRunState({ state: 'processing_chat', ...counters, currentAction: `Чат: ${item.employerName || item.index}` });
+  const openedChatUrl = await openChatItem(item);
+  if (isUnsafePage()) {
+    throw new Error('Login, captcha, or anti-bot page detected');
+  }
+
+  const meta = getCurrentChatMeta({ ...item, chatUrl: openedChatUrl });
+  const invite = detectExternalContactInvite(meta.chatText);
+  if (invite) {
+    counters.skipped += 1;
+    await appendChatReport({
+      chatUrl: meta.chatUrl,
+      employerName: meta.employerName,
+      vacancyTitle: meta.vacancyTitle,
+      vacancyUrl: meta.vacancyUrl,
+      status: 'reported_external_contact',
+      reason: 'external_contact_or_call_invite',
+      contactType: invite.contactType,
+      contactText: invite.contactText,
+      questionText: meta.chatText,
+      sent: false
+    });
+    return;
+  }
+
+  const input = findChatInput();
+  if (!input) {
+    counters.skipped += 1;
+    await appendChatReport({
+      chatUrl: meta.chatUrl,
+      employerName: meta.employerName,
+      vacancyTitle: meta.vacancyTitle,
+      vacancyUrl: meta.vacancyUrl,
+      status: 'skipped_no_input',
+      reason: 'message_input_not_found',
+      questionText: meta.chatText,
+      sent: false
+    });
+    return;
+  }
+
+  await setRunState({ state: 'generating_chat_reply', ...counters });
+  const draftAnswer = await generateChatReply({
+    vacancyUrl: meta.vacancyUrl,
+    vacancyText: '',
+    chatText: meta.chatText
+  });
+  fillChatInput(input, draftAnswer);
+  await sleep(500);
+
+  let sent = false;
+  if (config.chatReplyMode === 'auto_send') {
+    const sendButton = findChatSendButton();
+    if (!sendButton) {
+      throw new Error('Chat send button was not found');
+    }
+    await setRunState({ state: 'sending_chat_reply', ...counters });
+    await waitBeforeClick();
+    sendButton.click();
+    sent = true;
+    await sleep(800);
+  }
+
+  counters.applied += 1;
+  await appendChatReport({
+    chatUrl: meta.chatUrl,
+    employerName: meta.employerName,
+    vacancyTitle: meta.vacancyTitle,
+    vacancyUrl: meta.vacancyUrl,
+    status: sent ? 'sent' : 'drafted',
+    reason: sent ? 'auto_sent_reply' : 'draft_reply',
+    questionText: meta.chatText,
+    draftAnswer,
+    sent
+  });
+}
+
+async function handleChatAssist() {
+  if (isUnsafePage()) {
+    throw new Error('Login, captcha, or anti-bot page detected');
+  }
+
+  if (location.pathname !== '/chat') {
+    navigateTo('https://hh.ru/chat');
+    return { ok: true, navigated: true };
+  }
+
+  const config = await getConfig();
+  const allItems = getChatItemNodes().map(getChatItemInfo);
+  const items = allItems
+    .filter((item) => !config.chatUnreadOnly || item.unread)
+    .slice(0, config.chatLimit);
+  const counters = {
+    found: items.length,
+    processed: 0,
+    applied: 0,
+    skipped: 0,
+    errors: 0
+  };
+
+  await setRunState({ state: 'scanning_chat', ...counters, currentAction: 'Проверяю чат', lastError: '' });
+
+  for (const item of items) {
+    if (stopRequested) break;
+    counters.processed += 1;
+    try {
+      await processChatItem(item, config, counters);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      counters.errors += 1;
+      await appendChatReport({
+        chatUrl: item.chatUrl,
+        employerName: item.employerName,
+        vacancyTitle: item.vacancyTitle,
+        vacancyUrl: item.vacancyUrl,
+        status: 'error',
+        reason: 'chat_processing_error',
+        questionText: item.previewText,
+        sent: false,
+        error: message
+      });
+      await setRunState({ state: 'error', ...counters, lastError: message });
+      stopRequested = true;
+      break;
+    }
+
+    await setRunState({ state: stopRequested ? 'stopped' : 'processing_chat', ...counters });
+    if (!stopRequested) {
+      await sleep(randomDelay(config.delayMinMs, config.delayMaxMs));
+    }
+  }
+
+  const finalState = stopRequested ? 'stopped' : 'complete';
+  await setRunState({ state: finalState, ...counters, currentAction: stopRequested ? 'Остановлено' : 'Чат обработан' });
+  return { ok: true, ...counters };
 }
 
 async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
@@ -724,17 +1026,6 @@ async function applyToVacancy(item, counters) {
   closeDialog();
 }
 
-function serializeQueueItem(item) {
-  return {
-    index: item.index,
-    vacancyId: item.vacancyId,
-    title: item.title,
-    url: item.url,
-    responseUrl: getResponseUrl(item),
-    testDetected: item.testDetected
-  };
-}
-
 function buildResponseFormItem(queueItem) {
   return {
     index: queueItem.index,
@@ -751,30 +1042,6 @@ function buildResponseFormItem(queueItem) {
 
 async function saveQueue(queue) {
   await chrome.storage.local.set({ autoApplyQueue: queue });
-}
-
-async function startQueuedAutoApply(vacancies, counters, config) {
-  const items = vacancies.map(serializeQueueItem).filter((item) => item.responseUrl);
-  if (items.length === 0) {
-    return false;
-  }
-
-  const queue = {
-    active: true,
-    runId: activeRunId,
-    index: 0,
-    items,
-    counters,
-    config: {
-      delayMinMs: config.delayMinMs,
-      delayMaxMs: config.delayMaxMs
-    }
-  };
-
-  await saveQueue(queue);
-  await setRunState({ state: 'applying', ...counters, found: items.length, lastError: '' });
-  navigateTo(items[0].responseUrl);
-  return true;
 }
 
 async function continueQueuedAutoApply() {
@@ -860,10 +1127,6 @@ async function handleAutoApply(limit) {
 
   await setRunState({ state: 'applying', ...counters, lastError: '' });
 
-  if (await startQueuedAutoApply(vacancies, counters, config)) {
-    return { ok: true, queued: true, ...counters };
-  }
-
   for (const item of vacancies) {
     if (stopRequested) break;
     counters.processed += 1;
@@ -921,6 +1184,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case 'START_AUTO_APPLY':
         sendResponse(await startRun('live'));
+        break;
+      case 'START_CHAT_ASSIST':
+        stopRequested = false;
+        stopReason = '';
+        activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        sendResponse(await handleChatAssist());
         break;
       case 'STOP_RUN':
         stopRequested = true;

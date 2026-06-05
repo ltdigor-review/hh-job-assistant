@@ -45,9 +45,10 @@
       }
 
       button.secondary {
-        background: #fff;
+        background: #f1f5f9;
         border-color: #b8c4d4;
         color: #172033;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
       }
 
       button.danger {
@@ -146,6 +147,43 @@
         background: #fef2f2;
         color: #991b1b;
       }
+
+      .reports-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .reports-head h2 {
+        margin: 0;
+        font-size: 14px;
+      }
+
+      #clearReports {
+        min-height: 30px;
+        padding: 4px 8px;
+      }
+
+      #chatReports {
+        display: grid;
+        gap: 6px;
+        margin-top: 8px;
+      }
+
+      .report {
+        padding: 8px;
+        border: 1px solid #d8e0ea;
+        border-radius: 6px;
+        background: #fff;
+        font-size: 12px;
+      }
+
+      .report a {
+        color: #1d4ed8;
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
@@ -157,6 +195,7 @@
         <button id="stop" class="danger">Стоп</button>
       </div>
       <button id="refreshResumes" class="secondary">Обновить резюме</button>
+      <button id="chatAssist" class="secondary">Обработка чатов</button>
       <button id="openOptions" class="secondary">Настройки</button>
     </div>
 
@@ -187,6 +226,13 @@
     <div id="lastError"></div>
     <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
     <div id="recentResults" aria-live="polite"></div>
+    <section aria-label="Chat reports">
+      <div class="reports-head">
+        <h2>Chat reports</h2>
+        <button id="clearReports" class="secondary">Clear</button>
+      </div>
+      <div id="chatReports" aria-live="polite"></div>
+    </section>
     <script src="popup.js"></script>
   </body>
 </html>

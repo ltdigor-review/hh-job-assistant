@@ -9,6 +9,9 @@ const DEFAULTS = {
   dailyLimit: 20,
   delayMinMs: 8000,
   delayMaxMs: 15000,
+  chatUnreadOnly: true,
+  chatReplyMode: 'draft',
+  chatLimit: 10,
   runState: {
     state: 'idle',
     found: 0,
@@ -20,7 +23,8 @@ const DEFAULTS = {
     currentAction: '',
     updatedAt: null
   },
-  runResults: []
+  runResults: [],
+  chatReports: []
 };
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
@@ -90,7 +94,58 @@ async function appendRunResult(item) {
   });
 }
 
+async function appendChatReport(item) {
+  const { chatReports = [] } = await storageGet(['chatReports']);
+  await storageSet({
+    chatReports: [
+      ...chatReports.slice(-199),
+      {
+        id: item.id || `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+        timestamp: item.timestamp || nowIso(),
+        chatUrl: item.chatUrl || '',
+        employerName: item.employerName || '',
+        vacancyTitle: item.vacancyTitle || '',
+        vacancyUrl: item.vacancyUrl || '',
+        status: item.status || 'reported',
+        reason: item.reason || '',
+        contactType: item.contactType || '',
+        contactText: item.contactText || '',
+        questionText: item.questionText || '',
+        draftAnswer: item.draftAnswer || '',
+        sent: Boolean(item.sent),
+        error: item.error || ''
+      }
+    ]
+  });
+}
+
 function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vacancyText, extraText }) {
+  if (task === 'chat_reply') {
+    return [
+      {
+        role: 'system',
+        content:
+          'You help a job applicant answer hh.ru employer chat questions. Answer in concise Russian. Use only the resume, vacancy, chat context, and expected salary. Do not invent experience, contacts, availability, or certainty when information is missing. Return only the final reply text.'
+      },
+      {
+        role: 'user',
+        content: [
+          'Резюме кандидата:',
+          resumeText || '(резюме не указано)',
+          '',
+          'Ожидаемая зарплата кандидата:',
+          expectedSalary || '(зарплата не указана)',
+          '',
+          'Вакансия:',
+          vacancyText || '(текст вакансии не найден)',
+          '',
+          'Контекст чата и вопрос работодателя:',
+          extraText || '(текст чата не найден)'
+        ].join('\n')
+      }
+    ];
+  }
+
   if (task === 'test_assist') {
     return [
       {
@@ -184,6 +239,72 @@ function extractResumeTextScript() {
   };
 }
 
+function extractVacancyTextScript() {
+  const text = (document.body?.innerText || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (/\/account\/login|\/account\/signup/.test(location.pathname) || /captcha|подтвердите, что вы не робот|не робот/i.test(text)) {
+    return { ok: false, error: 'Login or captcha page detected', text: '' };
+  }
+
+  const node =
+    document.querySelector('[data-qa="vacancy-description"]') ||
+    document.querySelector('[data-qa="vacancy-section"]') ||
+    document.querySelector('[data-qa="vacancy-view-description"]') ||
+    document.querySelector('main') ||
+    document.body;
+
+  return {
+    ok: true,
+    title: document.title,
+    text: String(node?.innerText || text)
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+      .slice(0, 12000)
+  };
+}
+
+function normalizeVacancyUrl(value) {
+  if (!value) return '';
+  try {
+    const url = new URL(String(value).trim());
+    if ((url.hostname !== 'hh.ru' && !url.hostname.endsWith('.hh.ru')) || !/^\/vacancy\/\d+/.test(url.pathname)) {
+      return '';
+    }
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+async function getVacancyContextByUrl(vacancyUrl) {
+  const normalizedUrl = normalizeVacancyUrl(vacancyUrl);
+  if (!normalizedUrl) return '';
+
+  const tab = await chrome.tabs.create({ url: normalizedUrl, active: false });
+  try {
+    await waitForTabReady(tab.id, 30000);
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: extractVacancyTextScript
+    });
+    const result = execution?.result || { ok: false, error: 'No vacancy parse result', text: '' };
+    if (!result.ok) {
+      throw new Error(result.error || 'Vacancy parse failed');
+    }
+    return String(result.text || '').slice(0, 12000);
+  } finally {
+    if (tab.id) {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+  }
+}
+
 async function getResumeContext() {
   const {
     resumeUrl = '',
@@ -256,7 +377,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         extraText: String(extraText).slice(0, 8000)
       }),
       temperature: task === 'test_assist' ? 0.2 : 0.35,
-      max_tokens: task === 'test_assist' ? 1200 : 900
+      max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
     })
   });
 
@@ -271,6 +392,15 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     throw new Error('Groq returned an empty response');
   }
   return content;
+}
+
+async function generateChatReply({ vacancyUrl = '', vacancyText = '', chatText = '' }) {
+  const parsedVacancyText = vacancyText || await getVacancyContextByUrl(vacancyUrl);
+  return callGroq({
+    task: 'chat_reply',
+    vacancyText: parsedVacancyText,
+    extraText: chatText
+  });
 }
 
 async function testGroq() {
@@ -678,6 +808,27 @@ async function runResumeRefresh() {
   }
 }
 
+async function runChatAssistFromActiveTab() {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let tab = activeTab;
+
+  if (!tab?.id || !isHhUrl(tab.url)) {
+    tab = await chrome.tabs.create({ url: 'https://hh.ru/chat', active: true });
+  }
+
+  let tabId = tab.id;
+  const tabUrl = new URL(tab.url || 'https://hh.ru/chat');
+
+  if (tabUrl.pathname !== '/chat') {
+    const updatedTab = await chrome.tabs.update(tabId, { url: 'https://hh.ru/chat' });
+    tabId = updatedTab?.id || tabId;
+    await waitForTabReady(tabId, 30000);
+    await sleep(1000);
+  }
+
+  return chrome.tabs.sendMessage(tabId, { type: 'START_CHAT_ASSIST' });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
 });
@@ -696,6 +847,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, ...state });
         break;
       }
+      case 'GET_CHAT_REPORTS': {
+        const { chatReports = [] } = await storageGet(['chatReports']);
+        sendResponse({ ok: true, chatReports });
+        break;
+      }
+      case 'CLEAR_CHAT_REPORTS': {
+        await storageSet({ chatReports: [] });
+        sendResponse({ ok: true });
+        break;
+      }
       case 'SET_RUN_STATE': {
         await setRunState(message.patch || {});
         sendResponse({ ok: true });
@@ -703,6 +864,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'APPEND_RUN_RESULT': {
         await appendRunResult(message.item || {});
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'APPEND_CHAT_REPORT': {
+        await appendChatReport(message.item || {});
         sendResponse({ ok: true });
         break;
       }
@@ -715,6 +881,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, text });
         break;
       }
+      case 'GENERATE_CHAT_REPLY': {
+        const text = await generateChatReply({
+          vacancyUrl: message.vacancyUrl || '',
+          vacancyText: message.vacancyText || '',
+          chatText: message.chatText || ''
+        });
+        sendResponse({ ok: true, text });
+        break;
+      }
       case 'TEST_GROQ': {
         const result = await testGroq();
         sendResponse(result);
@@ -722,6 +897,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'REFRESH_RESUMES_NOW': {
         const result = await runResumeRefresh();
+        sendResponse(result);
+        break;
+      }
+      case 'START_CHAT_ASSIST': {
+        const result = await runChatAssistFromActiveTab();
         sendResponse(result);
         break;
       }
