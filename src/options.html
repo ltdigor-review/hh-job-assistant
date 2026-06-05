@@ -31,6 +31,11 @@
         font-size: 24px;
       }
 
+      h2 {
+        margin: 24px 0 12px;
+        font-size: 18px;
+      }
+
       label {
         display: block;
         margin: 16px 0 6px;
@@ -106,9 +111,6 @@
     <main>
       <h1>HH Job Assistant</h1>
 
-      <label for="groqApiKey">Groq API key</label>
-      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
-
       <label for="groqModel">Groq model</label>
       <select id="groqModel">
         <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
@@ -161,6 +163,10 @@
           <input id="chatLimit" type="number" min="1" max="100">
         </div>
       </div>
+
+      <h2>Groq API</h2>
+      <label for="groqApiKey">Groq API key</label>
+      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
 
       <div class="actions">
         <button id="save">Save</button>

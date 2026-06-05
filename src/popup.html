@@ -28,10 +28,16 @@
 
       .header {
         display: flex;
-        align-items: baseline;
+        align-items: center;
         justify-content: space-between;
         gap: 12px;
         margin-bottom: 12px;
+      }
+
+      .header-meta {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
       }
 
       #version {
@@ -133,10 +139,25 @@
         border-color: #991b1b;
       }
 
+      .icon-button {
+        width: 28px;
+        min-height: 28px;
+        height: 28px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        border-color: #b8c4d4;
+        background: #f8fafc;
+        color: #172033;
+        font-size: 16px;
+        line-height: 1;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
+      }
+
       .settings {
         display: grid;
         gap: 8px;
-        margin-top: 12px;
+        margin-top: 14px;
         padding: 10px;
         border: 1px solid #d8e0ea;
         border-radius: 8px;
@@ -290,7 +311,10 @@
   <body>
     <header class="header">
       <h1>HH Job Assistant</h1>
-      <span id="version" aria-label="Version"></span>
+      <div class="header-meta">
+        <span id="version" aria-label="Version"></span>
+        <button id="openOptions" class="icon-button" type="button" title="Настройки" aria-label="Настройки">⚙</button>
+      </div>
     </header>
 
     <section class="health" aria-label="Extension status">
@@ -318,17 +342,7 @@
       </div>
       <button id="refreshResumes" class="secondary">Обновить резюме</button>
       <button id="chatAssist" class="secondary">Обработка чатов</button>
-      <button id="openOptions" class="secondary">Настройки</button>
     </div>
-
-    <section class="settings" aria-label="Groq settings">
-      <label for="groqApiKey">Groq API key</label>
-      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
-      <div class="settings-actions">
-        <button id="saveGroqKey" class="secondary">Save key</button>
-        <button id="testGroq" class="secondary">Test Groq</button>
-      </div>
-    </section>
 
     <section id="runPanel" class="run-panel hidden" aria-label="Run status">
       <dl>
@@ -360,6 +374,14 @@
         <button id="clearReports" class="secondary">Clear</button>
       </div>
       <div id="chatReports" aria-live="polite"></div>
+    </section>
+    <section class="settings" aria-label="Groq settings">
+      <label for="groqApiKey">Groq API key</label>
+      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
+      <div class="settings-actions">
+        <button id="saveGroqKey" class="secondary">Save key</button>
+        <button id="testGroq" class="secondary">Test Groq</button>
+      </div>
     </section>
     <script src="popup.js"></script>
   </body>

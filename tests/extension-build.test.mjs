@@ -35,6 +35,7 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
+  assert.deepEqual(manifest.content_scripts[0].js, ['src/agent-log.js', 'src/content-hh.js']);
 });
 
 test('version guard checks configured repo versions', async () => {
@@ -74,6 +75,7 @@ test('version guard bumps json and regex files without stack-specific tooling', 
 
 test('javascript files parse', async () => {
   const files = [
+    'src/agent-log.js',
     'src/background.js',
     'src/content-hh.js',
     'src/options.js',
@@ -529,8 +531,11 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.ok(html.indexOf('id="dryRun"') < html.indexOf('id="autoApply"'));
   assert.ok(html.indexOf('id="autoApply"') < html.indexOf('id="stop"'));
   assert.ok(html.indexOf('id="stop"') < html.indexOf('id="refreshResumes"'));
+  assert.ok(html.indexOf('id="openOptions"') < html.indexOf('id="dryRun"'));
   assert.ok(html.indexOf('id="statusLine"') < html.indexOf('id="lastError"'));
   assert.ok(html.indexOf('id="lastError"') < html.indexOf('id="recentResults"'));
+  assert.ok(html.indexOf('id="chatReports"') < html.indexOf('id="groqApiKey"'));
+  assert.match(html, /aria-label="Настройки">⚙<\/button>/);
   assert.doesNotMatch(html, /openWindow|Открыть окном|window-mode/);
   assert.doesNotMatch(js, /OPEN_ASSISTANT_WINDOW|openWindow/);
   assert.match(js, /openOptionsPage/);

@@ -783,21 +783,21 @@ test('auto apply navigates to next hh search page when limit remains', async () 
   assert.equal(result.localStore.autoApplySearchQueue.counters.processed, 1);
 });
 
-test('auto apply continues queued response pages for 20 applications', async () => {
-  const result = await runQueuedResponsePages({ count: 20 });
+test('auto apply continues queued response pages for 30 applications', async () => {
+  const result = await runQueuedResponsePages({ count: 30 });
 
-  assert.equal(result.submitClicks, 20);
-  assert.equal(result.appended.length, 20);
+  assert.equal(result.submitClicks, 30);
+  assert.equal(result.appended.length, 30);
   assert.equal(result.appended.every((item) => item.status === 'applied_test_assisted'), true);
-  assert.equal(result.navigations.length, 20);
+  assert.equal(result.navigations.length, 30);
   assert.equal(result.navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
   assert.equal(result.localStore.autoApplyQueue.active, false);
-  assert.equal(result.localStore.autoApplyQueue.index, 20);
-  assert.equal(result.localStore.autoApplyQueue.counters.applied, 20);
-  assert.equal(result.localStore.autoApplyQueue.counters.processed, 20);
+  assert.equal(result.localStore.autoApplyQueue.index, 30);
+  assert.equal(result.localStore.autoApplyQueue.counters.applied, 30);
+  assert.equal(result.localStore.autoApplyQueue.counters.processed, 30);
   assert.equal(result.localStore.autoApplyQueue.counters.errors, 0);
   assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).applied, 20);
+  assert.equal(result.states.at(-1).applied, 30);
 });
 
 test('auto apply recovers from hh vacancy redirect back to original search page', async () => {
