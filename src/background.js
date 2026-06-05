@@ -7,8 +7,8 @@ const DEFAULTS = {
   expectedSalary: '',
   coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
-  delayMinMs: 8000,
-  delayMaxMs: 15000,
+  delayMinMs: 2500,
+  delayMaxMs: 5000,
   chatUnreadOnly: true,
   chatReplyMode: 'draft',
   chatLimit: 10,
@@ -28,6 +28,8 @@ const DEFAULTS = {
 };
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
+const OLD_DEFAULT_DELAY_MIN_MS = 8000;
+const OLD_DEFAULT_DELAY_MAX_MS = 15000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -62,6 +64,11 @@ async function ensureDefaults() {
 
   if (current.coverPrompt === OLD_DEFAULT_COVER_PROMPT) {
     patch.coverPrompt = DEFAULTS.coverPrompt;
+  }
+
+  if (current.delayMinMs === OLD_DEFAULT_DELAY_MIN_MS && current.delayMaxMs === OLD_DEFAULT_DELAY_MAX_MS) {
+    patch.delayMinMs = DEFAULTS.delayMinMs;
+    patch.delayMaxMs = DEFAULTS.delayMaxMs;
   }
 
   if (Object.keys(patch).length > 0) {
@@ -151,7 +158,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
       {
         role: 'system',
         content:
-          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, and expected salary. Give Russian draft answers with enough detail to answer the question, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
+          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, answer options, and expected salary. For multiple-choice or radio questions, include the exact option labels that fit the resume. For open questions, give Russian draft answers with enough detail to answer the question, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
       },
       {
         role: 'user',

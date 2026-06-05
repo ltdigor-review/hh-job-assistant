@@ -56,8 +56,8 @@ const HH_SELECTORS = {
   ]
 };
 
-const CLICK_DELAY_MIN_MS = 2000;
-const CLICK_DELAY_MAX_MS = 4000;
+const CLICK_DELAY_MIN_MS = 500;
+const CLICK_DELAY_MAX_MS = 1200;
 
 let stopRequested = false;
 let stopReason = '';
@@ -299,6 +299,61 @@ function findQuestionFields(root = getDialogRoot()) {
     });
 }
 
+function getControlType(control) {
+  return String(control?.type || control?.getAttribute?.('type') || '').toLowerCase();
+}
+
+function getOptionLabel(control) {
+  const label = typeof control.closest === 'function' ? control.closest('label') : null;
+  const ariaLabel = control.getAttribute?.('aria-label') || '';
+  const marker = textOf(label || control.parentElement || control);
+  const value = control.value || control.getAttribute?.('value') || '';
+  return cleanText([ariaLabel, marker, value].filter(Boolean).join('\n'));
+}
+
+function getControlGroupKey(control, index) {
+  const type = getControlType(control);
+  const name = String(control.getAttribute?.('name') || control.name || '').replace(/\[\]$/, '');
+  if (name) return `${type}:${name}`;
+
+  const group = typeof control.closest === 'function' ? control.closest('fieldset,[role="group"],[data-qa*="task"]') : null;
+  const groupMarker = cleanText(
+    [group?.getAttribute?.('data-qa') || '', textOf(group).slice(0, 160)].filter(Boolean).join('\n')
+  );
+  return groupMarker ? `${type}:${groupMarker}` : `${type}:control-${index}`;
+}
+
+function isSelectableQuestionControl(control) {
+  if (!control || isDisabled(control)) return false;
+  const type = getControlType(control);
+  if (type !== 'checkbox' && type !== 'radio') return false;
+
+  const label = typeof control.closest === 'function' ? control.closest('label') : null;
+  const parent = control.parentElement || null;
+  return isVisible(control) || isVisible(label) || isVisible(parent);
+}
+
+function findQuestionControlGroups(root = getDialogRoot()) {
+  const controls = [...root.querySelectorAll('input[type="checkbox"],input[type="radio"]')]
+    .filter(isSelectableQuestionControl)
+    .map((control, index) => ({
+      control,
+      type: getControlType(control),
+      label: getOptionLabel(control),
+      groupKey: getControlGroupKey(control, index)
+    }))
+    .filter((option) => option.label && !/letter|cover|сопровод/i.test(option.label));
+
+  const byGroup = new Map();
+  for (const option of controls) {
+    const group = byGroup.get(option.groupKey) || { type: option.type, options: [] };
+    group.options.push(option);
+    byGroup.set(option.groupKey, group);
+  }
+
+  return [...byGroup.values()].filter((group) => group.options.length > 0);
+}
+
 function findSubmitButton(root = getDialogRoot()) {
   return (
     queryAll(HH_SELECTORS.submitButtons, root)
@@ -522,8 +577,8 @@ async function getConfig() {
   ]);
   return {
     dailyLimit: Number(values.dailyLimit) || 20,
-    delayMinMs: Number(values.delayMinMs) || 8000,
-    delayMaxMs: Number(values.delayMaxMs) || 15000,
+    delayMinMs: Number(values.delayMinMs) || 2500,
+    delayMaxMs: Number(values.delayMaxMs) || 5000,
     chatUnreadOnly: values.chatUnreadOnly !== false,
     chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : 'draft',
     chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || 10, 100))
@@ -602,6 +657,90 @@ function splitGeneratedAnswers(text, count) {
   }
 
   return Array.from({ length: count }, () => cleaned);
+}
+
+function normalizeChoiceText(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[–—-]/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function choiceTokens(value) {
+  const stopWords = new Set([
+    'можно',
+    'выбрать',
+    'несколько',
+    'вариант',
+    'варианта',
+    'свои',
+    'свой',
+    'другое',
+    'другой',
+    'человек',
+    'человека',
+    'людей',
+    'более',
+    'менее',
+    'нет',
+    'да'
+  ]);
+  return normalizeChoiceText(value)
+    .split(/\s+/)
+    .filter((token) => token.length >= 2 && !stopWords.has(token));
+}
+
+function scoreChoice(label, answerText) {
+  const normalizedLabel = normalizeChoiceText(label);
+  const normalizedAnswer = normalizeChoiceText(answerText);
+  if (!normalizedLabel || !normalizedAnswer || /свой вариант|другое/i.test(label)) return 0;
+  if (normalizedAnswer.includes(normalizedLabel)) return 100;
+
+  if (/^да$/i.test(label.trim()) && /\bда\b/i.test(answerText)) return 90;
+  if (/^нет/i.test(label.trim()) && /\bнет\b/i.test(answerText)) return 90;
+
+  const labelTokens = choiceTokens(label);
+  if (labelTokens.length === 0) return 0;
+
+  const answerTokens = new Set(choiceTokens(answerText));
+  const matches = labelTokens.filter((token) => answerTokens.has(token)).length;
+  return matches / labelTokens.length;
+}
+
+function selectControl(control) {
+  control.focus?.();
+  if (!control.checked) {
+    control.click?.();
+  }
+  control.checked = true;
+  control.dispatchEvent?.(new Event('input', { bubbles: true }));
+  control.dispatchEvent?.(new Event('change', { bubbles: true }));
+}
+
+function fillQuestionControls(groups, answerText) {
+  let selected = 0;
+  for (const group of groups) {
+    const scored = group.options
+      .map((option) => ({ ...option, score: scoreChoice(option.label, answerText) }))
+      .filter((option) => option.score > 0);
+
+    if (group.type === 'radio') {
+      const best = scored.sort((left, right) => right.score - left.score)[0];
+      if (best) {
+        selectControl(best.control);
+        selected += 1;
+      }
+      continue;
+    }
+
+    for (const option of scored) {
+      selectControl(option.control);
+      selected += 1;
+    }
+  }
+  return selected;
 }
 
 function getChatUrl(value = location.href) {
@@ -982,8 +1121,11 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
-  if (detectTest(root) || findQuestionFields(root).length > 0) {
+  const initialQuestionFields = findQuestionFields(root);
+  const initialQuestionControlGroups = findQuestionControlGroups(root);
+  if (detectTest(root) || initialQuestionFields.length > 0 || initialQuestionControlGroups.length > 0) {
     const questionFields = findQuestionFields(root);
+    const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
     let coverLetterUsed = false;
     await setRunState({
@@ -1000,7 +1142,7 @@ async function applyToVacancy(item, counters) {
         throw error;
       }
 
-      assistance = questionFields.length > 0 ? await getExpectedSalary() : '';
+      assistance = questionFields.length > 0 && questionControlGroups.length === 0 ? await getExpectedSalary() : '';
       if (assistance) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer question fields' });
       } else {
@@ -1022,6 +1164,17 @@ async function applyToVacancy(item, counters) {
       }
     } finally {
       setBusyCursor(false);
+    }
+
+    if (questionControlGroups.length > 0) {
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer choice fields' });
+      setBusyCursor(true);
+      try {
+        fillQuestionControls(questionControlGroups, assistance);
+      } finally {
+        setBusyCursor(false);
+      }
+      await sleep(500);
     }
 
     if (questionFields.length > 0) {

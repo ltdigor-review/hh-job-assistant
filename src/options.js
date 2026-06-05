@@ -4,8 +4,8 @@ const DEFAULTS = {
   expectedSalary: '',
   coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
   dailyLimit: 20,
-  delayMinMs: 8000,
-  delayMaxMs: 15000,
+  delayMinMs: 2500,
+  delayMaxMs: 5000,
   chatUnreadOnly: true,
   chatReplyMode: 'draft',
   chatLimit: 10
@@ -68,8 +68,8 @@ async function saveOptions() {
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
-    delayMinMs: Math.max(1000, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
-    delayMaxMs: Math.max(1000, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
+    delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
+    delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
     chatUnreadOnly: fields.chatUnreadOnly.checked,
     chatReplyMode: fields.chatReplyMode.value === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
     chatLimit: Math.max(1, Math.min(Number(fields.chatLimit.value) || DEFAULTS.chatLimit, 100))
