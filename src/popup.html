@@ -294,6 +294,12 @@
         margin-top: 8px;
       }
 
+      #agentDebugLog {
+        display: grid;
+        gap: 6px;
+        margin-top: 8px;
+      }
+
       .report {
         padding: 8px;
         border: 1px solid #d8e0ea;
@@ -305,6 +311,21 @@
       .report a {
         color: #1d4ed8;
         word-break: break-word;
+      }
+
+      .debug-summary {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 4px 10px;
+        padding: 8px;
+        border: 1px solid #d8e0ea;
+        border-radius: 6px;
+        background: #f8fafc;
+        font-size: 12px;
+      }
+
+      .debug-summary strong {
+        font-size: 13px;
       }
     </style>
   </head>
@@ -374,6 +395,13 @@
         <button id="clearReports" class="secondary">Clear</button>
       </div>
       <div id="chatReports" aria-live="polite"></div>
+    </section>
+    <section aria-label="Agent debug log">
+      <div class="reports-head">
+        <h2>Agent debug</h2>
+        <button id="clearAgentDebugLog" class="secondary">Clear</button>
+      </div>
+      <div id="agentDebugLog" aria-live="polite"></div>
     </section>
     <section class="settings" aria-label="Groq settings">
       <label for="groqApiKey">Groq API key</label>

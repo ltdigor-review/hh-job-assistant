@@ -871,12 +871,48 @@ async function runChatAssistFromActiveTab() {
   return chrome.tabs.sendMessage(tabId, { type: 'START_CHAT_ASSIST' });
 }
 
+function isAutoApplyStartUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      url.pathname === '/search/vacancy' &&
+      url.search.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function startAutoApplyFromActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
+    throw new Error('Open https://hh.ru/search/vacancy?... before starting auto apply');
+  }
+  await appendAgentLog('command_start_auto_apply', { tabId: tab.id, url: tab.url });
+  return chrome.tabs.sendMessage(tab.id, { type: 'START_AUTO_APPLY' });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureDefaults();
+});
+
+chrome.commands?.onCommand?.addListener((command) => {
+  (async () => {
+    await ensureDefaults();
+    if (command === 'start-auto-apply') {
+      const result = await startAutoApplyFromActiveTab();
+      await appendAgentLog('command_start_auto_apply_result', result || {});
+    }
+  })().catch((error) => {
+    appendAgentLog('command_error', {
+      command,
+      error: error instanceof Error ? error.message : String(error)
+    }).catch(() => {});
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -896,6 +932,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'CLEAR_CHAT_REPORTS': {
         await storageSet({ chatReports: [] });
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'GET_AGENT_DEBUG_LOG': {
+        const { agentDebugLog = [] } = await storageGet(['agentDebugLog']);
+        sendResponse({ ok: true, agentDebugLog });
+        break;
+      }
+      case 'CLEAR_AGENT_DEBUG_LOG': {
+        await storageSet({ agentDebugLog: [] });
         sendResponse({ ok: true });
         break;
       }

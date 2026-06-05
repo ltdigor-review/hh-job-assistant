@@ -25,6 +25,7 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.equal(manifest.background.service_worker, 'src/background.js');
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.action.default_popup, 'src/popup.html');
+  assert.equal(manifest.commands['start-auto-apply'].suggested_key.mac, 'Alt+Shift+A');
   assert.equal(manifest.options_page, 'src/options.html');
   assert.ok(manifest.permissions.includes('storage'));
   assert.ok(manifest.permissions.includes('tabs'));
@@ -124,6 +125,9 @@ test('background initializes defaults and registers required listeners', async (
       onStartup: { addListener() { calls.push(['runtime.onStartup']); } },
       onMessage: { addListener() { calls.push(['runtime.onMessage']); } }
     },
+    commands: {
+      onCommand: { addListener() { calls.push(['commands.onCommand']); } }
+    },
     tabs: {
       async get() {
         return { status: 'complete' };
@@ -145,6 +149,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.chatLimit, 10);
   assert.deepEqual(localData.chatReports, []);
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
+  assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
 
 test('test assistance prompt includes resume, vacancy, question text, and expected salary', async () => {
@@ -522,7 +527,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'version', 'extensionStatus', 'tabStatus', 'recentResults', 'chatReports', 'clearReports']) {
+  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'version', 'extensionStatus', 'tabStatus', 'recentResults', 'chatReports', 'clearReports', 'agentDebugLog', 'clearAgentDebugLog']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.doesNotMatch(html, /id="processed"|Обработано/);
@@ -548,6 +553,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /START_AUTO_APPLY/);
   assert.match(js, /START_CHAT_ASSIST/);
   assert.match(js, /GET_CHAT_REPORTS/);
+  assert.match(js, /GET_AGENT_DEBUG_LOG/);
+  assert.match(js, /CLEAR_AGENT_DEBUG_LOG/);
   assert.match(js, /GET_CONTENT_STATUS/);
   assert.match(js, /CLEAR_CHAT_REPORTS/);
   assert.match(js, /chatReports/);

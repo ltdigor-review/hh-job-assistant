@@ -10,6 +10,7 @@ const nodes = {
   runPanel: document.getElementById('runPanel'),
   logsPanel: document.getElementById('logsPanel'),
   chatReports: document.getElementById('chatReports'),
+  agentDebugLog: document.getElementById('agentDebugLog'),
   groqApiKey: document.getElementById('groqApiKey'),
   version: document.getElementById('version'),
   extensionStatus: document.getElementById('extensionStatus'),
@@ -188,6 +189,58 @@ function renderChatReports(chatReports = []) {
   );
 }
 
+function countDebugEvents(items = []) {
+  return items.reduce((counts, item) => {
+    const event = item.event || 'unknown';
+    counts[event] = (counts[event] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function renderAgentDebugLog(agentDebugLog = []) {
+  const items = agentDebugLog.slice(-500);
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'report';
+    empty.textContent = 'No agent debug events yet.';
+    nodes.agentDebugLog.replaceChildren(empty);
+    return;
+  }
+
+  const counts = countDebugEvents(items);
+  const applied = items.filter((item) => item.event === 'run_result' && /^applied/.test(item.details?.status || '')).length;
+  const skipped = items.filter((item) => item.event === 'run_result' && /^skipped/.test(item.details?.status || '')).length;
+  const errors = items.filter((item) => /error/i.test(item.event || '') || item.details?.error).length;
+  const latest = items.at(-1);
+
+  const summary = document.createElement('div');
+  summary.className = 'debug-summary';
+  summary.append(
+    document.createElement('strong'),
+    document.createTextNode(`${items.length} events`),
+    document.createTextNode('Applied'),
+    document.createTextNode(String(applied)),
+    document.createTextNode('Skipped'),
+    document.createTextNode(String(skipped)),
+    document.createTextNode('Errors'),
+    document.createTextNode(String(errors)),
+    document.createTextNode('Latest'),
+    document.createTextNode(`${latest?.scope || 'n/a'}:${latest?.event || 'n/a'}`)
+  );
+  summary.querySelector('strong').textContent = 'Extension log';
+
+  const recent = Object.entries(counts)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 5)
+    .map(([event, count]) => `${event}: ${count}`)
+    .join(' | ');
+  const detail = document.createElement('div');
+  detail.className = 'report';
+  detail.textContent = recent;
+
+  nodes.agentDebugLog.replaceChildren(summary, detail);
+}
+
 async function loadPopupSettings() {
   const values = await chrome.storage.local.get(['groqApiKey']);
   nodes.groqApiKey.value = values.groqApiKey ? '********' : '';
@@ -269,6 +322,11 @@ async function refreshStatus() {
   if (reportsResponse?.ok) {
     renderChatReports(reportsResponse.chatReports || []);
   }
+
+  const debugResponse = await chrome.runtime.sendMessage({ type: 'GET_AGENT_DEBUG_LOG' });
+  if (debugResponse?.ok) {
+    renderAgentDebugLog(debugResponse.agentDebugLog || []);
+  }
 }
 
 async function runContentAction(type, label) {
@@ -334,6 +392,16 @@ document.getElementById('clearReports').addEventListener('click', async () => {
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_CHAT_REPORTS' });
     setStatus('Chat reports cleared.');
+    await refreshStatus();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+});
+
+document.getElementById('clearAgentDebugLog').addEventListener('click', async () => {
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_AGENT_DEBUG_LOG' });
+    setStatus('Agent debug log cleared.');
     await refreshStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);

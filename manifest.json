@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "HH Job Assistant",
   "description": "Assists with hh.ru resume refresh, vacancy responses, Groq cover letters, and test hints.",
-  "version": "0.1.13",
+  "version": "0.1.15",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -46,6 +46,15 @@
     },
     "default_popup": "src/popup.html",
     "default_title": "HH Job Assistant"
+  },
+  "commands": {
+    "start-auto-apply": {
+      "suggested_key": {
+        "default": "Alt+Shift+A",
+        "mac": "Alt+Shift+A"
+      },
+      "description": "Start HH auto apply from the active hh.ru search page"
+    }
   },
   "options_page": "src/options.html"
 }
