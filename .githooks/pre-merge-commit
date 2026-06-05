@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+python3 scripts/version_guard.py --bump patch
+python3 scripts/version_guard.py --check
+git add manifest.json package.json

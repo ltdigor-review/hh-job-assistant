@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -14,8 +16,11 @@ async function readJson(path) {
 
 test('manifest is valid MV3 and exposes popup UI', async () => {
   const manifest = await readJson('manifest.json');
+  const packageJson = await readJson('package.json');
 
   assert.equal(manifest.manifest_version, 3);
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.background.service_worker, 'src/background.js');
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.action.default_popup, 'src/popup.html');
@@ -29,6 +34,41 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
+});
+
+test('version guard checks configured repo versions', async () => {
+  const { stdout } = await execFileAsync('python3', ['scripts/version_guard.py', '--check'], {
+    cwd: new URL('.', root)
+  });
+
+  assert.match(stdout, /Version OK: \d+\.\d+\.\d+/);
+});
+
+test('version guard bumps json and regex files without stack-specific tooling', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'version-guard-'));
+  try {
+    await writeFile(
+      join(dir, '.version-sync.json'),
+      JSON.stringify({
+        files: [
+          { path: 'manifest.json', type: 'json', key: 'version' },
+          { path: 'project.txt', type: 'regex', pattern: 'version=([0-9]+\\.[0-9]+\\.[0-9]+)' }
+        ]
+      }),
+      'utf8'
+    );
+    await writeFile(join(dir, 'manifest.json'), JSON.stringify({ version: '1.2.3' }), 'utf8');
+    await writeFile(join(dir, 'project.txt'), 'name=demo\nversion=1.2.3\n', 'utf8');
+
+    await execFileAsync('python3', [new URL('scripts/version_guard.py', root).pathname, '--bump', 'minor'], {
+      cwd: dir
+    });
+
+    assert.equal(JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')).version, '1.3.0');
+    assert.match(await readFile(join(dir, 'project.txt'), 'utf8'), /version=1\.3\.0/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('javascript files parse', async () => {
@@ -179,6 +219,10 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /250 000 руб\. на руки/);
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
+  const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
+  assert.match(systemContent, /Avoid first-person pronouns/);
+  assert.match(systemContent, /делал/);
+  assert.match(systemContent, /not ultra-short fragments/);
 });
 
 test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
@@ -466,30 +510,40 @@ test('content script registers one message listener', async () => {
   await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
   assert.equal(listenerCount, 1);
+  assert.match(source, /GET_CONTENT_STATUS/);
 });
 
-test('popup has ordered controls wired to Groq key, results, and actions', async () => {
+test('popup has ordered controls wired to Groq key, version, results, and actions', async () => {
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'recentResults', 'chatReports', 'clearReports']) {
+  for (const id of ['dryRun', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'groqApiKey', 'saveGroqKey', 'testGroq', 'version', 'extensionStatus', 'tabStatus', 'recentResults', 'chatReports', 'clearReports']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(html, /id="processed"|Обработано/);
+  assert.doesNotMatch(js, /nodes\.processed/);
 
   assert.ok(html.indexOf('id="dryRun"') < html.indexOf('id="autoApply"'));
   assert.ok(html.indexOf('id="autoApply"') < html.indexOf('id="stop"'));
   assert.ok(html.indexOf('id="stop"') < html.indexOf('id="refreshResumes"'));
+  assert.ok(html.indexOf('id="statusLine"') < html.indexOf('id="lastError"'));
+  assert.ok(html.indexOf('id="lastError"') < html.indexOf('id="recentResults"'));
   assert.doesNotMatch(html, /openWindow|Открыть окном|window-mode/);
   assert.doesNotMatch(js, /OPEN_ASSISTANT_WINDOW|openWindow/);
   assert.match(js, /openOptionsPage/);
   assert.match(js, /TEST_GROQ/);
+  assert.match(js, /getManifest\(\)\.version/);
   assert.match(js, /skipped_missing_groq_key/);
+  assert.match(js, /\^skipped/);
+  assert.match(js, /item\.error/);
   assert.match(js, /currentAction/);
   assert.match(js, /START_AUTO_APPLY/);
   assert.match(js, /START_CHAT_ASSIST/);
   assert.match(js, /GET_CHAT_REPORTS/);
+  assert.match(js, /GET_CONTENT_STATUS/);
   assert.match(js, /CLEAR_CHAT_REPORTS/);
   assert.match(js, /chatReports/);
+  assert.match(js, /refreshHealth/);
   assert.match(js, /isAutoApplyStartUrl/);
   assert.match(js, /url\?\.protocol === 'https:'/);
   assert.match(js, /url\.hostname === 'hh\.ru'/);
@@ -532,11 +586,11 @@ test('options expose Groq production text model choices', async () => {
 });
 
 class FakeElement {
-  constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {} } = {}) {
+  constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {}, disabled = false } = {}) {
     this.innerText = text;
     this.textContent = text;
     this.href = href;
-    this.disabled = false;
+    this.disabled = disabled;
     this.selectorMap = selectorMap;
     this.clickHandler = click;
     this.value = '';
@@ -863,6 +917,11 @@ async function runContentAutoApply({
   expectedSalary = '',
   followupDialogText = '',
   followupConfirmText = 'Все равно откликнуться',
+  disabledSubmit = false,
+  keepDialogOpenAfterSubmit = false,
+  postSubmitDialogText = '',
+  nextPageUrl = '',
+  dailyLimit = 1,
   groqResponse = { ok: false, error: 'Groq API key is not configured' }
 }) {
   const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
@@ -883,7 +942,13 @@ async function runContentAutoApply({
     text: hasCoverLetterField ? 'Сопроводительное письмо обязательное' : '',
     attrs: hasCoverLetterField ? { 'data-qa': 'vacancy-response-letter-input' } : {}
   });
-  const closeButton = new FakeElement({ text: 'Закрыть' });
+  const closeButton = new FakeElement({
+    text: 'Закрыть',
+    attrs: { 'aria-label': 'Закрыть' },
+    click() {
+      dialog = null;
+    }
+  });
   const followupConfirmButton = new FakeElement({
     text: followupConfirmText,
     click() {
@@ -893,6 +958,7 @@ async function runContentAutoApply({
   });
   const submitButton = new FakeElement({
     text: 'Отправить',
+    disabled: disabledSubmit,
     click() {
       submitClicks += 1;
       if (followupDialogText) {
@@ -903,6 +969,19 @@ async function runContentAutoApply({
             button: [followupConfirmButton, closeButton]
           }
         });
+      } else if (postSubmitDialogText) {
+        dialog = new FakeElement({
+          text: postSubmitDialogText,
+          selectorMap: {
+            '[data-qa="vacancy-response-submit-popup"]': [submitButton],
+            '[data-qa="vacancy-response-letter-submit"]': [submitButton],
+            '[data-qa*="submit"]': [submitButton],
+            '[data-qa="bloko-modal-close"]': [closeButton],
+            button: [submitButton, closeButton]
+          }
+        });
+      } else if (!keepDialogOpenAfterSubmit) {
+        dialog = null;
       }
     }
   });
@@ -929,6 +1008,7 @@ async function runContentAutoApply({
     text: 'Java Developer',
     href: 'https://hh.ru/vacancy/123'
   });
+  const nextLink = nextPageUrl ? new FakeElement({ text: 'дальше', href: nextPageUrl }) : null;
   const card = new FakeElement({
     text: 'Java Developer\nООО Test\nОткликнуться',
     selectorMap: {
@@ -966,6 +1046,12 @@ async function runContentAutoApply({
       this.type = type;
     }
   };
+  globalThis.KeyboardEvent = class KeyboardEvent extends globalThis.Event {
+    constructor(type, options = {}) {
+      super(type);
+      Object.assign(this, options);
+    }
+  };
   globalThis.document = {
     title: 'HH test page',
     body: new FakeElement({ text: bodyText }),
@@ -976,6 +1062,10 @@ async function runContentAutoApply({
       if (selector === '[data-qa="vacancy-serp__vacancy"]') return startOnResponseForm ? [] : [card];
       if (selector === '[data-qa="serp-item"]') return [];
       if (selector === '[data-qa*="vacancy-serp"]') return startOnResponseForm ? [] : [card];
+      if (selector === 'a[data-qa="pager-next"]') return nextLink ? [nextLink] : [];
+      if (selector === '[data-qa="pager-next"] a') return [];
+      if (selector === 'a[rel="next"]') return [];
+      if (selector === 'a[href*="page="]') return nextLink ? [nextLink] : [];
       if (startOnResponseForm && selector === '[data-qa="vacancy-response-submit-popup"]') return [submitButton];
       if (startOnResponseForm && selector === '[data-qa="vacancy-response-letter-submit"]') return [submitButton];
       if (startOnResponseForm && selector === '[data-qa*="submit"]') return [submitButton];
@@ -994,6 +1084,11 @@ async function runContentAutoApply({
     },
     getElementById() {
       return null;
+    },
+    dispatchEvent(event) {
+      if (event.key === 'Escape') {
+        dialog = null;
+      }
     },
     createElement() {
       return new FakeElement();
@@ -1024,7 +1119,7 @@ async function runContentAutoApply({
     storage: {
       local: {
         async get() {
-          return { dailyLimit: 1, delayMinMs: 1, delayMaxMs: 1, expectedSalary, ...localStore };
+          return { dailyLimit, delayMinMs: 1, delayMaxMs: 1, expectedSalary, ...localStore };
         },
         async set(value) {
           Object.assign(localStore, value);
@@ -1050,7 +1145,9 @@ async function runContentAutoApply({
     textareaValue: textarea.value,
     coverTextareaValue: coverTextarea.value,
     localStore,
-    navigateUrl
+    navigateUrl,
+    bodyCursor: globalThis.document.body.style.cursor || '',
+    dialogOpen: Boolean(dialog)
   };
 }
 
@@ -1247,6 +1344,8 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
       runId: 'test-run',
       index: 0,
       items,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      limit: count,
       counters: {
         found: count,
         processed: 0,
@@ -1292,6 +1391,12 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
         this.type = type;
       }
     };
+    globalThis.KeyboardEvent = class KeyboardEvent extends globalThis.Event {
+      constructor(type, options = {}) {
+        super(type);
+        Object.assign(this, options);
+      }
+    };
     globalThis.document = {
       title: 'HH queued response page',
       body: new FakeElement({ text: 'Отклик на вакансию Ответьте на вопросы Писать тут Откликнуться' }),
@@ -1319,6 +1424,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
       getElementById() {
         return null;
       },
+      dispatchEvent() {},
       createElement() {
         return new FakeElement();
       }
@@ -1517,6 +1623,88 @@ test('auto apply submits test vacancy after Groq assistance', async () => {
   assert.equal(result.appended.at(-1).testDetected, true);
 });
 
+test('auto apply skips vacancy when hh disables response because resume visibility is wrong', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на «Видно компаниям-клиентам HeadHunter»',
+      'Откликнуться'
+    ].join('\n'),
+    hasTextarea: false,
+    disabledSubmit: true
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.dialogOpen, false);
+  assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
+  assert.match(result.appended.at(-1).error, /Resume visibility/);
+});
+
+test('auto apply skips open response form when blocked text is only in document body', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    disabledSubmit: true,
+    bodyText: 'Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на «Видно компаниям-клиентам HeadHunter»'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.dialogOpen, false);
+  assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
+  assert.match(result.appended.at(-1).error, /^Skipped: Resume visibility/);
+});
+
+test('auto apply closes blocked response dialog and continues to next hh page', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на «Видно компаниям-клиентам HeadHunter»',
+      'Откликнуться'
+    ].join('\n'),
+    hasTextarea: false,
+    disabledSubmit: true,
+    dailyLimit: 2,
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.dialogOpen, false);
+  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
+  assert.equal(result.localStore.autoApplySearchQueue.active, true);
+  assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
+});
+
+test('auto apply does not count submit as sent when hh keeps response dialog open', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    postSubmitDialogText: [
+      'Чтобы откликнуться на эту вакансию, поменяйте видимость резюме на «Видно компаниям-клиентам HeadHunter»',
+      'Откликнуться'
+    ].join('\n')
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.dialogOpen, false);
+  assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
+  assert.match(result.appended.at(-1).error, /Resume visibility/);
+});
+
 test('auto apply confirms country warning follow-up modal', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
@@ -1552,6 +1740,9 @@ test('auto apply fills required question on open response form', async () => {
   assert.equal(result.submitClicks, 1);
   assert.equal(result.textareaValue, '250 000 руб. на руки');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.ok(result.states.some((state) => state.currentAction === 'LLM: generating answers for HH employer questions'));
+  assert.ok(result.states.some((state) => state.currentAction === 'Filling HH employer question fields'));
+  assert.equal(result.bodyCursor, '');
 });
 
 test('auto apply uses expected salary for required question when Groq key is missing', async () => {
@@ -1606,7 +1797,7 @@ test('auto apply counts already confirmed response page as applied', async () =>
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
 });
 
-test('auto apply clicks list response button before using hh response link navigation', async () => {
+test('auto apply queues hh response link and opens employer question page', async () => {
   const responseHref = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&hhtmFrom=vacancy_search_list';
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
@@ -1615,11 +1806,28 @@ test('auto apply clicks list response button before using hh response link navig
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.queued, undefined);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.navigateUrl, '');
-  assert.equal(result.localStore.autoApplyQueue.active, false);
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.response.queued, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.navigateUrl, responseHref);
+  assert.equal(result.localStore.autoApplyQueue.active, true);
+  assert.equal(result.localStore.autoApplyQueue.sourceUrl, 'https://hh.ru/search/vacancy?text=java');
+  assert.equal(result.localStore.autoApplyQueue.items[0].responseUrl, responseHref);
+});
+
+test('auto apply navigates to next hh search page when limit remains', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 2,
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.navigated, true);
+  assert.equal(result.response.processed, 1);
+  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
+  assert.equal(result.localStore.autoApplySearchQueue.active, true);
+  assert.equal(result.localStore.autoApplySearchQueue.counters.processed, 1);
 });
 
 test('auto apply continues queued response pages for 20 applications', async () => {
@@ -1628,7 +1836,8 @@ test('auto apply continues queued response pages for 20 applications', async () 
   assert.equal(result.submitClicks, 20);
   assert.equal(result.appended.length, 20);
   assert.equal(result.appended.every((item) => item.status === 'applied_test_assisted'), true);
-  assert.equal(result.navigations.length, 19);
+  assert.equal(result.navigations.length, 20);
+  assert.equal(result.navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
   assert.equal(result.localStore.autoApplyQueue.active, false);
   assert.equal(result.localStore.autoApplyQueue.index, 20);
   assert.equal(result.localStore.autoApplyQueue.counters.applied, 20);
@@ -1636,4 +1845,99 @@ test('auto apply continues queued response pages for 20 applications', async () 
   assert.equal(result.localStore.autoApplyQueue.counters.errors, 0);
   assert.equal(result.states.at(-1).state, 'complete');
   assert.equal(result.states.at(-1).applied, 20);
+});
+
+test('auto apply recovers from hh vacancy redirect back to original search page', async () => {
+  const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
+  const navigations = [];
+  const states = [];
+  const localStore = {
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      limit: 20,
+      items: [
+        {
+          index: 1,
+          vacancyId: '123',
+          title: 'Chief Product Officer/CPO Data',
+          url: 'https://hh.ru/vacancy/123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          testDetected: true
+        }
+      ],
+      counters: {
+        found: 1,
+        processed: 0,
+        applied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      config: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      }
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/vacancy/123',
+    pathname: '/vacancy/123'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH vacancy page',
+    body: new FakeElement({ text: 'Chief Product Officer/CPO Data' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#recover-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (navigations.length === 0 && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.deepEqual(navigations, ['https://hh.ru/search/vacancy?text=java']);
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(localStore.autoApplyQueue.recoveredFromUrl, 'https://hh.ru/vacancy/123');
+  assert.equal(localStore.autoApplySearchQueue.active, false);
+  assert.equal(states.at(-1).state, 'complete');
+  assert.equal(states.at(-1).currentAction, 'Возвращаюсь на страницу поиска HH');
 });

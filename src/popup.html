@@ -19,8 +19,82 @@
       }
 
       h1 {
-        margin: 0 0 12px;
         font-size: 18px;
+        margin: 0;
+      }
+
+      .header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      #version {
+        color: #94a3b8;
+        font-size: 10px;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .health {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 12px;
+        padding: 10px;
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .health-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 12px;
+      }
+
+      .health-value {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: 190px;
+        font-weight: 700;
+        text-align: right;
+      }
+
+      .health-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #94a3b8;
+        flex: 0 0 auto;
+      }
+
+      .health-value.ok {
+        color: #166534;
+      }
+
+      .health-value.ok .health-dot {
+        background: #22c55e;
+      }
+
+      .health-value.warn {
+        color: #92400e;
+      }
+
+      .health-value.warn .health-dot {
+        background: #f59e0b;
+      }
+
+      .health-value.error {
+        color: #991b1b;
+      }
+
+      .health-value.error .health-dot {
+        background: #ef4444;
       }
 
       .actions {
@@ -187,7 +261,28 @@
     </style>
   </head>
   <body>
-    <h1>HH Job Assistant</h1>
+    <header class="header">
+      <h1>HH Job Assistant</h1>
+      <span id="version" aria-label="Version"></span>
+    </header>
+
+    <section class="health" aria-label="Extension status">
+      <div class="health-row">
+        <span>Расширение</span>
+        <span id="extensionStatus" class="health-value warn">
+          <span class="health-dot" aria-hidden="true"></span>
+          Проверяю
+        </span>
+      </div>
+      <div class="health-row">
+        <span>Текущая вкладка</span>
+        <span id="tabStatus" class="health-value warn">
+          <span class="health-dot" aria-hidden="true"></span>
+          Проверяю
+        </span>
+      </div>
+    </section>
+
     <div class="actions">
       <button id="dryRun" class="secondary">Предпросмотр</button>
       <div class="action-row">
@@ -213,8 +308,6 @@
       <dd id="state">Ожидание</dd>
       <dt>Найдено</dt>
       <dd id="found">0</dd>
-      <dt>Проверено</dt>
-      <dd id="processed">0</dd>
       <dt>Отправлено</dt>
       <dd id="applied">0</dd>
       <dt>Пропущено</dt>
@@ -223,8 +316,8 @@
       <dd id="errors">0</dd>
     </dl>
 
-    <div id="lastError"></div>
     <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
+    <div id="lastError"></div>
     <div id="recentResults" aria-live="polite"></div>
     <section aria-label="Chat reports">
       <div class="reports-head">
