@@ -1,16 +1,19 @@
 export class FakeElement {
-  constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {}, disabled = false } = {}) {
+  constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {}, disabled = false, type = '', value = '' } = {}) {
     this.innerText = text;
     this.textContent = text;
     this.href = href;
     this.disabled = disabled;
+    this.type = type || attrs.type || '';
     this.selectorMap = selectorMap;
     this.clickHandler = click;
-    this.value = '';
+    this.value = value;
+    this.checked = false;
     this.children = [];
     this.style = {};
     this.attrs = attrs;
     this.dataset = {};
+    this.parentElement = null;
   }
 
   querySelectorAll(selector) {
@@ -30,6 +33,7 @@ export class FakeElement {
 
   getAttribute(name) {
     if (name === 'aria-disabled') return null;
+    if (name === 'type') return this.type || this.attrs[name] || null;
     return this.attrs[name] ?? null;
   }
 
@@ -52,6 +56,12 @@ export class FakeElement {
   remove() {}
 
   addEventListener() {}
+
+  focus() {}
+
+  closest() {
+    return this.parentElement;
+  }
 
   click() {
     this.clickHandler?.();

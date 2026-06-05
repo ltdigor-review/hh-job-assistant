@@ -158,7 +158,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
       {
         role: 'system',
         content:
-          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, and expected salary. Give Russian draft answers with enough detail to answer the question, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
+          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, answer options, and expected salary. For multiple-choice or radio questions, include the exact option labels that fit the resume. For open questions, give Russian draft answers with enough detail to answer the question, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
       },
       {
         role: 'user',

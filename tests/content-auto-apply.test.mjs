@@ -21,6 +21,7 @@ async function runContentAutoApply({
   postSubmitDialogText = '',
   nextPageUrl = '',
   dailyLimit = 1,
+  questionControls = [],
   groqResponse = { ok: false, error: 'Groq API key is not configured' }
 }) {
   const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
@@ -40,6 +41,15 @@ async function runContentAutoApply({
   const coverTextarea = new FakeElement({
     text: hasCoverLetterField ? 'Сопроводительное письмо обязательное' : '',
     attrs: hasCoverLetterField ? { 'data-qa': 'vacancy-response-letter-input' } : {}
+  });
+  const selectableControls = questionControls.map((item) => {
+    const input = new FakeElement({
+      type: item.type,
+      value: item.label,
+      attrs: { type: item.type, name: item.name || '', value: item.label }
+    });
+    input.parentElement = new FakeElement({ text: item.label });
+    return { ...item, input };
   });
   const closeButton = new FakeElement({
     text: 'Закрыть',
@@ -96,6 +106,8 @@ async function runContentAutoApply({
           '[data-qa="vacancy-response-submit-popup"]': [submitButton],
           '[data-qa="vacancy-response-letter-submit"]': [submitButton],
           '[data-qa*="submit"]': [submitButton],
+          'input[type="checkbox"]': selectableControls.filter((item) => item.type === 'checkbox').map((item) => item.input),
+          'input[type="radio"]': selectableControls.filter((item) => item.type === 'radio').map((item) => item.input),
           textarea: [hasQuestionField || hasTextarea ? textarea : null, hasCoverLetterField ? coverTextarea : null].filter(Boolean),
           '[data-qa="bloko-modal-close"]': [closeButton],
           button: [submitButton, closeButton]
@@ -171,6 +183,12 @@ async function runContentAutoApply({
       if (startOnResponseForm && selector === 'textarea') {
         return [hasQuestionField || hasTextarea ? textarea : null, hasCoverLetterField ? coverTextarea : null].filter(Boolean);
       }
+      if (startOnResponseForm && selector === 'input[type="checkbox"]') {
+        return selectableControls.filter((item) => item.type === 'checkbox').map((item) => item.input);
+      }
+      if (startOnResponseForm && selector === 'input[type="radio"]') {
+        return selectableControls.filter((item) => item.type === 'radio').map((item) => item.input);
+      }
       if (startOnResponseForm && selector === 'button') return [submitButton];
       if (selector === '[role="dialog"]') return dialog ? [dialog] : [];
       if (selector === '[data-qa*="modal"]') return [];
@@ -243,6 +261,7 @@ async function runContentAutoApply({
     followupClicks,
     textareaValue: textarea.value,
     coverTextareaValue: coverTextarea.value,
+    checkedLabels: selectableControls.filter((item) => item.input.checked).map((item) => item.label),
     localStore,
     navigateUrl,
     bodyCursor: globalThis.document.body.style.cursor || '',
