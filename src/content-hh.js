@@ -162,6 +162,19 @@ function isResponseFormPage() {
   );
 }
 
+function isHhSearchPageUrl(value) {
+  try {
+    const url = new URL(value, location.href);
+    return /(^|\.)hh\.ru$/.test(url.hostname) && url.pathname === '/search/vacancy';
+  } catch {
+    return false;
+  }
+}
+
+function getQueueSourceUrl() {
+  return isHhSearchPageUrl(location.href) ? location.href : '';
+}
+
 function getCardInfo(card, index) {
   const titleLink = queryFirst(HH_SELECTORS.titleLinks, card) || card.querySelector('a[href*="/vacancy/"]');
   const responseButton =
@@ -350,12 +363,55 @@ function findQuestionControlGroups(root = getDialogRoot()) {
 
   const byGroup = new Map();
   for (const option of controls) {
-    const group = byGroup.get(option.groupKey) || { type: option.type, options: [] };
+    const group = byGroup.get(option.groupKey) || {
+      type: option.type,
+      key: option.groupKey,
+      question: cleanText(option.groupKey.replace(/^(checkbox|radio):/, '')),
+      options: []
+    };
     group.options.push(option);
     byGroup.set(option.groupKey, group);
   }
 
   return [...byGroup.values()].filter((group) => group.options.length > 0);
+}
+
+function buildEmployerQuestionContext(root, questionFields, questionControlGroups) {
+  const sections = [];
+  const pageText = cleanText(textOf(root)).slice(0, 5000);
+  if (pageText) {
+    sections.push(['Visible HH response form text:', pageText].join('\n'));
+  }
+
+  if (questionFields.length > 0) {
+    sections.push(
+      [
+        'Open text questions:',
+        ...questionFields.map((field, index) => {
+          const marker = cleanText(getFieldMarker(field)).slice(0, 600);
+          return `Text question ${index + 1}: ${marker || 'question text not found'}`;
+        })
+      ].join('\n')
+    );
+  }
+
+  if (questionControlGroups.length > 0) {
+    sections.push(
+      [
+        'Choice questions. Return exact option labels for these groups:',
+        ...questionControlGroups.map((group, index) => {
+          const options = group.options.map((option, optionIndex) => `${optionIndex + 1}. ${option.label}`).join('\n');
+          return [
+            `Choice group ${index + 1} (${group.type}, ${group.type === 'radio' ? 'choose one' : 'choose all matching'}):`,
+            group.question ? `Question/context: ${group.question}` : 'Question/context: not found',
+            options
+          ].join('\n');
+        })
+      ].join('\n')
+    );
+  }
+
+  return sections.join('\n\n').slice(0, 8000);
 }
 
 function findSubmitButton(root = getDialogRoot()) {
@@ -739,11 +795,39 @@ function selectControl(control) {
   control.dispatchEvent?.(new Event('change', { bubbles: true }));
 }
 
+function extractGroupAnswer(answerText, group, index) {
+  const lines = cleanText(answerText).split(/\n+/).filter(Boolean);
+  const numberedPattern = new RegExp(`(?:choice\\s+group|group|вариант(?:ы)?|вопрос)\\s*${index + 1}\\b`, 'i');
+  const numbered = lines.filter((line) => numberedPattern.test(line));
+  if (numbered.length > 0) {
+    return numbered.join('\n');
+  }
+
+  const groupTokens = new Set(choiceTokens(group.question || group.key || ''));
+  if (groupTokens.size > 0) {
+    const contextual = lines.filter((line) => {
+      const lineTokens = new Set(choiceTokens(line));
+      return [...groupTokens].filter((token) => lineTokens.has(token)).length >= Math.min(2, groupTokens.size);
+    });
+    if (contextual.length > 0) {
+      return contextual.join('\n');
+    }
+  }
+
+  const optionLabels = group.options.map((option) => normalizeChoiceText(option.label)).filter(Boolean);
+  const withOptions = lines.filter((line) => {
+    const normalizedLine = normalizeChoiceText(line);
+    return optionLabels.some((label) => label && normalizedLine.includes(label));
+  });
+  return withOptions.length > 0 ? withOptions.join('\n') : answerText;
+}
+
 function fillQuestionControls(groups, answerText) {
   let selected = 0;
-  for (const group of groups) {
+  for (const [index, group] of groups.entries()) {
+    const groupAnswer = extractGroupAnswer(answerText, group, index);
     const scored = group.options
-      .map((option) => ({ ...option, score: scoreChoice(option.label, answerText) }))
+      .map((option) => ({ ...option, score: scoreChoice(option.label, groupAnswer) }))
       .filter((option) => option.score >= 0.5);
 
     if (group.type === 'radio') {
@@ -1155,6 +1239,7 @@ async function applyToVacancy(item, counters) {
     const questionFields = findQuestionFields(root);
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
+    const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     let coverLetterUsed = false;
     await setRunState({
       state: 'generating_cover_letter',
@@ -1164,7 +1249,13 @@ async function applyToVacancy(item, counters) {
     let assistance;
     setBusyCursor(true);
     try {
-      assistance = await generateTestAssistance(getVacancyText(item.card), textOf(root));
+      await appendAgentLog('question_context_extracted', {
+        vacancyId: item.vacancyId,
+        textFields: questionFields.length,
+        choiceGroups: questionControlGroups.length,
+        contextLength: questionContext.length
+      });
+      assistance = await generateTestAssistance(getVacancyText(item.card), questionContext || textOf(root));
     } catch (error) {
       if (!isMissingGroqKeyError(error)) {
         throw error;
@@ -1468,11 +1559,13 @@ async function continueQueuedAutoApply() {
     const counters = autoApplyQueue.counters || {};
     const sourceUrl = autoApplyQueue.sourceUrl || '';
     await saveQueue({ ...autoApplyQueue, active: false, recoveredFromUrl: location.href });
-    if (sourceUrl) {
+    if (isHhSearchPageUrl(sourceUrl)) {
       await saveSearchQueue({ active: false });
       await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
       navigateTo(sourceUrl);
+      return;
     }
+    await setRunState({ state: 'complete', ...counters, lastError: '' });
     return;
   }
 
@@ -1520,7 +1613,7 @@ async function continueQueuedAutoApply() {
   const nextIndex = queue.index + 1;
   if (nextIndex >= queue.items.length || stopRequested) {
     await saveQueue({ ...queue, active: false, index: nextIndex, counters });
-    if (!stopRequested && queue.sourceUrl) {
+    if (!stopRequested && isHhSearchPageUrl(queue.sourceUrl)) {
       await saveSearchQueue({ active: false });
       await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH' });
       navigateTo(queue.sourceUrl);
@@ -1597,7 +1690,7 @@ async function handleAutoApply(limit, existingCounters = null) {
         runId: activeRunId,
         index: 0,
         items: queuedItems,
-        sourceUrl: location.href,
+        sourceUrl: getQueueSourceUrl(),
         limit,
         counters,
         config

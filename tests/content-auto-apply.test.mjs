@@ -28,6 +28,7 @@ async function runContentAutoApply({
   const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
   const appended = [];
   const states = [];
+  const groqRequests = [];
   let submitClicks = 0;
   let followupClicks = 0;
   let navigateUrl = '';
@@ -238,6 +239,7 @@ async function runContentAutoApply({
           return Promise.resolve({ ok: true });
         }
         if (message.type === 'GENERATE_COVER_LETTER') {
+          groqRequests.push(message);
           return Promise.resolve(groqResponse);
         }
         return Promise.resolve({ ok: true });
@@ -267,6 +269,7 @@ async function runContentAutoApply({
     response,
     appended,
     states,
+    groqRequests,
     submitClicks,
     followupClicks,
     textareaValue: textarea.value,
@@ -694,6 +697,11 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
   assert.match(result.textareaValue, /Основной опыт|Доход/);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.ok(result.states.some((state) => state.currentAction === 'Filling HH employer choice fields'));
+  assert.equal(result.groqRequests.at(-1).task, 'test_assist');
+  assert.match(result.groqRequests.at(-1).extraText, /Choice group 1/);
+  assert.match(result.groqRequests.at(-1).extraText, /управление продуктом \/ внутренним продуктом/);
+  assert.match(result.groqRequests.at(-1).extraText, /Choice group 4/);
+  assert.match(result.groqRequests.at(-1).extraText, /Text question 1/);
 });
 
 test('auto apply uses expected salary for required question when Groq key is missing', async () => {
@@ -893,4 +901,94 @@ test('auto apply recovers from hh vacancy redirect back to original search page'
   assert.equal(localStore.autoApplySearchQueue.active, false);
   assert.equal(states.at(-1).state, 'complete');
   assert.equal(states.at(-1).currentAction, 'Возвращаюсь на страницу поиска HH');
+});
+
+test('auto apply does not recover queued response pages back to a response form url', async () => {
+  const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
+  const navigations = [];
+  const states = [];
+  const localStore = {
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=133918651&startedWithQuestion=false',
+      limit: 20,
+      items: [
+        {
+          index: 1,
+          vacancyId: '133918651',
+          title: 'Java',
+          url: 'https://hh.ru/vacancy/133918651',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=133918651',
+          testDetected: true
+        }
+      ],
+      counters: {
+        found: 1,
+        processed: 0,
+        applied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      config: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      }
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/vacancy/133918651',
+    pathname: '/vacancy/133918651'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH vacancy page',
+    body: new FakeElement({ text: 'Java' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#recover-response-url-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.deepEqual(navigations, []);
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(localStore.autoApplyQueue.recoveredFromUrl, 'https://hh.ru/vacancy/133918651');
+  assert.equal(states.at(-1).state, 'complete');
 });

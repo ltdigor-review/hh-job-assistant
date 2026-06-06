@@ -179,7 +179,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
       {
         role: 'system',
         content:
-          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, question text, answer options, and expected salary. For multiple-choice or radio questions, include the exact option labels that fit the resume. For open questions, give Russian draft answers with enough detail to answer the question, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only useful answer text.'
+          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, numbered question text, exact answer options, and expected salary. For each "Choice group N", return a line "Choice group N: <exact option label(s)>" using only option labels from that group. For radio groups choose one best option. For checkbox groups choose all labels that honestly fit the resume. For each "Text question N", return a line "Text question N: <Russian draft answer>" with enough detail, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only the numbered answers.'
       },
       {
         role: 'user',
@@ -193,7 +193,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
           'Текст вакансии или теста:',
           vacancyText || '(текст не найден)',
           '',
-          'Дополнительный текст со страницы:',
+          'Структурированные вопросы и варианты ответа со страницы:',
           extraText || '(нет)'
         ].join('\n')
       }
