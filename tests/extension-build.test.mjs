@@ -536,7 +536,7 @@ test('repo script opens hh auto-start URL for extension auto apply', async () =>
   assert.doesNotMatch(js, /execute targetTab javascript/);
   assert.match(js, /HHJA_CHROME_PROFILE/);
   assert.match(js, /--profile-directory/);
-  assert.match(js, /URL must be an hh\.ru vacancy search page/);
+  assert.match(js, /URL must be an hh\.ru vacancy search or response form page/);
 });
 
 test('extension log inspector reads Chrome profile storage', async () => {

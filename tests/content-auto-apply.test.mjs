@@ -240,6 +240,9 @@ async function runContentAutoApply({
         }
         if (message.type === 'GENERATE_COVER_LETTER') {
           groqRequests.push(message);
+          if (Array.isArray(groqResponse)) {
+            return Promise.resolve(groqResponse[Math.min(groqRequests.length - 1, groqResponse.length - 1)]);
+          }
           return Promise.resolve(groqResponse);
         }
         return Promise.resolve({ ok: true });
@@ -524,6 +527,21 @@ test('auto apply skips open response form when blocked text is only in document 
   assert.match(result.appended.at(-1).error, /^Skipped: Resume visibility/);
 });
 
+test('auto apply counts already applied open response form without submit button as confirmed', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    bodyText: 'Отклик на вакансию Вы откликнулись Чат'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
+});
+
 test('auto apply closes blocked response dialog and continues to next hh page', async () => {
   const result = await runContentAutoApply({
     dialogText: [
@@ -702,6 +720,54 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
   assert.match(result.groqRequests.at(-1).extraText, /управление продуктом \/ внутренним продуктом/);
   assert.match(result.groqRequests.at(-1).extraText, /Choice group 4/);
   assert.match(result.groqRequests.at(-1).extraText, /Text question 1/);
+});
+
+test('auto apply retries Groq when choice answer does not match options', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
+    ],
+    groqResponse: [
+      { ok: true, text: 'Подходит гибридный формат работы.' },
+      { ok: true, text: 'Choice group 1: Да' }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да']);
+  assert.equal(result.groqRequests.length, 2);
+  assert.match(result.groqRequests.at(-1).extraText, /Previous answer did not match any available HH choice labels/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply skips choice questions when Groq returns no matching option labels', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
+    ],
+    groqResponse: [
+      { ok: true, text: 'Подходит гибридный формат работы.' },
+      { ok: true, text: 'Можно рассмотреть разные варианты.' }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.groqRequests.length, 2);
+  assert.equal(result.appended.at(-1).status, 'skipped_choice_answer_unmatched');
 });
 
 test('auto apply uses expected salary for required question when Groq key is missing', async () => {

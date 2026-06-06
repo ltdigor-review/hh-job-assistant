@@ -578,6 +578,30 @@ async function appendResult(item) {
   await sendRuntimeMessage({ type: 'APPEND_RUN_RESULT', item });
 }
 
+async function savePendingSubmit({ item, counters, status, coverLetterUsed, testDetected }) {
+  await chrome.storage.local.set({
+    autoApplyPendingSubmit: {
+      runId: activeRunId,
+      item: {
+        index: item.index,
+        vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url
+      },
+      counters: { ...counters },
+      status,
+      coverLetterUsed,
+      testDetected,
+      createdAt: new Date().toISOString(),
+      sourceUrl: location.href
+    }
+  });
+}
+
+async function clearPendingSubmit() {
+  await chrome.storage.local.set({ autoApplyPendingSubmit: null });
+}
+
 async function appendSkippedResponse(item, counters, status, error) {
   counters.skipped += 1;
   await appendResult({
@@ -604,12 +628,14 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
 
   const blockedReason = detectBlockedResponseReason(root);
   if (blockedReason) {
+    await clearPendingSubmit();
     await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
     return false;
   }
 
   if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
     counters.applied += 1;
+    await clearPendingSubmit();
     await appendResult({
       index: item.index,
       vacancyId: item.vacancyId,
@@ -625,6 +651,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
   }
 
   if (root !== document && hasSubmitControl(root)) {
+    await clearPendingSubmit();
     await appendSkippedResponse(
       item,
       counters,
@@ -635,6 +662,41 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
   }
 
   return true;
+}
+
+async function finalizePendingSubmit() {
+  const { autoApplyPendingSubmit } = await chrome.storage.local.get(['autoApplyPendingSubmit']);
+  if (!autoApplyPendingSubmit?.item) {
+    return;
+  }
+
+  if (!isAlreadyAppliedPage(document)) {
+    return;
+  }
+
+  const counters = {
+    found: 1,
+    processed: 1,
+    applied: 0,
+    skipped: 0,
+    errors: 0,
+    ...(autoApplyPendingSubmit.counters || {})
+  };
+  counters.applied += 1;
+  await clearPendingSubmit();
+  await appendResult({
+    ...autoApplyPendingSubmit.item,
+    status: autoApplyPendingSubmit.status || 'applied',
+    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
+    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
+    error: ''
+  });
+  await appendAgentLog('pending_submit_finalized', {
+    vacancyId: autoApplyPendingSubmit.item.vacancyId,
+    status: autoApplyPendingSubmit.status || 'applied',
+    sourceUrl: autoApplyPendingSubmit.sourceUrl || ''
+  });
+  await setRunState({ state: 'complete', ...counters, lastError: '' });
 }
 
 async function appendChatReport(item) {
@@ -695,6 +757,23 @@ async function generateTestAssistance(vacancyText, extraText) {
     throw new Error(response?.error || 'Test assistance generation failed');
   }
   return response.text;
+}
+
+async function generateChoiceRetryAssistance(vacancyText, questionContext, previousAnswer) {
+  return generateTestAssistance(
+    vacancyText,
+    [
+      questionContext,
+      '',
+      'Previous answer did not match any available HH choice labels. Return only exact option labels from the listed Choice groups.',
+      'Format:',
+      'Choice group 1: <exact option label>',
+      'Choice group 2: <exact option label>',
+      '',
+      'Previous answer:',
+      previousAnswer
+    ].join('\n')
+  );
 }
 
 async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
@@ -824,6 +903,7 @@ function extractGroupAnswer(answerText, group, index) {
 
 function fillQuestionControls(groups, answerText) {
   let selected = 0;
+  const labels = [];
   for (const [index, group] of groups.entries()) {
     const groupAnswer = extractGroupAnswer(answerText, group, index);
     const scored = group.options
@@ -835,6 +915,7 @@ function fillQuestionControls(groups, answerText) {
       if (best) {
         selectControl(best.control);
         selected += 1;
+        labels.push(best.label);
       }
       continue;
     }
@@ -842,9 +923,10 @@ function fillQuestionControls(groups, answerText) {
     for (const option of scored) {
       selectControl(option.control);
       selected += 1;
+      labels.push(option.label);
     }
   }
-  return selected;
+  return { selected, labels };
 }
 
 function getChatUrl(value = location.href) {
@@ -1168,6 +1250,21 @@ async function handleDryRun(limit) {
 }
 
 async function applyToVacancy(item, counters) {
+  if (item.responseFormOpen && isAlreadyAppliedPage(document)) {
+    counters.applied += 1;
+    await appendResult({
+      index: item.index,
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      status: 'applied_already_confirmed',
+      coverLetterUsed: false,
+      testDetected: item.testDetected,
+      error: ''
+    });
+    return;
+  }
+
   if (!item.responseButton) {
     const blockedReason = detectBlockedResponseReason(document);
     if (blockedReason) {
@@ -1288,10 +1385,53 @@ async function applyToVacancy(item, counters) {
     if (questionControlGroups.length > 0) {
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer choice fields' });
       setBusyCursor(true);
+      let selectedChoices = { selected: 0, labels: [] };
       try {
-        fillQuestionControls(questionControlGroups, assistance);
+        selectedChoices = fillQuestionControls(questionControlGroups, assistance);
       } finally {
         setBusyCursor(false);
+      }
+      if (selectedChoices.selected === 0) {
+        await appendAgentLog('question_choices_retry', {
+          vacancyId: item.vacancyId,
+          groups: questionControlGroups.length,
+          reason: 'no_matching_option_labels'
+        });
+        await setRunState({
+          state: 'generating_cover_letter',
+          ...counters,
+          currentAction: 'LLM: retrying exact HH choice labels'
+        });
+        setBusyCursor(true);
+        try {
+          assistance = await generateChoiceRetryAssistance(getVacancyText(item.card), questionContext, assistance);
+          selectedChoices = fillQuestionControls(questionControlGroups, assistance);
+        } finally {
+          setBusyCursor(false);
+        }
+      }
+      await appendAgentLog('question_choices_applied', {
+        vacancyId: item.vacancyId,
+        groups: questionControlGroups.length,
+        selected: selectedChoices.selected,
+        labels: selectedChoices.labels.slice(0, 20)
+      });
+      if (selectedChoices.selected === 0) {
+        const message = 'Skipped: Groq did not return any matching HH choice option labels.';
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_choice_answer_unmatched',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
       }
       await sleep(500);
     }
@@ -1308,6 +1448,11 @@ async function applyToVacancy(item, counters) {
       } finally {
         setBusyCursor(false);
       }
+      await appendAgentLog('question_text_fields_applied', {
+        vacancyId: item.vacancyId,
+        fields: questionFields.length,
+        answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
+      });
       await sleep(500);
     } else {
       showAssistantPanel({ title: 'HH test assistance', text: assistance });
@@ -1354,6 +1499,13 @@ async function applyToVacancy(item, counters) {
     await setRunState({ state: 'submitting', ...counters });
     await waitBeforeClick();
     const beforeSubmitText = textOf(document.body);
+    await savePendingSubmit({
+      item,
+      counters,
+      status: 'applied_test_assisted',
+      coverLetterUsed,
+      testDetected: true
+    });
     submitButton.click();
     await sleep(1800);
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -1370,6 +1522,7 @@ async function applyToVacancy(item, counters) {
     }
 
     counters.applied += 1;
+    await clearPendingSubmit();
     await appendResult({
       index: item.index,
       vacancyId: item.vacancyId,
@@ -1460,6 +1613,13 @@ async function applyToVacancy(item, counters) {
   await setRunState({ state: 'submitting', ...counters });
   await waitBeforeClick();
   const beforeSubmitText = textOf(document.body);
+  await savePendingSubmit({
+    item,
+    counters,
+    status: 'applied',
+    coverLetterUsed,
+    testDetected: false
+  });
   submitButton.click();
   await sleep(1800);
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -1476,6 +1636,7 @@ async function applyToVacancy(item, counters) {
   }
 
   counters.applied += 1;
+  await clearPendingSubmit();
   await appendResult({
     index: item.index,
     vacancyId: item.vacancyId,
@@ -1777,7 +1938,12 @@ async function startRun(mode) {
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
-  await chrome.storage.local.set({ runResults: [], autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
+  await chrome.storage.local.set({
+    runResults: [],
+    autoApplyQueue: { active: false },
+    autoApplySearchQueue: { active: false },
+    autoApplyPendingSubmit: null
+  });
   await appendAgentLog('start_run', { mode, limit, url: location.href });
 
   if (mode === 'dry') {
@@ -1870,6 +2036,11 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
+});
+
+finalizePendingSubmit().catch(async (error) => {
+  const messageText = error instanceof Error ? error.message : String(error);
+  await setRunState({ state: 'error', lastError: messageText });
 });
 
 continueQueuedAutoApply().catch(async (error) => {

@@ -14,8 +14,8 @@ function validateUrl(value) {
   if (parsed.hostname !== 'hh.ru' && !parsed.hostname.endsWith('.hh.ru')) {
     throw new Error('URL must be on hh.ru');
   }
-  if (parsed.pathname !== '/search/vacancy') {
-    throw new Error('URL must be an hh.ru vacancy search page');
+  if (parsed.pathname !== '/search/vacancy' && parsed.pathname !== '/applicant/vacancy_response') {
+    throw new Error('URL must be an hh.ru vacancy search or response form page');
   }
   return parsed.href;
 }
