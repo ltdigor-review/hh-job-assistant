@@ -84,10 +84,23 @@ async function ensureDefaults() {
 
 async function setRunState(patch) {
   const { runState = DEFAULTS.runState } = await storageGet(['runState']);
+  const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
+  const nextPatch = { ...patch };
+  if (terminalStates.has(nextPatch.state) && !Object.prototype.hasOwnProperty.call(nextPatch, 'currentAction')) {
+    nextPatch.currentAction = '';
+  }
+  if (
+    nextPatch.state &&
+    nextPatch.state !== 'error' &&
+    !Object.prototype.hasOwnProperty.call(nextPatch, 'lastError')
+  ) {
+    nextPatch.lastError = '';
+  }
+
   const nextRunState = {
     ...DEFAULTS.runState,
     ...runState,
-    ...patch,
+    ...nextPatch,
     updatedAt: nowIso()
   };
   await storageSet({

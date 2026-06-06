@@ -563,6 +563,18 @@ async function sendRuntimeMessage(message) {
 }
 
 async function setRunState(patch) {
+  const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
+  const nextPatch = { ...(patch || {}) };
+  if (terminalStates.has(nextPatch.state) && !Object.prototype.hasOwnProperty.call(nextPatch, 'currentAction')) {
+    nextPatch.currentAction = '';
+  }
+  if (
+    nextPatch.state &&
+    nextPatch.state !== 'error' &&
+    !Object.prototype.hasOwnProperty.call(nextPatch, 'lastError')
+  ) {
+    nextPatch.lastError = '';
+  }
   const nextState = patch?.state || '';
   if (nextState) {
     setBusyCursor(
@@ -571,7 +583,7 @@ async function setRunState(patch) {
       )
     );
   }
-  await sendRuntimeMessage({ type: 'SET_RUN_STATE', patch });
+  await sendRuntimeMessage({ type: 'SET_RUN_STATE', patch: nextPatch });
 }
 
 async function appendResult(item) {
@@ -1341,7 +1353,7 @@ async function applyToVacancy(item, counters) {
     await setRunState({
       state: 'generating_cover_letter',
       ...counters,
-      currentAction: 'LLM: generating answers for HH employer questions'
+      currentAction: 'ИИ: отвечаю на вопросы работодателя'
     });
     let assistance;
     setBusyCursor(true);
@@ -1360,7 +1372,7 @@ async function applyToVacancy(item, counters) {
 
       assistance = questionFields.length > 0 && questionControlGroups.length === 0 ? await getExpectedSalary() : '';
       if (assistance) {
-        await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer question fields' });
+        await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       } else {
         const message = missingGroqMessage('test');
         counters.skipped += 1;
@@ -1383,7 +1395,7 @@ async function applyToVacancy(item, counters) {
     }
 
     if (questionControlGroups.length > 0) {
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer choice fields' });
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю ответы на вопросы работодателя' });
       setBusyCursor(true);
       let selectedChoices = { selected: 0, labels: [] };
       try {
@@ -1400,7 +1412,7 @@ async function applyToVacancy(item, counters) {
         await setRunState({
           state: 'generating_cover_letter',
           ...counters,
-          currentAction: 'LLM: retrying exact HH choice labels'
+          currentAction: 'ИИ: уточняю варианты ответов HH'
         });
         setBusyCursor(true);
         try {
@@ -1437,7 +1449,7 @@ async function applyToVacancy(item, counters) {
     }
 
     if (questionFields.length > 0) {
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling HH employer question fields' });
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       setBusyCursor(true);
       const answers = splitGeneratedAnswers(assistance, questionFields.length);
       try {
@@ -1463,7 +1475,7 @@ async function applyToVacancy(item, counters) {
       await setRunState({
         state: 'generating_cover_letter',
         ...counters,
-        currentAction: 'LLM: generating required cover letter'
+        currentAction: 'ИИ: готовлю обязательное сопроводительное письмо'
       });
       setBusyCursor(true);
       try {
@@ -1477,7 +1489,7 @@ async function applyToVacancy(item, counters) {
         setBusyCursor(false);
       }
 
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling required cover letter' });
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю обязательное сопроводительное письмо' });
       setBusyCursor(true);
       setNativeValue(coverLetterTextarea, letter);
       setBusyCursor(false);
@@ -1559,7 +1571,7 @@ async function applyToVacancy(item, counters) {
     await setRunState({
       state: 'generating_cover_letter',
       ...counters,
-      currentAction: 'LLM: generating cover letter'
+      currentAction: 'ИИ: готовлю сопроводительное письмо'
     });
     const vacancyText = getVacancyText(item.card) || getVacancyText(document);
     let letter;
@@ -1590,7 +1602,7 @@ async function applyToVacancy(item, counters) {
       setBusyCursor(false);
     }
 
-    await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Filling cover letter' });
+    await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю сопроводительное письмо' });
     setBusyCursor(true);
     textarea.focus?.();
     setNativeValue(textarea, letter);
@@ -1932,9 +1944,10 @@ async function continueSearchAutoApply() {
   }
 }
 
-async function startRun(mode) {
+async function startRun(mode, limitOverride = null) {
   const config = await getConfig();
-  const limit = Math.max(1, Math.min(Number(config.dailyLimit) || 20, 100));
+  const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
+  const limit = Math.max(1, Math.min(Number(limitSource) || 20, 100));
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
@@ -1944,7 +1957,7 @@ async function startRun(mode) {
     autoApplySearchQueue: { active: false },
     autoApplyPendingSubmit: null
   });
-  await appendAgentLog('start_run', { mode, limit, url: location.href });
+  await appendAgentLog('start_run', { mode, limit, limitOverride: limitOverride == null ? null : limit, url: location.href });
 
   if (mode === 'dry') {
     return handleDryRun(limit);
@@ -1957,25 +1970,37 @@ function consumeAutoStartParam() {
     const url = new URL(location.href);
     const mode = url.searchParams.get('hhjaAutoStart');
     if (mode !== 'live' && mode !== 'dry') {
-      return '';
+      return null;
     }
+    const limit = url.searchParams.get('hhjaLimit');
+    const groqModel = url.searchParams.get('hhjaGroqModel') || '';
     url.searchParams.delete('hhjaAutoStart');
+    url.searchParams.delete('hhjaLimit');
+    url.searchParams.delete('hhjaGroqModel');
     window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
-    return mode;
+    return {
+      mode,
+      limit: limit ? Number(limit) : null,
+      groqModel
+    };
   } catch {
-    return '';
+    return null;
   }
 }
 
 async function maybeStartFromUrlParam() {
-  const mode = consumeAutoStartParam();
-  if (!mode) {
+  const trigger = consumeAutoStartParam();
+  if (!trigger) {
     return;
   }
+  const { mode, limit, groqModel } = trigger;
 
   try {
-    await appendAgentLog('url_trigger_start', { mode, url: location.href });
-    await startRun(mode === 'dry' ? 'dry' : 'live');
+    if (groqModel) {
+      await chrome.storage.local.set({ groqModel });
+    }
+    await appendAgentLog('url_trigger_start', { mode, limit, groqModel, url: location.href });
+    await startRun(mode === 'dry' ? 'dry' : 'live', limit);
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });

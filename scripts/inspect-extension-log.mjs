@@ -154,6 +154,7 @@ function extractLatestRunState(text) {
     if (!state || !updatedAt) continue;
     states.push({
       applied: Number(extractField(fragment, 'applied') || 0),
+      currentAction: extractField(fragment, 'currentAction') || '',
       errors: Number(extractField(fragment, 'errors') || 0),
       found: Number(extractField(fragment, 'found') || 0),
       lastError: extractField(fragment, 'lastError') || '',

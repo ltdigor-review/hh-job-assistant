@@ -540,6 +540,8 @@ test('auto apply counts already applied open response form without submit button
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
+  assert.equal(result.states.at(-1).state, 'complete');
+  assert.equal(result.states.at(-1).currentAction, '');
 });
 
 test('auto apply closes blocked response dialog and continues to next hh page', async () => {
@@ -642,8 +644,8 @@ test('auto apply fills required question on open response form', async () => {
   assert.equal(result.submitClicks, 1);
   assert.equal(result.textareaValue, '250 000 руб. на руки');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.ok(result.states.some((state) => state.currentAction === 'LLM: generating answers for HH employer questions'));
-  assert.ok(result.states.some((state) => state.currentAction === 'Filling HH employer question fields'));
+  assert.ok(result.states.some((state) => state.currentAction === 'ИИ: отвечаю на вопросы работодателя'));
+  assert.ok(result.states.some((state) => state.currentAction === 'Заполняю вопросы работодателя'));
   assert.equal(result.bodyCursor, '');
 });
 
@@ -714,7 +716,7 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
   ]);
   assert.match(result.textareaValue, /Основной опыт|Доход/);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.ok(result.states.some((state) => state.currentAction === 'Filling HH employer choice fields'));
+  assert.ok(result.states.some((state) => state.currentAction === 'Выбираю ответы на вопросы работодателя'));
   assert.equal(result.groqRequests.at(-1).task, 'test_assist');
   assert.match(result.groqRequests.at(-1).extraText, /Choice group 1/);
   assert.match(result.groqRequests.at(-1).extraText, /управление продуктом \/ внутренним продуктом/);

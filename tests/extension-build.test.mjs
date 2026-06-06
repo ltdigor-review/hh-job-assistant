@@ -154,6 +154,68 @@ test('background initializes defaults and registers required listeners', async (
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
 
+test('background clears stale current action when a run completes', async () => {
+  let listener = null;
+  const localData = {
+    runState: {
+      state: 'filling_cover_letter',
+      found: 1,
+      processed: 1,
+      applied: 0,
+      skipped: 0,
+      errors: 0,
+      currentAction: 'Filling HH employer question fields',
+      lastError: 'old warning'
+    }
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'SET_RUN_STATE', patch: { state: 'complete', applied: 1 } }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(localData.runState.state, 'complete');
+  assert.equal(localData.runState.currentAction, '');
+  assert.equal(localData.runState.lastError, '');
+});
+
 test('test assistance prompt includes resume, vacancy, question text, and expected salary', async () => {
   let listener = null;
   let requestBody = null;
@@ -526,6 +588,8 @@ test('content script registers one message listener', async () => {
   assert.match(source, /hh-job-assistant:start-auto-apply/);
   assert.match(source, /page_trigger_start_auto_apply/);
   assert.match(source, /hhjaAutoStart/);
+  assert.match(source, /hhjaLimit/);
+  assert.match(source, /hhjaGroqModel/);
   assert.match(source, /url_trigger_start/);
 });
 
@@ -535,6 +599,10 @@ test('repo script opens hh auto-start URL for extension auto apply', async () =>
   assert.match(js, /hhjaAutoStart/);
   assert.doesNotMatch(js, /execute targetTab javascript/);
   assert.match(js, /HHJA_CHROME_PROFILE/);
+  assert.match(js, /HHJA_LIMIT/);
+  assert.match(js, /HHJA_GROQ_MODEL/);
+  assert.match(js, /hhjaLimit/);
+  assert.match(js, /hhjaGroqModel/);
   assert.match(js, /--profile-directory/);
   assert.match(js, /URL must be an hh\.ru vacancy search or response form page/);
 });
