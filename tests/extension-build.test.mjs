@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { readContentScriptSource } from './helpers/content-script-source.mjs';
 import { FakeElement } from './helpers/fake-element.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -36,7 +37,12 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
-  assert.deepEqual(manifest.content_scripts[0].js, ['src/agent-log.js', 'src/content-hh.js']);
+  assert.deepEqual(manifest.content_scripts[0].js, [
+    'src/agent-log.js',
+    'src/content-text.js',
+    'src/content-dom.js',
+    'src/content-hh.js'
+  ]);
 });
 
 test('version guard checks configured repo versions', async () => {
@@ -77,12 +83,21 @@ test('version guard bumps json and regex files without stack-specific tooling', 
 test('javascript files parse', async () => {
   const files = [
     'src/agent-log.js',
+    'src/content-text.js',
+    'src/content-dom.js',
     'src/background.js',
     'src/content-hh.js',
     'src/options.js',
     'src/popup.js',
     'scripts/inspect-extension-log.mjs',
+    'scripts/chromium-extension-smoke.mjs',
+    'scripts/chromium-configure-extension.mjs',
+    'scripts/chromium-hh-live-smoke.mjs',
+    'scripts/chromium-run-action.mjs',
+    'scripts/chromium-start-auto-apply.mjs',
+    'scripts/sync-hh-auth-to-chromium.mjs',
     'scripts/start-extension-auto-apply.mjs',
+    'scripts/reload-extension.mjs',
     'scripts/hh-live-smoke.mjs'
   ];
 
@@ -453,6 +468,118 @@ test('background stores capped chat reports with direct chat links', async () =>
   assert.equal(getResponse.chatReports.at(-1).sent, false);
 });
 
+test('background clears chat reports and agent debug log', async () => {
+  let listener = null;
+  const localData = {
+    chatReports: [{ id: 'report-1', chatUrl: 'https://hh.ru/chat/1' }],
+    agentDebugLog: [{ event: 'run_result', details: { status: 'applied' } }]
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const clearReportsResponse = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'CLEAR_CHAT_REPORTS' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+  const clearLogResponse = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'CLEAR_AGENT_DEBUG_LOG' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(clearReportsResponse.ok, true);
+  assert.equal(clearLogResponse.ok, true);
+  assert.deepEqual(localData.chatReports, []);
+  assert.deepEqual(localData.agentDebugLog, []);
+});
+
+test('background reloads extension on explicit reload message', async () => {
+  let listener = null;
+  let reloads = 0;
+  const localData = {};
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      reload() {
+        reloads += 1;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'RELOAD_EXTENSION' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.reloading, true);
+  assert.equal(reloads, 1);
+});
+
 test('Groq prompt parses configured hh resume URL for resume context', async () => {
   let listener = null;
   let requestBody = null;
@@ -559,7 +686,7 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
 });
 
 test('content script registers one message listener', async () => {
-  const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
+  const source = await readContentScriptSource();
   let listenerCount = 0;
 
   globalThis.chrome = {
@@ -585,12 +712,131 @@ test('content script registers one message listener', async () => {
 
   assert.equal(listenerCount, 1);
   assert.match(source, /GET_CONTENT_STATUS/);
+  assert.match(source, /authenticated: hasAuthenticatedHhSignal\(\)/);
+  assert.match(source, /unsafe: isUnsafePage\(\)/);
   assert.match(source, /hh-job-assistant:start-auto-apply/);
   assert.match(source, /page_trigger_start_auto_apply/);
   assert.match(source, /hhjaAutoStart/);
   assert.match(source, /hhjaLimit/);
   assert.match(source, /hhjaGroqModel/);
+  assert.match(source, /hhjaReloadExtension/);
+  assert.match(source, /RELOAD_EXTENSION/);
+  assert.match(source, /url_trigger_reload_extension/);
   assert.match(source, /url_trigger_start/);
+});
+
+test('repo script opens hh reload URL for extension self reload', async () => {
+  const js = await readFile(new URL('scripts/reload-extension.mjs', root), 'utf8');
+
+  assert.match(js, /hhjaReloadExtension/);
+  assert.match(js, /HHJA_CHROME_PROFILE/);
+  assert.match(js, /--profile-directory/);
+  assert.match(js, /https:\/\/hh\.ru\/\?hhjaReloadExtension=1/);
+  assert.doesNotMatch(js, /chrome:\/\/extensions/);
+});
+
+test('repo script can smoke test extension in an isolated Chromium profile', async () => {
+  const js = await readFile(new URL('scripts/chromium-extension-smoke.mjs', root), 'utf8');
+
+  assert.match(js, /HHJA_CHROMIUM_PATH/);
+  assert.match(js, /HHJA_CHROMIUM_USER_DATA_DIR/);
+  assert.match(js, /mkdtemp/);
+  assert.match(js, /--user-data-dir/);
+  assert.match(js, /--load-extension/);
+  assert.match(js, /--disable-extensions-except/);
+  assert.match(js, /chrome\.runtime\.getManifest\(\)/);
+  assert.match(js, /Target\.getTargets/);
+  assert.doesNotMatch(js, /chrome:\/\/extensions/);
+  assert.doesNotMatch(js, /profile-directory/);
+});
+
+test('repo script can run hh smoke in a persistent Chromium profile', async () => {
+  const js = await readFile(new URL('scripts/chromium-hh-live-smoke.mjs', root), 'utf8');
+
+  assert.match(js, /HHJA_CHROMIUM_USER_DATA_DIR/);
+  assert.match(js, /\.hhja-chromium-profile/);
+  assert.match(js, /--user-data-dir/);
+  assert.match(js, /--load-extension/);
+  assert.match(js, /HH_CHROME_CDP_URL/);
+  assert.match(js, /hh-live-smoke\.mjs/);
+  assert.match(js, /HHJA_CHROMIUM_KEEP_OPEN/);
+  assert.doesNotMatch(js, /chrome:\/\/extensions/);
+  assert.doesNotMatch(js, /profile-directory/);
+});
+
+test('repo script can sync hh auth cookies into the persistent Chromium profile', async () => {
+  const packageJson = await readJson('package.json');
+  const js = await readFile(new URL('scripts/sync-hh-auth-to-chromium.mjs', root), 'utf8');
+
+  assert.equal(packageJson.scripts['sync:hh:auth'], 'node scripts/sync-hh-auth-to-chromium.mjs');
+  assert.match(js, /HHJA_CHROME_COOKIE_PROFILE/);
+  assert.match(js, /HHJA_CHROMIUM_USER_DATA_DIR/);
+  assert.match(js, /\.hhja-chromium-profile/);
+  assert.match(js, /host_key LIKE '%hh\.ru%'/);
+  assert.match(js, /INSERT OR REPLACE INTO main\.cookies/);
+  assert.match(js, /backupPath/);
+  assert.match(js, /hh-auth-sync-last\.json/);
+  assert.doesNotMatch(js, /console\.log\(.*encrypted_value/s);
+});
+
+test('repo script can configure the persistent Chromium extension storage', async () => {
+  const packageJson = await readJson('package.json');
+  const js = await readFile(new URL('scripts/chromium-configure-extension.mjs', root), 'utf8');
+
+  assert.equal(packageJson.scripts['configure:hh:chromium'], 'node scripts/chromium-configure-extension.mjs');
+  assert.match(js, /HHJA_ENV_FILE/);
+  assert.match(js, /HHJA_GROQ_API_KEY/);
+  assert.match(js, /GROQ_API_KEY/);
+  assert.match(js, /HHJA_RESUME_URL/);
+  assert.match(js, /HHJA_CHAT_UNREAD_ONLY/);
+  assert.match(js, /chrome\.storage\.local\.set\(patch/);
+  assert.match(js, /configuredKeys/);
+  assert.match(js, /storedEvidence/);
+  assert.match(js, /key === 'groqApiKey' \? Boolean/);
+  assert.doesNotMatch(js, /console\.log\(.*groqApiKey.*patch/s);
+});
+
+test('repo script can run popup-equivalent actions in the persistent Chromium profile', async () => {
+  const packageJson = await readJson('package.json');
+  const js = await readFile(new URL('scripts/chromium-run-action.mjs', root), 'utf8');
+
+  assert.equal(packageJson.scripts['run:hh:chromium'], 'node scripts/chromium-run-action.mjs');
+  assert.match(js, /HHJA_ACTION/);
+  assert.match(js, /REFRESH_RESUMES_NOW/);
+  assert.match(js, /START_CHAT_ASSIST/);
+  assert.match(js, /TEST_GROQ/);
+  assert.match(js, /discoverResumeUrl/);
+  assert.match(js, /resume_hash/);
+  assert.match(js, /\^\\\\\/resume\\\\\/\[\^\/\?#\]\+/);
+  assert.match(js, /createExtensionPageSession/);
+  assert.match(js, /src\/popup\.html/);
+  assert.match(js, /waitForActiveContentScript/);
+  assert.match(js, /GET_CONTENT_STATUS/);
+  assert.match(js, /chrome\.runtime\.sendMessage/);
+  assert.match(js, /chatReports/);
+  assert.match(js, /resumeUrlPresent/);
+  assert.match(js, /process\.exit\(0\)/);
+  assert.doesNotMatch(js, /chrome:\/\/extensions/);
+});
+
+test('repo script can start auto apply in a persistent Chromium profile', async () => {
+  const js = await readFile(new URL('scripts/chromium-start-auto-apply.mjs', root), 'utf8');
+
+  assert.match(js, /HHJA_CHROMIUM_USER_DATA_DIR/);
+  assert.match(js, /\.hhja-chromium-profile/);
+  assert.match(js, /--user-data-dir/);
+  assert.match(js, /--load-extension/);
+  assert.match(js, /hhjaAutoStart/);
+  assert.match(js, /HHJA_LIMIT/);
+  assert.match(js, /HHJA_MAX_PROCESSED/);
+  assert.match(js, /HHJA_CHROMIUM_RUN_MS/);
+  assert.match(js, /HHJA_OUTPUT/);
+  assert.match(js, /hhjaMaxProcessed/);
+  assert.match(js, /chrome\.storage\.local\.get\(\['runState', 'runResults'\]/);
+  assert.match(js, /readExtensionEvidence/);
+  assert.match(js, /URL must be an hh\.ru vacancy search or response form page/);
+  assert.doesNotMatch(js, /chrome:\/\/extensions/);
+  assert.doesNotMatch(js, /profile-directory/);
 });
 
 test('repo script opens hh auto-start URL for extension auto apply', async () => {
@@ -648,6 +894,10 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /GET_AGENT_DEBUG_LOG/);
   assert.match(js, /CLEAR_AGENT_DEBUG_LOG/);
   assert.match(js, /GET_CONTENT_STATUS/);
+  assert.match(js, /response\.unsafe/);
+  assert.match(js, /response\.authenticated/);
+  assert.match(js, /Требуется вход hh\.ru/);
+  assert.match(js, /Нужна авторизация hh\.ru/);
   assert.match(js, /CLEAR_CHAT_REPORTS/);
   assert.match(js, /chatReports/);
   assert.match(js, /refreshHealth/);

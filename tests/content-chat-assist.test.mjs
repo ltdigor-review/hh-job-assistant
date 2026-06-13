@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { readContentScriptSource } from './helpers/content-script-source.mjs';
 import { FakeElement } from './helpers/fake-element.mjs';
-
-const root = new URL('../', import.meta.url);
 
 async function runContentChatAssist({
   chats,
   chatUnreadOnly = true,
   chatReplyMode = 'draft',
   chatLimit = 10,
-  groqText = 'Здравствуйте, готов ответить по вакансии.'
+  groqText = 'Здравствуйте, готов ответить по вакансии.',
+  authenticated = true,
+  bodyText = 'Чаты'
 }) {
-  const source = await readFile(new URL('src/content-hh.js', root), 'utf8');
+  const source = await readContentScriptSource();
   const reports = [];
   const states = [];
   const groqCalls = [];
@@ -50,6 +50,7 @@ async function runContentChatAssist({
     pathname: '/chat'
   };
   globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_AUTHENTICATED__: authenticated,
     __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
     __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
       globalThis.location.href = url;
@@ -59,6 +60,7 @@ async function runContentChatAssist({
       return { visibility: 'visible', display: 'block' };
     }
   };
+  globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ = authenticated;
   globalThis.getComputedStyle = globalThis.window.getComputedStyle;
   globalThis.Event = class Event {
     constructor(type) {
@@ -72,7 +74,7 @@ async function runContentChatAssist({
 
   globalThis.document = {
     title: 'HH chat test page',
-    body: new FakeElement({ text: 'Чаты' }),
+    body: new FakeElement({ text: bodyText }),
     querySelectorAll(selector) {
       if (selector.includes(',')) {
         return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
@@ -117,25 +119,33 @@ async function runContentChatAssist({
   };
   globalThis.chrome = {
     runtime: {
+      lastError: null,
       onMessage: {
         addListener(fn) {
           listener = fn;
         }
       },
-      sendMessage(message) {
+      sendMessage(message, callback) {
+        const settle = (response) => {
+          if (typeof callback === 'function') {
+            Promise.resolve(response).then((value) => callback(value));
+            return undefined;
+          }
+          return Promise.resolve(response);
+        };
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
-          return Promise.resolve({ ok: true });
+          return settle({ ok: true });
         }
         if (message.type === 'APPEND_CHAT_REPORT') {
           reports.push(message.item);
-          return Promise.resolve({ ok: true });
+          return settle({ ok: true });
         }
         if (message.type === 'GENERATE_CHAT_REPLY') {
           groqCalls.push(message);
-          return Promise.resolve({ ok: true, text: groqText });
+          return settle({ ok: true, text: groqText });
         }
-        return Promise.resolve({ ok: true });
+        return settle({ ok: true });
       }
     },
     storage: {
@@ -197,6 +207,30 @@ test('chat assist reports external contact invite with direct chat link and does
   assert.equal(result.reports.at(-1).contactType, 'telegram');
 });
 
+test('chat assist requires hh authorization before reading chats', async () => {
+  const result = await runContentChatAssist({
+    authenticated: false,
+    bodyText: 'Войдите, чтобы читать сообщения',
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/abc',
+        employerName: 'ООО Test',
+        vacancyTitle: 'Java Developer',
+        previewText: 'Новое сообщение',
+        chatText: 'ООО Test\nРасскажите про опыт?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, false);
+  assert.match(result.response.error, /authorization required/i);
+  assert.equal(result.reports.length, 0);
+  assert.equal(result.groqCalls.length, 0);
+  assert.equal(result.sendClicks, 0);
+  assert.equal(result.states.at(-1).state, 'error');
+});
+
 test('chat assist skips read chats when unread-only setting is enabled', async () => {
   const result = await runContentChatAssist({
     chats: [
@@ -251,6 +285,49 @@ test('chat assist drafts reply without sending by default', async () => {
   assert.equal(result.reports.at(-1).sent, false);
   assert.equal(result.groqCalls.at(-1).vacancyUrl, 'https://hh.ru/vacancy/456');
   assert.match(result.groqCalls.at(-1).chatText, /Какие ожидания/);
+});
+
+test('chat assist strips markdown from generated drafts', async () => {
+  const result = await runContentChatAssist({
+    chatReplyMode: 'draft',
+    groqText: '**Здравствуйте, ожидаю 250 000 руб. на руки.**',
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/draft-markdown',
+        employerName: 'ООО Draft',
+        vacancyTitle: 'Java Developer',
+        chatText: 'ООО Draft\nКакие ожидания по зарплате?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.inputValue, 'Здравствуйте, ожидаю 250 000 руб. на руки.');
+  assert.equal(result.reports.at(-1).status, 'drafted');
+});
+
+test('chat assist skips generated drafts that look like model garbage', async () => {
+  const result = await runContentChatAssist({
+    chatReplyMode: 'draft',
+    groqText: '{"role":"assistant","content":"ответ"}',
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/bad-draft',
+        employerName: 'ООО Draft',
+        vacancyTitle: 'Java Developer',
+        chatText: 'ООО Draft\nКакие ожидания по зарплате?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.inputValue, '');
+  assert.equal(result.reports.at(-1).status, 'skipped_bad_generated_reply');
 });
 
 test('chat assist auto-send mode clicks send button', async () => {

@@ -61,7 +61,9 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 
 ### Важно
 
-- Авторизацию нужно проходить самостоятельно
+- Авторизацию нужно проходить самостоятельно. Если расширение не видит признаки
+  авторизованного аккаунта hh.ru, предпросмотр, отклики и обработка чатов не
+  запускаются.
 - Если появилась капча или страница входа, остановите расширение и пройдите проверку вручную.
 - Без Groq key обычные отклики работают, но сложные письма, вопросы и тесты будут пропущены.
 - Если работодатель просит позвонить, перейти в Telegram/WhatsApp/email или другой внешний канал, расширение сохраняет отчет и не отвечает автоматически.
@@ -97,6 +99,94 @@ Groq key можно взять в [Groq Console](https://console.groq.com/docs/q
 
 After changing files, click `Reload` for the extension on `chrome://extensions`.
 
+No-ping extension smoke test:
+
+```bash
+npm run test:extension
+```
+
+This launches a temporary Chromium-compatible browser profile, loads the
+unpacked extension directly from this repository, checks
+`chrome.runtime.getManifest().version`, and deletes the temp profile. It does
+not use your normal Chrome profile and does not require `chrome://extensions`.
+Set `HHJA_CHROMIUM_PATH` to force a specific Chromium/Chrome executable.
+
+Authorized hh.ru checks need an authenticated browser profile. Use a dedicated
+persistent Chromium profile instead of the normal Chrome profile:
+
+```bash
+npm run sync:hh:auth
+```
+
+This copies only hh.ru cookie rows from Chrome Profile 1 into
+`.hhja-chromium-profile/Default`, writes a backup beside the target cookie DB,
+and stores non-secret sync evidence in `.hhja-chromium-profile/hh-auth-sync-last.json`.
+Override paths with `HHJA_CHROME_COOKIE_PROFILE`,
+`HHJA_CHROMIUM_USER_DATA_DIR`, or `HHJA_CHROMIUM_COOKIE_PROFILE`.
+
+Configure the dedicated Chromium extension storage without opening extension UI:
+
+```bash
+HHJA_ENV_FILE=/path/to/.env npm run configure:hh:chromium
+```
+
+Supported keys include `GROQ_API_KEY`, `GROQ_MODEL`, `HHJA_RESUME_URL`,
+`HHJA_EXPECTED_SALARY`, and related `HHJA_*` overrides. The command reports only
+configured key names and boolean Groq-key presence, not the secret value.
+
+```bash
+npm run test:hh:chromium
+```
+
+By default this uses `.hhja-chromium-profile/`, loads the unpacked extension
+from this repository, opens hh.ru, and runs the existing live smoke check over
+CDP. If hh.ru is not logged in in that profile, the check fails with the
+login/captcha evidence. To keep the browser open for the one-time login:
+
+```bash
+HHJA_CHROMIUM_KEEP_OPEN=1 npm run test:hh:chromium
+```
+
+After that profile is authorized, future `npm run test:hh:chromium` runs reuse
+the same hh.ru session and do not need Chrome Profile 1.
+
+Bounded live auto-apply through the dedicated Chromium profile:
+
+```bash
+HHJA_LIMIT=1 HHJA_MAX_PROCESSED=1 HHJA_CHROMIUM_RUN_MS=60000 npm run start:hh:chromium
+```
+
+This opens an hh.ru search page with `hhjaAutoStart=live`, loads the current
+worktree extension from disk, waits for the configured run window, and closes
+the browser unless `HHJA_CHROMIUM_KEEP_OPEN=1` is set. `HHJA_LIMIT` still means
+successful applications; `HHJA_MAX_PROCESSED` is a test harness guard that stops
+after the requested number of handled vacancies, including skipped vacancies.
+Set `HHJA_OUTPUT=run-logs/file.json` to save the fresh `runState` and recent
+result statuses captured from extension storage before the browser closes.
+
+Popup-equivalent actions through the dedicated Chromium profile:
+
+```bash
+HHJA_ACTION=TEST_GROQ npm run run:hh:chromium
+HHJA_ACTION=REFRESH_RESUMES_NOW npm run run:hh:chromium
+HHJA_ACTION=START_CHAT_ASSIST npm run run:hh:chromium
+```
+
+Use `HHJA_OUTPUT=run-logs/file.json` to save fresh storage evidence. Resume
+refresh discovers a resume link from the authenticated hh.ru page when
+`resumeUrl` is not configured.
+
+Developer reload helper after the next manual reload:
+
+```bash
+node scripts/reload-extension.mjs
+```
+
+This opens `https://hh.ru/?hhjaReloadExtension=1` in the configured Chrome
+profile. The installed extension catches that URL trigger and calls
+`chrome.runtime.reload()`. If the installed extension is older than `0.1.36`,
+reload it once manually on `chrome://extensions` first.
+
 ### Setup
 
 1. Click the extension icon.
@@ -125,7 +215,9 @@ You can create a Groq key in [Groq Console](https://console.groq.com/docs/quicks
 
 ### Important
 
-- The extension does not store your hh.ru login or password.
+- The extension does not store your hh.ru login or password. If it cannot detect
+  an authenticated hh.ru account, preview, auto-apply, and chat processing do
+  not start.
 - If captcha or login appears, stop the extension and complete it manually.
 - Without a Groq key, normal applications work, but complex letters, questions, and tests may be skipped.
 - Do not publish your Groq key in GitHub, chats, screenshots, or logs.
@@ -138,10 +230,40 @@ You can create a Groq key in [Groq Console](https://console.groq.com/docs/quicks
 npm test
 ```
 
+Isolated unpacked-extension smoke test:
+
+```bash
+npm run test:extension
+```
+
+Authorized Chromium-profile hh.ru smoke test:
+
+```bash
+npm run test:hh:chromium
+```
+
 Live authorized hh.ru smoke test:
 
 ```bash
 npm run test:hh
 ```
 
-`test:hh` requires Chrome DevTools Protocol at `http://127.0.0.1:9222`.
+`test:extension` launches a temporary profile and does not touch the normal
+Chrome profile. `test:hh:chromium` launches a dedicated persistent profile at
+`.hhja-chromium-profile/`. `test:hh` requires Chrome DevTools Protocol at
+`http://127.0.0.1:9222`.
+
+## Test Checklist Template
+
+Use `TEST_CHECKLIST_TEMPLATE.md` as the reusable QA template for post-install
+testing. Before testing, copy it or create a separate test-run record from it.
+Fill `Test Run Metadata` and live side-effect permissions in the copy first,
+then go through the checklist and mark every relevant item as `Pass`, `Fail`,
+`Blocked`, `Skipped`, or `N/A`.
+
+Run `npm test` and `npm run test:extension` before manual checks. Run
+`npm run test:hh:chromium` or `npm run test:hh` only when an authorized hh.ru
+profile is available and live hh.ru side effects are explicitly allowed.
+For bounded live automation evidence, use `HHJA_MAX_PROCESSED=1` with
+`npm run start:hh:chromium` so no-Groq/question vacancies can end cleanly after
+one handled vacancy.

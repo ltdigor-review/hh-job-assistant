@@ -304,7 +304,15 @@ async function refreshHealth() {
     }
 
     const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_CONTENT_STATUS' });
-    setHealth(nodes.tabStatus, response?.ok ? 'hh.ru подключен' : 'Нет связи', response?.ok ? 'ok' : 'error');
+    if (!response?.ok) {
+      setHealth(nodes.tabStatus, 'Нет связи', 'error');
+    } else if (response.unsafe) {
+      setHealth(nodes.tabStatus, 'Требуется вход hh.ru', 'error');
+    } else if (!response.authenticated) {
+      setHealth(nodes.tabStatus, 'Нужна авторизация hh.ru', 'warn');
+    } else {
+      setHealth(nodes.tabStatus, 'hh.ru подключен', 'ok');
+    }
   } catch (error) {
     setHealth(nodes.tabStatus, 'Нет связи', 'error');
   }

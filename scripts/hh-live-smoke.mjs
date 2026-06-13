@@ -79,11 +79,38 @@ async function waitForLoad(session) {
   throw new Error('HH page load timed out');
 }
 
+async function waitForTargetPage(session, expectedUrl) {
+  const expected = new URL(expectedUrl);
+  const started = Date.now();
+  let lastHref = '';
+
+  while (Date.now() - started < 30000) {
+    const result = await session.send('Runtime.evaluate', {
+      expression: 'location.href',
+      returnByValue: true
+    });
+    lastHref = result.result?.value || '';
+    if (lastHref !== 'about:blank') {
+      const current = new URL(lastHref);
+      if (current.hostname === expected.hostname && current.pathname === expected.pathname) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(`HH page navigation timed out; last URL: ${lastHref || 'unknown'}`);
+}
+
 function buildInjection(contentScriptSource) {
   return `
     (async () => {
       const messages = [];
       let listener = null;
+      const hasAuthSignal = () => {
+        const links = [...document.querySelectorAll('a[href*="/applicant/"],a[href*="/resume/"],a[href*="/chat"],a[href*="/negotiations"]')];
+        if (links.some((link) => /^https:\\/\\/([^/]+\\.)?hh\\.ru\\//.test(link.href || ''))) return true;
+        const text = document.body.innerText || '';
+        return /мои резюме|отклики|сообщения|профиль|личный кабинет/i.test(text) && !/войти|зарегистрироваться/i.test(text);
+      };
       const chrome = {
         runtime: {
           onMessage: {
@@ -115,9 +142,19 @@ function buildInjection(contentScriptSource) {
           setTimeout(() => resolve({ ok: false, error: 'Listener did not stay async' }), 0);
         }
       });
-      return { response, messages, href: location.href, title: document.title, bodyText: document.body.innerText.slice(0, 1000) };
+      return { response, messages, href: location.href, title: document.title, bodyText: document.body.innerText.slice(0, 1000), hasAuthSignal: hasAuthSignal() };
     })()
   `;
+}
+
+async function readContentScriptSource() {
+  const files = [
+    '../src/content-text.js',
+    '../src/content-dom.js',
+    '../src/content-hh.js'
+  ];
+  const parts = await Promise.all(files.map((file) => readFile(new URL(file, import.meta.url), 'utf8')));
+  return parts.join('\n;\n');
 }
 
 let target;
@@ -137,9 +174,10 @@ try {
 
   session = await createCdpSession(target.webSocketDebuggerUrl);
   await session.send('Runtime.enable');
+  await waitForTargetPage(session, targetUrl);
   await waitForLoad(session);
 
-  const contentScriptSource = await readFile(new URL('../src/content-hh.js', import.meta.url), 'utf8');
+  const contentScriptSource = await readContentScriptSource();
   const evaluation = await session.send('Runtime.evaluate', {
     expression: buildInjection(contentScriptSource),
     awaitPromise: true,
@@ -156,8 +194,15 @@ try {
     throw new Error(value?.response?.error || 'Check-only run returned an unsuccessful response');
   }
 
-  if (/\/account\/login|captcha|подтвердите, что вы не робот|не робот/i.test(value.href + '\n' + value.bodyText)) {
+  if (
+    /\/account\/login|captcha|подтвердите, что вы не робот|не робот|ddos-guard|проверка браузера|ручную проверку/i.test(
+      `${value.href}\n${value.title}\n${value.bodyText}`
+    )
+  ) {
     throw new Error('HH page is login/captcha/anti-bot, not an authorized vacancy page');
+  }
+  if (!value.hasAuthSignal) {
+    throw new Error('HH page has no authenticated-account signal; sign in before running live smoke');
   }
 
   if (!value.response.found || value.response.found < 1) {
@@ -173,6 +218,7 @@ try {
     ok: true,
     url: value.href,
     title: value.title,
+    authenticated: value.hasAuthSignal,
     found: value.response.found,
     stateMessages: stateMessages.length
   }, null, 2));

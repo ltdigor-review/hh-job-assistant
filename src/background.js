@@ -32,6 +32,8 @@ const DEFAULTS = {
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 const OLD_DEFAULT_DELAY_MIN_MS = 8000;
 const OLD_DEFAULT_DELAY_MAX_MS = 15000;
+const GROQ_REQUEST_TIMEOUT_MS = 35000;
+const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -40,6 +42,14 @@ function nowIso() {
 function sleep(ms) {
   if (globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getGroqRequestTimeoutMs() {
+  const testOverride = Number(globalThis.__HH_JOB_ASSISTANT_TEST_GROQ_TIMEOUT_MS__);
+  if (Number.isFinite(testOverride) && testOverride > 0) {
+    return testOverride;
+  }
+  return GROQ_REQUEST_TIMEOUT_MS;
 }
 
 async function storageGet(keys) {
@@ -408,26 +418,41 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     resumeTextLength: String(resumeText).length
   });
 
-  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${groqApiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: groqModel || DEFAULTS.groqModel,
-      messages: buildGroqMessages({
-        task,
-        resumeText: String(resumeText).slice(0, 12000),
-        expectedSalary: String(expectedSalary).slice(0, 1000),
-        coverPrompt: String(coverPrompt).slice(0, 4000),
-        vacancyText: String(vacancyText).slice(0, 12000),
-        extraText: String(extraText).slice(0, 8000)
-      }),
-      temperature: task === 'test_assist' ? 0.2 : 0.35,
-      max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
-    })
-  });
+  const timeoutMs = getGroqRequestTimeoutMs();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+        'Content-Type': 'application/json'
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: groqModel || DEFAULTS.groqModel,
+        messages: buildGroqMessages({
+          task,
+          resumeText: String(resumeText).slice(0, 12000),
+          expectedSalary: String(expectedSalary).slice(0, 1000),
+          coverPrompt: String(coverPrompt).slice(0, 4000),
+          vacancyText: String(vacancyText).slice(0, 12000),
+          extraText: String(extraText).slice(0, 8000)
+        }),
+        temperature: task === 'test_assist' ? 0.2 : 0.35,
+        max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
+      })
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      await appendAgentLog('groq_request_error', { task, error: 'timeout', timeoutMs });
+      throw new Error(`Groq request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
@@ -896,6 +921,116 @@ function isAutoApplyStartUrl(value) {
   }
 }
 
+function isHhResponseFormUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      url.pathname === '/applicant/vacancy_response';
+  } catch {
+    return false;
+  }
+}
+
+function getVacancyIdFromUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.searchParams.get('vacancyId') || '';
+  } catch {
+    return '';
+  }
+}
+
+function getResponseNavigationWatchdogMs() {
+  const testOverride = Number(globalThis.__HH_JOB_ASSISTANT_TEST_RESPONSE_WATCHDOG_MS__);
+  if (Number.isFinite(testOverride) && testOverride > 0) {
+    return testOverride;
+  }
+  return RESPONSE_NAVIGATION_WATCHDOG_MS;
+}
+
+async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt) {
+  const { autoApplyQueue, autoApplySearchQueue, runState = DEFAULTS.runState } = await storageGet([
+    'autoApplyQueue',
+    'autoApplySearchQueue',
+    'runState'
+  ]);
+  if (!autoApplyQueue?.active || !autoApplyQueue.returnToSearch || !isAutoApplyStartUrl(autoApplyQueue.sourceUrl)) {
+    return;
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.id || tab.url !== expectedUrl || !isHhResponseFormUrl(tab.url)) {
+    return;
+  }
+
+  const stateUpdatedAt = Date.parse(runState.updatedAt || '');
+  if (Number.isFinite(stateUpdatedAt) && stateUpdatedAt > scheduledAt) {
+    return;
+  }
+
+  const counters = {
+    found: 0,
+    processed: 0,
+    applied: 0,
+    skipped: 0,
+    errors: 0,
+    ...(autoApplyQueue.counters || autoApplySearchQueue?.counters || {})
+  };
+  counters.processed = Math.max(Number(counters.processed) || 0, Number(runState.processed) || 0);
+  counters.applied = Math.max(Number(counters.applied) || 0, Number(runState.applied) || 0);
+  counters.skipped = Math.max(Number(counters.skipped) || 0, Number(runState.skipped) || 0) + 1;
+  counters.errors = Math.max(Number(counters.errors) || 0, Number(runState.errors) || 0);
+  counters.found = Math.max(Number(counters.found) || 0, Number(runState.found) || 0);
+
+  const item = autoApplyQueue.items?.[autoApplyQueue.index || 0] || {};
+  const vacancyId = item.vacancyId || getVacancyIdFromUrl(expectedUrl);
+  const message = 'Skipped: HH response page did not finish loading in time.';
+  await appendRunResult({
+    index: item.index || Number(autoApplyQueue.index || 0) + 1,
+    vacancyId,
+    title: item.title || '',
+    url: item.url || expectedUrl,
+    status: 'skipped_response_page_timeout',
+    coverLetterUsed: false,
+    testDetected: Boolean(item.testDetected),
+    error: message
+  });
+  await storageSet({
+    autoApplyQueue: { ...autoApplyQueue, active: false, recoveredFromUrl: expectedUrl, counters },
+    autoApplySearchQueue: {
+      active: true,
+      runId: autoApplyQueue.runId || autoApplySearchQueue?.runId || '',
+      limit: autoApplyQueue.limit || autoApplySearchQueue?.limit || 20,
+      counters,
+      config: autoApplyQueue.config || autoApplySearchQueue?.config,
+      processedVacancyIds: autoApplyQueue.processedVacancyIds || autoApplySearchQueue?.processedVacancyIds || []
+    }
+  });
+  await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: message });
+  await appendAgentLog('response_navigation_watchdog_recovered', {
+    tabId,
+    vacancyId,
+    responseUrl: expectedUrl,
+    sourceUrl: autoApplyQueue.sourceUrl
+  });
+  await chrome.tabs.update(tabId, { url: autoApplyQueue.sourceUrl }).catch(() => {});
+}
+
+function scheduleResponseNavigationWatchdog(tabId, url) {
+  if (!tabId || !isHhResponseFormUrl(url)) return;
+  const scheduledAt = Date.now();
+  setTimeout(() => {
+    recoverStalledResponseNavigation(tabId, url, scheduledAt).catch((error) => {
+      appendAgentLog('response_navigation_watchdog_error', {
+        tabId,
+        url,
+        error: error instanceof Error ? error.message : String(error)
+      }).catch(() => {});
+    });
+  }, getResponseNavigationWatchdogMs());
+}
+
 async function startAutoApplyFromActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
@@ -928,6 +1063,11 @@ chrome.commands?.onCommand?.addListener((command) => {
   });
 });
 
+chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
+  const url = changeInfo.url || tab?.url || '';
+  scheduleResponseNavigationWatchdog(tabId, url);
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     await ensureDefaults();
@@ -956,6 +1096,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLEAR_AGENT_DEBUG_LOG': {
         await storageSet({ agentDebugLog: [] });
         sendResponse({ ok: true });
+        break;
+      }
+      case 'RELOAD_EXTENSION': {
+        await appendAgentLog('reload_extension', {
+          reason: message.reason || 'manual',
+          url: message.url || sender?.tab?.url || ''
+        });
+        sendResponse({ ok: true, reloading: true });
+        chrome.runtime.reload();
         break;
       }
       case 'SET_RUN_STATE': {

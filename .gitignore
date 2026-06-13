@@ -4,6 +4,7 @@ dist/
 build/
 node_modules/
 run-logs/
+.hhja-chromium-profile/
 .env
 .env.*
 !.env.example

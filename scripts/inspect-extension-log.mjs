@@ -168,6 +168,31 @@ function extractLatestRunState(text) {
   return states.sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || ''))).at(-1) || null;
 }
 
+function extractLatestStartRun(text) {
+  const starts = [];
+  let position = 0;
+  while (position < text.length) {
+    const eventIndex = text.indexOf('"event":"start_run"', position);
+    if (eventIndex === -1) break;
+    const detailsStart = text.lastIndexOf('"details":{', eventIndex);
+    const detailsEnd = text.indexOf('},"event":"start_run"', detailsStart);
+    position = eventIndex + 1;
+    if (detailsStart === -1 || detailsEnd === -1 || detailsEnd > eventIndex) continue;
+    const details = text.slice(detailsStart + '"details":{'.length, detailsEnd);
+    const timestamp = extractField(details, 'timestamp') || extractField(text.slice(eventIndex, eventIndex + 250), 'timestamp');
+    starts.push({
+      extensionVersion: extractField(details, 'extensionVersion') || '',
+      flowVersion: extractField(details, 'flowVersion') || '',
+      limit: Number(extractField(details, 'limit') || 0),
+      limitOverride: extractField(details, 'limitOverride'),
+      mode: extractField(details, 'mode') || '',
+      timestamp: timestamp || '',
+      url: extractField(details, 'url') || ''
+    });
+  }
+  return starts.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || ''))).at(-1) || null;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!existsSync(args.storageDir)) {
@@ -181,6 +206,7 @@ async function main() {
   const runResults = extractJsonObjects(stdout, '"status":"applied').filter((item) => item.status);
   const fragmentResults = extractRunResultFragments(stdout);
   const latestState = extractLatestRunState(stdout);
+  const latestStart = extractLatestStartRun(stdout);
 
   const results = dedupeResults(
     [
@@ -202,6 +228,7 @@ async function main() {
       skipped: skipped.length,
       results: results.length
     },
+    latestStart,
     latestState,
     applied
   };
@@ -219,6 +246,9 @@ async function main() {
   console.log(`Skipped: ${skipped.length}`);
   if (latestState) {
     console.log(`Latest state: ${latestState.state}, applied=${latestState.applied}, processed=${latestState.processed}, updatedAt=${latestState.updatedAt}`);
+  }
+  if (latestStart) {
+    console.log(`Latest start: mode=${latestStart.mode}, limit=${latestStart.limit}, extension=${latestStart.extensionVersion || 'unknown'}, flow=${latestStart.flowVersion || 'unknown'}`);
   }
   for (const item of applied.slice(-10)) {
     console.log(`${item.timestamp || ''} ${item.status || ''} ${item.vacancyId || ''} ${item.title || ''}`.trim());

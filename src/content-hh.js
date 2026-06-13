@@ -58,20 +58,119 @@ const HH_SELECTORS = {
 
 const CLICK_DELAY_MIN_MS = 500;
 const CLICK_DELAY_MAX_MS = 1200;
+const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
+const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
+const {
+  cleanText,
+  sanitizeGeneratedText,
+  stripAnswerLabel,
+  getGeneratedTextInvalidReason,
+  splitGeneratedAnswers,
+  normalizeChoiceText,
+  choiceTokens,
+  scoreChoice
+} = globalThis.HHJobAssistantText || {};
+const {
+  textOf,
+  isVisible,
+  queryFirst,
+  queryAll,
+  findClickableByText,
+  isDisabled,
+  findEnabledClickableByText,
+  setNativeValue
+} = globalThis.HHJobAssistantDom || {};
 
 let stopRequested = false;
 let stopReason = '';
 let activeRunId = null;
 let queuedResumeStarted = false;
 let queuedSearchStarted = false;
+let extensionContextInvalidated = false;
+
+function createProcessedVacancyIdSet(source = []) {
+  return new Set((Array.isArray(source) ? source : []).map((value) => String(value || '').trim()).filter(Boolean));
+}
+
+function getVacancyDedupeKey(item) {
+  const id = String(item?.vacancyId || '').trim();
+  if (id) return id;
+  const urlId = getVacancyId(item?.url || item?.responseUrl || '');
+  if (urlId) return urlId;
+  return '';
+}
+
+function serializeProcessedVacancyIds(processedIds) {
+  return Array.from(processedIds || []).filter(Boolean);
+}
+
+function isExtensionContextInvalidatedError(error) {
+  return /extension context invalidated|context invalidated/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function markExtensionContextInvalidated() {
+  extensionContextInvalidated = true;
+  stopRequested = true;
+  stopReason = 'extension_context_invalidated';
+  setBusyCursor(false);
+}
+
+globalThis.addEventListener?.('unhandledrejection', (event) => {
+  if (isExtensionContextInvalidatedError(event?.reason)) {
+    markExtensionContextInvalidated();
+    event.preventDefault?.();
+  }
+});
+
+async function withExtensionContext(operation, { optional = false } = {}) {
+  if (extensionContextInvalidated) {
+    if (optional) return null;
+    throw new Error('Extension context invalidated. Reload the extension and refresh the HH page.');
+  }
+
+  try {
+    return await operation();
+  } catch (error) {
+    if (isExtensionContextInvalidatedError(error)) {
+      markExtensionContextInvalidated();
+      if (optional) return null;
+      throw new Error('Extension context invalidated. Reload the extension and refresh the HH page.');
+    }
+    throw error;
+  }
+}
+
+async function storageGet(keys, options = {}) {
+  return withExtensionContext(() => chrome.storage.local.get(keys), options) || {};
+}
+
+async function storageSet(value, options = {}) {
+  return withExtensionContext(() => chrome.storage.local.set(value), options);
+}
 
 function sleep(ms) {
   if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getRuntimeMessageTimeoutMs() {
+  const testOverride = Number(window.__HH_JOB_ASSISTANT_TEST_RUNTIME_TIMEOUT_MS__);
+  if (Number.isFinite(testOverride) && testOverride > 0) {
+    return testOverride;
+  }
+  return RUNTIME_MESSAGE_TIMEOUT_MS;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 async function appendAgentLog(event, details = {}) {
-  await globalThis.HHJobAssistantLog?.append?.('content', event, details);
+  await withExtensionContext(() => globalThis.HHJobAssistantLog?.append?.('content', event, details), { optional: true });
 }
 
 function randomDelay(minMs, maxMs) {
@@ -83,56 +182,6 @@ function randomDelay(minMs, maxMs) {
 async function waitBeforeClick() {
   if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return;
   await sleep(randomDelay(CLICK_DELAY_MIN_MS, CLICK_DELAY_MAX_MS));
-}
-
-function cleanText(value) {
-  return (value || '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function textOf(node) {
-  return cleanText(node?.innerText || node?.textContent || '');
-}
-
-function isVisible(node) {
-  if (!node) return false;
-  const style = window.getComputedStyle(node);
-  const rect = node.getBoundingClientRect();
-  return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-}
-
-function queryFirst(selectors, root = document) {
-  for (const selector of selectors) {
-    const node = [...root.querySelectorAll(selector)].find(isVisible);
-    if (node) return node;
-  }
-  return null;
-}
-
-function queryAll(selectors, root = document) {
-  return selectors.flatMap((selector) => [...root.querySelectorAll(selector)]).filter(isVisible);
-}
-
-function findClickableByText(root, patterns) {
-  const nodes = [...root.querySelectorAll('button,a,[role="button"]')].filter(isVisible);
-  return nodes.find((node) => patterns.some((pattern) => pattern.test(textOf(node))));
-}
-
-function isDisabled(node) {
-  return Boolean(
-    node?.disabled ||
-      node?.getAttribute?.('disabled') !== null ||
-      node?.getAttribute?.('aria-disabled') === 'true' ||
-      /\bdisabled\b/i.test(node?.getAttribute?.('class') || '')
-  );
-}
-
-function findEnabledClickableByText(root, patterns) {
-  const nodes = [...root.querySelectorAll('button,a,[role="button"]')].filter((node) => isVisible(node) && !isDisabled(node));
-  return nodes.find((node) => patterns.some((pattern) => pattern.test(textOf(node))));
 }
 
 function getVacancyId(url) {
@@ -150,9 +199,47 @@ function navigateTo(url) {
 function isUnsafePage() {
   const body = textOf(document.body);
   return (
-    /\/account\/login|\/account\/signup/.test(location.pathname) ||
+    isUnsafeHhUrl(location.href) ||
     /captcha|подтвердите, что вы не робот|не робот|слишком много запросов/i.test(body)
   );
+}
+
+function hasAuthenticatedHhSignal() {
+  if (globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ === false || window.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ === false) {
+    return false;
+  }
+  if (globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ === true || window.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ === true) {
+    return true;
+  }
+  if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return true;
+  if (isUnsafePage()) return false;
+
+  const authLinks = queryAll([
+    'a[href*="/applicant/"]',
+    'a[href*="/resume/"]',
+    'a[href*="/chat"]',
+    'a[href*="/negotiations"]'
+  ]);
+  if (authLinks.some((link) => /^https:\/\/([^/]+\.)?hh\.ru\//.test(link.href || ''))) {
+    return true;
+  }
+
+  const body = textOf(document.body);
+  return /мои резюме|отклики|сообщения|профиль|личный кабинет/i.test(body) && !/войти|зарегистрироваться/i.test(body);
+}
+
+function requireAuthenticatedHhPage() {
+  if (hasAuthenticatedHhSignal()) return;
+  throw new Error('HH authorization required. Sign in to hh.ru before using HH Job Assistant.');
+}
+
+function isUnsafeHhUrl(value) {
+  try {
+    const url = new URL(String(value || ''), location.href);
+    return /\/account\/login|\/account\/signup/.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function isResponseFormPage() {
@@ -169,6 +256,34 @@ function isHhSearchPageUrl(value) {
   } catch {
     return false;
   }
+}
+
+function isVacancyDetailPage() {
+  return /\/vacancy\/\d+/.test(location.pathname);
+}
+
+function getCurrentVacancyId() {
+  return getVacancyId(location.href);
+}
+
+function queuedItemMatchesCurrentVacancy(queue) {
+  if (!queue?.returnToSearch || !isVacancyDetailPage() || !Array.isArray(queue.items)) {
+    return false;
+  }
+
+  const item = queue.items[queue.index];
+  const currentId = getCurrentVacancyId();
+  if (!item || !currentId) {
+    return false;
+  }
+
+  const queuedIds = [
+    item.vacancyId,
+    getVacancyId(item.url || ''),
+    getVacancyId(item.responseUrl || '')
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+
+  return queuedIds.includes(String(currentId));
 }
 
 function getQueueSourceUrl() {
@@ -197,14 +312,37 @@ function getCardInfo(card, index) {
 }
 
 function getVacancyCardNodes() {
+  function hasVacancyLink(node) {
+    return Boolean(
+      node?.querySelector?.('a[href*="/vacancy/"]') ||
+        (node?.matches?.('a[href*="/vacancy/"]') ? node : null)
+    );
+  }
+
+  function normalizeVacancyCardNode(node) {
+    let current = node;
+    while (current && current !== document && current !== document.body) {
+      if (hasVacancyLink(current)) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return hasVacancyLink(node) ? node : null;
+  }
+
   for (const selectors of [
     ['[data-qa="vacancy-serp__vacancy"]'],
     ['[data-qa="serp-item"]'],
     ['[data-qa*="vacancy-serp"]']
   ]) {
-    const cards = queryAll(selectors).filter(
-      (card) => card.querySelector('a[href*="/vacancy/"]') || /откликнуться/i.test(textOf(card))
-    );
+    const seenNodes = new Set();
+    const cards = queryAll(selectors)
+      .map(normalizeVacancyCardNode)
+      .filter((card) => {
+        if (!card || seenNodes.has(card)) return false;
+        seenNodes.add(card);
+        return card.querySelector('a[href*="/vacancy/"]') || /откликнуться/i.test(textOf(card));
+      });
     if (cards.length > 0) {
       return cards;
     }
@@ -276,8 +414,12 @@ function getDialogRoot() {
   return candidates.at(-1) || document;
 }
 
+function getRootText(root = getDialogRoot()) {
+  return textOf(root) || textOf(root?.body) || (root === document ? textOf(document.body) : '');
+}
+
 function detectTest(root = getDialogRoot()) {
-  const text = textOf(root);
+  const text = getRootText(root);
   return /тест|задани[ея]|контрольн|ответьте на вопросы|вопрос \d|пройти тест/i.test(text);
 }
 
@@ -301,13 +443,13 @@ function getFieldMarker(field) {
 }
 
 function findCoverLetterTextarea(root = getDialogRoot()) {
-  return [...root.querySelectorAll('textarea,input:not([type="hidden"])')]
+  return [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"]')]
     .filter(isVisible)
     .find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
 }
 
 function findQuestionFields(root = getDialogRoot()) {
-  return [...root.querySelectorAll('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')]
+  return [...root.querySelectorAll('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),[contenteditable="true"]')]
     .filter(isVisible)
     .filter((field) => {
       const marker = getFieldMarker(field);
@@ -439,14 +581,15 @@ function detectBlockedResponseReason(root = getDialogRoot()) {
 }
 
 function findFollowupConfirmButton(root = getDialogRoot()) {
-  const text = textOf(root);
+  const text = getRootText(root);
   if (!/другой стране|такой отклик может получить отказ|скорее всего, будет отказ|получить отказ/i.test(text)) {
     return null;
   }
 
   return findClickableByText(root, [
-    /в[сc]е равно откликнуться/i,
+    /в[сc][её]\s+равно\s+откликнуться/i,
     /откликнуться все равно/i,
+    /откликнуться всё равно/i,
     /продолжить отклик/i,
     /подтвердить/i
   ]);
@@ -480,6 +623,16 @@ async function confirmFollowupIfNeeded(previousText, counters) {
   return true;
 }
 
+async function confirmInitialFollowupIfNeeded(root, previousText, counters) {
+  const confirmButton = findFollowupConfirmButton(root);
+  if (!confirmButton) {
+    return root;
+  }
+
+  await clickFollowupConfirmButton(confirmButton, counters);
+  return waitForDialogOrChange(previousText, window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 7000);
+}
+
 function closeDialog() {
   const root = getDialogRoot();
   const ariaClose = [...root.querySelectorAll('button,[role="button"]')]
@@ -498,68 +651,33 @@ function closeDialog() {
   }
 }
 
+function prepareResponseButtonForCurrentTab(button) {
+  if (!button) return;
+  if (button.getAttribute?.('target')) {
+    button.removeAttribute?.('target');
+  }
+}
+
 function setBusyCursor(active) {
   if (!document?.body?.style) return;
   document.body.style.cursor = active ? 'progress' : '';
 }
 
-function setNativeValue(element, value) {
-  const prototype = Object.getPrototypeOf(element);
-  const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-  if (descriptor?.set) {
-    descriptor.set.call(element, value);
-  } else {
-    element.value = value;
+async function sendRuntimeMessage(message, options = {}) {
+  const response = withExtensionContext(() => new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (result) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        reject(new Error(lastError.message || String(lastError)));
+        return;
+      }
+      resolve(result);
+    });
+  }));
+  if (!options.timeoutMs) {
+    return response;
   }
-  element.dispatchEvent(new Event('input', { bubbles: true }));
-  element.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function showAssistantPanel({ title, text }) {
-  document.getElementById('hh-job-assistant-panel')?.remove();
-
-  const panel = document.createElement('aside');
-  panel.id = 'hh-job-assistant-panel';
-  panel.style.cssText = [
-    'position: fixed',
-    'right: 16px',
-    'bottom: 16px',
-    'z-index: 2147483647',
-    'width: min(420px, calc(100vw - 32px))',
-    'max-height: 70vh',
-    'overflow: auto',
-    'background: #fff',
-    'border: 1px solid #b6c2d1',
-    'box-shadow: 0 16px 48px rgba(0,0,0,.22)',
-    'border-radius: 8px',
-    'font: 14px/1.45 Arial, sans-serif',
-    'color: #1f2937',
-    'padding: 14px'
-  ].join(';');
-
-  const header = document.createElement('div');
-  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px';
-
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-
-  const close = document.createElement('button');
-  close.type = 'button';
-  close.textContent = 'Close';
-  close.style.cssText = 'border:1px solid #cbd5e1;background:#f8fafc;border-radius:6px;padding:4px 8px;cursor:pointer';
-  close.addEventListener('click', () => panel.remove());
-
-  const body = document.createElement('pre');
-  body.textContent = text;
-  body.style.cssText = 'white-space:pre-wrap;margin:0;font:13px/1.45 Arial, sans-serif';
-
-  header.append(heading, close);
-  panel.append(header, body);
-  document.body.append(panel);
-}
-
-async function sendRuntimeMessage(message) {
-  return chrome.runtime.sendMessage(message);
+  return withTimeout(response, options.timeoutMs, options.timeoutMessage || 'Runtime message timed out.');
 }
 
 async function setRunState(patch) {
@@ -583,15 +701,15 @@ async function setRunState(patch) {
       )
     );
   }
-  await sendRuntimeMessage({ type: 'SET_RUN_STATE', patch: nextPatch });
+  await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'SET_RUN_STATE', patch: nextPatch }), { optional: true });
 }
 
 async function appendResult(item) {
-  await sendRuntimeMessage({ type: 'APPEND_RUN_RESULT', item });
+  await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'APPEND_RUN_RESULT', item }), { optional: true });
 }
 
 async function savePendingSubmit({ item, counters, status, coverLetterUsed, testDetected }) {
-  await chrome.storage.local.set({
+  await storageSet({
     autoApplyPendingSubmit: {
       runId: activeRunId,
       item: {
@@ -611,7 +729,7 @@ async function savePendingSubmit({ item, counters, status, coverLetterUsed, test
 }
 
 async function clearPendingSubmit() {
-  await chrome.storage.local.set({ autoApplyPendingSubmit: null });
+  await storageSet({ autoApplyPendingSubmit: null });
 }
 
 async function appendSkippedResponse(item, counters, status, error) {
@@ -677,13 +795,13 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
 }
 
 async function finalizePendingSubmit() {
-  const { autoApplyPendingSubmit } = await chrome.storage.local.get(['autoApplyPendingSubmit']);
+  const { autoApplyPendingSubmit, autoApplyQueue } = await storageGet(['autoApplyPendingSubmit', 'autoApplyQueue']);
   if (!autoApplyPendingSubmit?.item) {
-    return;
+    return false;
   }
 
   if (!isAlreadyAppliedPage(document)) {
-    return;
+    return false;
   }
 
   const counters = {
@@ -708,15 +826,66 @@ async function finalizePendingSubmit() {
     status: autoApplyPendingSubmit.status || 'applied',
     sourceUrl: autoApplyPendingSubmit.sourceUrl || ''
   });
+  if (autoApplyQueue?.active && autoApplyQueue.returnToSearch && isHhSearchPageUrl(autoApplyQueue.sourceUrl)) {
+    const nextIndex = (Number(autoApplyQueue.index) || 0) + 1;
+    await saveQueue({ ...autoApplyQueue, active: false, index: nextIndex, counters });
+    await saveSearchQueue({
+      active: true,
+      runId: autoApplyQueue.runId || autoApplyPendingSubmit.runId || activeRunId,
+      limit: autoApplyQueue.limit || 20,
+      counters,
+      config: autoApplyQueue.config,
+      maxProcessed: autoApplyQueue.maxProcessed || null,
+      processedVacancyIds: autoApplyQueue.processedVacancyIds || []
+    });
+    await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+    navigateTo(autoApplyQueue.sourceUrl);
+    return true;
+  }
   await setRunState({ state: 'complete', ...counters, lastError: '' });
+  return true;
+}
+
+async function finalizePendingSubmitFromSearchReturn(counters, runId = activeRunId) {
+  const { autoApplyPendingSubmit } = await storageGet(['autoApplyPendingSubmit']);
+  if (!autoApplyPendingSubmit?.item) {
+    return false;
+  }
+  if (runId && autoApplyPendingSubmit.runId && autoApplyPendingSubmit.runId !== runId) {
+    return false;
+  }
+
+  const pendingCounters = autoApplyPendingSubmit.counters || {};
+  for (const key of ['found', 'processed', 'applied', 'skipped', 'errors']) {
+    counters[key] = Math.max(Number(counters[key]) || 0, Number(pendingCounters[key]) || 0);
+  }
+  if (!Number.isFinite(Number(pendingCounters.processed))) {
+    counters.processed += 1;
+  }
+  counters.applied += 1;
+  await clearPendingSubmit();
+  await appendResult({
+    ...autoApplyPendingSubmit.item,
+    status: autoApplyPendingSubmit.status || 'applied',
+    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
+    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
+    error: ''
+  });
+  await appendAgentLog('pending_submit_finalized_from_search_return', {
+    vacancyId: autoApplyPendingSubmit.item.vacancyId,
+    status: autoApplyPendingSubmit.status || 'applied',
+    sourceUrl: autoApplyPendingSubmit.sourceUrl || '',
+    returnUrl: location.href
+  });
+  return true;
 }
 
 async function appendChatReport(item) {
-  await sendRuntimeMessage({ type: 'APPEND_CHAT_REPORT', item });
+  await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'APPEND_CHAT_REPORT', item }), { optional: true });
 }
 
 async function getConfig() {
-  const values = await chrome.storage.local.get([
+  const values = await storageGet([
     'dailyLimit',
     'delayMinMs',
     'delayMaxMs',
@@ -740,15 +909,28 @@ async function generateCoverLetter(vacancyText) {
     type: 'GENERATE_COVER_LETTER',
     task: 'cover_letter',
     vacancyText
+  }, {
+    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMessage: 'Groq cover letter request timed out.'
   });
   if (!response?.ok) {
     throw new Error(response?.error || 'Cover letter generation failed');
   }
-  return response.text;
+  return sanitizeGeneratedText(response.text);
 }
 
 function isMissingGroqKeyError(error) {
   return /groq api key is not configured/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function isRecoverableGroqError(error) {
+  return /groq request failed: 429|groq .*timed out|rate limit/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function isFatalAutoApplyError(error) {
+  return /login|captcha|anti-bot|слишком много запросов|не робот/i.test(
+    error instanceof Error ? error.message : String(error)
+  );
 }
 
 function missingGroqMessage(kind) {
@@ -764,11 +946,14 @@ async function generateTestAssistance(vacancyText, extraText) {
     task: 'test_assist',
     vacancyText,
     extraText
+  }, {
+    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMessage: 'Groq test assistance request timed out.'
   });
   if (!response?.ok) {
     throw new Error(response?.error || 'Test assistance generation failed');
   }
-  return response.text;
+  return sanitizeGeneratedText(response.text);
 }
 
 async function generateChoiceRetryAssistance(vacancyText, questionContext, previousAnswer) {
@@ -794,15 +979,18 @@ async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
     vacancyUrl,
     vacancyText,
     chatText
+  }, {
+    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMessage: 'Groq chat reply request timed out.'
   });
   if (!response?.ok) {
     throw new Error(response?.error || 'Chat reply generation failed');
   }
-  return response.text;
+  return sanitizeGeneratedText(response.text);
 }
 
 async function getExpectedSalary() {
-  const { expectedSalary = '' } = await chrome.storage.local.get(['expectedSalary']);
+  const { expectedSalary = '' } = await storageGet(['expectedSalary']);
   return String(expectedSalary || '').trim();
 }
 
@@ -810,70 +998,23 @@ async function getFallbackCoverLetter() {
   return 'Здравствуйте! Заинтересовала ваша вакансия. Имею релевантный опыт в разработке и управлении IT-продуктами, готов обсудить задачи и пользу для команды.';
 }
 
-function splitGeneratedAnswers(text, count) {
-  const cleaned = cleanText(text);
-  if (!cleaned || count <= 1) return [cleaned];
-
-  const lines = cleaned
-    .split(/\n+/)
-    .map((line) => line.replace(/^\s*(?:\d+[\).:-]?|[-*])\s*/, '').trim())
-    .filter(Boolean);
-
-  if (lines.length >= count) {
-    return lines.slice(0, count);
-  }
-
-  return Array.from({ length: count }, () => cleaned);
-}
-
-function normalizeChoiceText(value) {
-  return cleanText(value)
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[–—-]/g, ' ')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim();
-}
-
-function choiceTokens(value) {
-  const stopWords = new Set([
-    'можно',
-    'выбрать',
-    'несколько',
-    'вариант',
-    'варианта',
-    'свои',
-    'свой',
-    'другое',
-    'другой',
-    'человек',
-    'человека',
-    'людей',
-    'более',
-    'менее',
-    'нет',
-    'да'
-  ]);
-  return normalizeChoiceText(value)
-    .split(/\s+/)
-    .filter((token) => (token.length >= 2 || /^\d+$/.test(token)) && !stopWords.has(token));
-}
-
-function scoreChoice(label, answerText) {
-  const normalizedLabel = normalizeChoiceText(label);
-  const normalizedAnswer = normalizeChoiceText(answerText);
-  if (!normalizedLabel || !normalizedAnswer || /свой вариант|другое/i.test(label)) return 0;
-  if (normalizedAnswer.includes(normalizedLabel)) return 100;
-
-  if (/^да(?:\s+да)*$/.test(normalizedLabel) && normalizeChoiceText(answerText).split(/\s+/).includes('да')) return 90;
-  if (/^нет(?:\s+нет)*$/.test(normalizedLabel) && normalizeChoiceText(answerText).split(/\s+/).includes('нет')) return 90;
-
-  const labelTokens = choiceTokens(label);
-  if (labelTokens.length === 0) return 0;
-
-  const answerTokens = new Set(choiceTokens(answerText));
-  const matches = labelTokens.filter((token) => answerTokens.has(token)).length;
-  return matches / labelTokens.length;
+async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
+  const expectedSalary = await getExpectedSalary();
+  const textAnswer = expectedSalary || 'Готов обсудить детали и выполнить требования вакансии.';
+  const lines = [];
+  questionControlGroups.forEach((group, index) => {
+    const positiveOption =
+      group.options.find((option) => /да|готов|готова|соглас|можно|full|полная|удален|remote/i.test(option.label)) ||
+      group.options.find((option) => !/нет|не готов|не готова|no\b/i.test(option.label)) ||
+      group.options[0];
+    if (positiveOption?.label) {
+      lines.push(`Choice group ${index + 1}: ${positiveOption.label}`);
+    }
+  });
+  questionFields.forEach((_, index) => {
+    lines.push(`Text question ${index + 1}: ${textAnswer}`);
+  });
+  return lines.join('\n') || textAnswer;
 }
 
 function selectControl(control) {
@@ -1118,6 +1259,22 @@ async function processChatItem(item, config, counters) {
     vacancyText: '',
     chatText: meta.chatText
   });
+  const invalidDraftReason = getGeneratedTextInvalidReason(draftAnswer, { minLength: 10 });
+  if (invalidDraftReason) {
+    counters.skipped += 1;
+    await appendChatReport({
+      chatUrl: meta.chatUrl,
+      employerName: meta.employerName,
+      vacancyTitle: meta.vacancyTitle,
+      vacancyUrl: meta.vacancyUrl,
+      status: 'skipped_bad_generated_reply',
+      reason: invalidDraftReason,
+      questionText: meta.chatText,
+      draftAnswer,
+      sent: false
+    });
+    return;
+  }
   fillChatInput(input, draftAnswer);
   await sleep(500);
 
@@ -1152,6 +1309,7 @@ async function handleChatAssist() {
   if (isUnsafePage()) {
     throw new Error('Login, captcha, or anti-bot page detected');
   }
+  requireAuthenticatedHhPage();
 
   if (location.pathname !== '/chat') {
     navigateTo('https://hh.ru/chat');
@@ -1212,7 +1370,7 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const root = getDialogRoot();
-    const currentText = textOf(root);
+    const currentText = getRootText(root);
     if (root !== document && currentText) return root;
     if (
       currentText &&
@@ -1229,10 +1387,33 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
   return getDialogRoot();
 }
 
+async function waitForNavigationQueueSettle(beforeUrl, currentRoot) {
+  const timeoutMs = window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 5000;
+  const started = Date.now();
+  let attempts = 0;
+
+  while (Date.now() - started <= timeoutMs || (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ && attempts < 3)) {
+    attempts += 1;
+    if (location.href !== beforeUrl || isResponseFormPage()) {
+      return isResponseFormPage() ? document : getDialogRoot();
+    }
+
+    const nextRoot = getDialogRoot();
+    if (nextRoot !== document) {
+      return nextRoot;
+    }
+
+    await sleep(250);
+  }
+
+  return currentRoot;
+}
+
 async function handleDryRun(limit) {
   if (isUnsafePage()) {
     throw new Error('Login, captcha, or anti-bot page detected');
   }
+  requireAuthenticatedHhPage();
 
   const vacancies = scanVacancies().slice(0, limit);
   await setRunState({
@@ -1277,6 +1458,21 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
+  if (isAlreadyAppliedPage(item.card)) {
+    counters.applied += 1;
+    await appendResult({
+      index: item.index,
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      status: 'applied_already_confirmed',
+      coverLetterUsed: false,
+      testDetected: item.testDetected,
+      error: ''
+    });
+    return;
+  }
+
   if (!item.responseButton) {
     const blockedReason = detectBlockedResponseReason(document);
     if (blockedReason) {
@@ -1307,14 +1503,29 @@ async function applyToVacancy(item, counters) {
       currentAction: `Открываю форму отклика: ${item.title || item.vacancyId || 'вакансия'}`
     });
     const beforeText = textOf(document.body);
+    const beforeUrl = location.href;
+    if (item.navigationQueue) {
+      await saveQueue(item.navigationQueue);
+    }
     item.responseButton.scrollIntoView({ block: 'center', inline: 'center' });
     await sleep(250);
     await waitBeforeClick();
+    if (isUnsafeHhUrl(item.responseButton.href)) {
+      throw new Error('Login or signup page detected before response click');
+    }
+    prepareResponseButtonForCurrentTab(item.responseButton);
     item.responseButton.click();
 
     root = await waitForDialogOrChange(beforeText);
+    if (item.navigationQueue && root === document && location.href === beforeUrl && !isResponseFormPage()) {
+      root = await waitForNavigationQueueSettle(beforeUrl, root);
+    }
+    if (item.navigationQueue && location.href === beforeUrl && !isResponseFormPage()) {
+      await saveQueue({ active: false });
+    }
     await setRunState({ state: 'applying', ...counters, currentAction: `Проверяю форму отклика: ${item.title || item.vacancyId || 'вакансия'}` });
     await sleep(700);
+    root = await confirmInitialFollowupIfNeeded(root, beforeText, counters);
   }
 
   if (isUnsafePage()) {
@@ -1350,6 +1561,24 @@ async function applyToVacancy(item, counters) {
     const coverLetterTextarea = findCoverLetterTextarea(root);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     let coverLetterUsed = false;
+    if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
+      const message = 'Skipped: employer questions were detected, but no fillable HH question fields were found.';
+      counters.skipped += 1;
+      await appendResult({
+        index: item.index,
+        vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
+        status: 'skipped_question_fields_not_found',
+        coverLetterUsed: false,
+        testDetected: true,
+        error: message
+      });
+      await setRunState({ state: 'applying', ...counters, lastError: message });
+      closeDialog();
+      return;
+    }
+
     await setRunState({
       state: 'generating_cover_letter',
       ...counters,
@@ -1366,11 +1595,15 @@ async function applyToVacancy(item, counters) {
       });
       assistance = await generateTestAssistance(getVacancyText(item.card), questionContext || textOf(root));
     } catch (error) {
-      if (!isMissingGroqKeyError(error)) {
+      if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
         throw error;
       }
 
-      assistance = questionFields.length > 0 && questionControlGroups.length === 0 ? await getExpectedSalary() : '';
+      assistance = isRecoverableGroqError(error)
+        ? await getFallbackQuestionAssistance(questionFields, questionControlGroups)
+        : questionFields.length > 0 && questionControlGroups.length === 0
+          ? await getExpectedSalary()
+          : '';
       if (assistance) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       } else {
@@ -1418,6 +1651,12 @@ async function applyToVacancy(item, counters) {
         try {
           assistance = await generateChoiceRetryAssistance(getVacancyText(item.card), questionContext, assistance);
           selectedChoices = fillQuestionControls(questionControlGroups, assistance);
+        } catch (error) {
+          if (!isRecoverableGroqError(error)) {
+            throw error;
+          }
+          assistance = await getFallbackQuestionAssistance(questionFields, questionControlGroups);
+          selectedChoices = fillQuestionControls(questionControlGroups, assistance);
         } finally {
           setBusyCursor(false);
         }
@@ -1452,6 +1691,25 @@ async function applyToVacancy(item, counters) {
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       setBusyCursor(true);
       const answers = splitGeneratedAnswers(assistance, questionFields.length);
+      const invalidAnswer = answers.find((answer) => getGeneratedTextInvalidReason(answer, { minLength: 2 }));
+      if (invalidAnswer) {
+        setBusyCursor(false);
+        const message = getGeneratedTextInvalidReason(invalidAnswer, { minLength: 2 });
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_bad_generated_answer',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
+      }
       try {
         questionFields.forEach((field, index) => {
           field.focus?.();
@@ -1466,8 +1724,6 @@ async function applyToVacancy(item, counters) {
         answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
       });
       await sleep(500);
-    } else {
-      showAssistantPanel({ title: 'HH test assistance', text: assistance });
     }
 
     if (coverLetterTextarea && !coverLetterTextarea.value) {
@@ -1481,7 +1737,7 @@ async function applyToVacancy(item, counters) {
       try {
         letter = await generateCoverLetter(getVacancyText(item.card) || getVacancyText(document));
       } catch (error) {
-        if (!isMissingGroqKeyError(error)) {
+        if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
           throw error;
         }
         letter = await getFallbackCoverLetter();
@@ -1579,25 +1835,29 @@ async function applyToVacancy(item, counters) {
     try {
       letter = await generateCoverLetter(vacancyText);
     } catch (error) {
-      if (!isMissingGroqKeyError(error)) {
+      if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
         throw error;
       }
 
-      const message = missingGroqMessage('cover');
-      counters.skipped += 1;
-      await appendResult({
-        index: item.index,
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        status: 'skipped_missing_groq_key',
-        coverLetterUsed: false,
-        testDetected: false,
-        error: message
-      });
-      await setRunState({ state: 'applying', ...counters, lastError: message });
-      closeDialog();
-      return;
+      if (isRecoverableGroqError(error)) {
+        letter = await getFallbackCoverLetter();
+      } else {
+        const message = missingGroqMessage('cover');
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_missing_groq_key',
+          coverLetterUsed: false,
+          testDetected: false,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
+      }
     } finally {
       setBusyCursor(false);
     }
@@ -1678,12 +1938,28 @@ function buildResponseFormItem(queueItem) {
   };
 }
 
+function buildQueuedVacancyDetailItem(queueItem) {
+  const title = cleanText(document.querySelector('h1')?.textContent) || queueItem.title || document.title || 'Вакансия';
+  return {
+    index: queueItem.index,
+    vacancyId: queueItem.vacancyId || getVacancyId(location.href),
+    title,
+    url: queueItem.url || location.href,
+    responseUrl: queueItem.responseUrl || '',
+    card: document,
+    responseButton: findEnabledClickableByText(document, [/откликнуться/i]) || findClickableByText(document, [/откликнуться/i]),
+    responseFormOpen: false,
+    cardText: getVacancyText(),
+    testDetected: queueItem.testDetected || /тест|задани[ея]|ответьте на вопросы|вопрос/i.test(textOf(document.body))
+  };
+}
+
 async function saveQueue(queue) {
-  await chrome.storage.local.set({ autoApplyQueue: queue });
+  await storageSet({ autoApplyQueue: queue });
 }
 
 async function saveSearchQueue(queue) {
-  await chrome.storage.local.set({ autoApplySearchQueue: queue });
+  await storageSet({ autoApplySearchQueue: queue });
 }
 
 function getNextSearchPageUrl() {
@@ -1720,26 +1996,45 @@ function getNextSearchPageUrl() {
 
 async function continueQueuedAutoApply() {
   if (queuedResumeStarted) {
-    return;
+    return false;
   }
 
-  const { autoApplyQueue } = await chrome.storage.local.get(['autoApplyQueue']);
+  const { autoApplyQueue } = await storageGet(['autoApplyQueue']);
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
-    return;
+    return false;
+  }
+  requireAuthenticatedHhPage();
+
+  if (autoApplyQueue.returnToSearch && isVacancyDetailPage() && !queuedItemMatchesCurrentVacancy(autoApplyQueue)) {
+    return false;
   }
 
-  if (!isResponseFormPage()) {
+  const canProcessQueuedDetailPage = queuedItemMatchesCurrentVacancy(autoApplyQueue);
+  if (!isResponseFormPage() && !canProcessQueuedDetailPage) {
     const counters = autoApplyQueue.counters || {};
     const sourceUrl = autoApplyQueue.sourceUrl || '';
     await saveQueue({ ...autoApplyQueue, active: false, recoveredFromUrl: location.href });
+    if (autoApplyQueue.returnToSearch && isHhSearchPageUrl(location.href)) {
+      activeRunId = autoApplyQueue.runId || activeRunId;
+      stopRequested = false;
+      stopReason = '';
+      await finalizePendingSubmitFromSearchReturn(counters, autoApplyQueue.runId || activeRunId);
+      await handleAutoApply(
+        autoApplyQueue.limit || 20,
+        counters,
+        autoApplyQueue.processedVacancyIds || [],
+        { maxProcessed: autoApplyQueue.maxProcessed || null }
+      );
+      return true;
+    }
     if (isHhSearchPageUrl(sourceUrl)) {
       await saveSearchQueue({ active: false });
       await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
       navigateTo(sourceUrl);
-      return;
+      return true;
     }
     await setRunState({ state: 'complete', ...counters, lastError: '' });
-    return;
+    return true;
   }
 
   queuedResumeStarted = true;
@@ -1748,7 +2043,7 @@ async function continueQueuedAutoApply() {
   if (!itemData) {
     await saveQueue({ ...queue, active: false });
     await setRunState({ state: 'complete', ...(queue.counters || {}) });
-    return;
+    return true;
   }
 
   const counters = {
@@ -1761,7 +2056,7 @@ async function continueQueuedAutoApply() {
   };
 
   counters.processed += 1;
-  const item = buildResponseFormItem(itemData);
+  const item = isResponseFormPage() ? buildResponseFormItem(itemData) : buildQueuedVacancyDetailItem(itemData);
 
   try {
     await applyToVacancy(item, counters);
@@ -1778,22 +2073,45 @@ async function continueQueuedAutoApply() {
       testDetected: item.testDetected,
       error: message
     });
-    await saveQueue({ ...queue, active: false, counters });
-    await setRunState({ state: 'error', ...counters, lastError: message });
-    return;
+    if (isFatalAutoApplyError(error)) {
+      await saveQueue({ ...queue, active: false, counters });
+      await setRunState({ state: 'error', ...counters, lastError: message });
+      return true;
+    }
   }
 
   const nextIndex = queue.index + 1;
+  if (queue.returnToSearch && !stopRequested && isHhSearchPageUrl(queue.sourceUrl)) {
+    await saveQueue({ ...queue, active: false, index: nextIndex, counters });
+    if (normalizeMaxProcessed(queue.maxProcessed) != null && counters.processed >= normalizeMaxProcessed(queue.maxProcessed)) {
+      await saveSearchQueue({ active: false });
+      await setRunState({ state: 'complete', ...counters, lastError: '' });
+      return true;
+    }
+    await saveSearchQueue({
+      active: true,
+      runId: queue.runId,
+      limit: queue.limit || 20,
+      counters,
+      config: queue.config,
+      maxProcessed: queue.maxProcessed || null,
+      processedVacancyIds: queue.processedVacancyIds || []
+    });
+    await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+    navigateTo(queue.sourceUrl);
+    return true;
+  }
+
   if (nextIndex >= queue.items.length || stopRequested) {
     await saveQueue({ ...queue, active: false, index: nextIndex, counters });
     if (!stopRequested && isHhSearchPageUrl(queue.sourceUrl)) {
       await saveSearchQueue({ active: false });
       await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH' });
       navigateTo(queue.sourceUrl);
-      return;
+      return true;
     }
     await setRunState({ state: stopRequested ? 'stopped' : 'complete', ...counters });
-    return;
+    return true;
   }
 
   const nextItem = queue.items[nextIndex];
@@ -1802,14 +2120,17 @@ async function continueQueuedAutoApply() {
   const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
   await sleep(delayMs);
   navigateTo(nextItem.responseUrl);
+  return true;
 }
 
-async function handleAutoApply(limit, existingCounters = null) {
+async function handleAutoApply(limit, existingCounters = null, existingProcessedVacancyIds = [], options = {}) {
   if (isUnsafePage()) {
     throw new Error('Login, captcha, or anti-bot page detected');
   }
+  requireAuthenticatedHhPage();
 
   const config = await getConfig();
+  const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
   const counters = existingCounters || {
     found: 0,
     processed: 0,
@@ -1817,11 +2138,18 @@ async function handleAutoApply(limit, existingCounters = null) {
     skipped: 0,
     errors: 0
   };
-  const remaining = Math.max(0, limit - counters.processed);
-  const vacancies = scanVacancies().slice(0, remaining);
+  const processedVacancyIds = createProcessedVacancyIdSet(existingProcessedVacancyIds);
+  const remaining = Math.max(0, limit - counters.applied);
+  const processedRemaining = maxProcessed == null ? remaining : Math.max(0, maxProcessed - counters.processed);
+  const vacancies = scanVacancies()
+    .filter((item) => {
+      const key = getVacancyDedupeKey(item);
+      return !key || !processedVacancyIds.has(key);
+    })
+    .slice(0, Math.min(remaining, processedRemaining));
   counters.found += vacancies.length;
 
-  if (remaining <= 0) {
+  if (remaining <= 0 || processedRemaining <= 0) {
     await saveSearchQueue({ active: false });
     await setRunState({ state: 'complete', ...counters, lastError: '' });
     return { ok: true, ...counters };
@@ -1830,7 +2158,15 @@ async function handleAutoApply(limit, existingCounters = null) {
   if (vacancies.length === 0) {
     const nextPageUrl = getNextSearchPageUrl();
     if (nextPageUrl) {
-      await saveSearchQueue({ active: true, runId: activeRunId, limit, counters, config });
+      await saveSearchQueue({
+        active: true,
+        runId: activeRunId,
+        limit,
+        counters,
+        config,
+        maxProcessed,
+        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      });
       await setRunState({ state: 'applying', ...counters, currentAction: 'Переход на следующую страницу HH', lastError: '' });
       navigateTo(nextPageUrl);
       return { ok: true, ...counters, navigated: true, nextPageUrl };
@@ -1846,28 +2182,34 @@ async function handleAutoApply(limit, existingCounters = null) {
   for (const item of vacancies) {
     if (stopRequested) break;
 
-    if (item.responseUrl) {
-      const queuedItems = vacancies
-        .slice(vacancies.indexOf(item))
-        .filter((queuedItem) => queuedItem.responseUrl)
-        .map((queuedItem) => ({
-          index: queuedItem.index,
-          vacancyId: queuedItem.vacancyId,
-          title: queuedItem.title,
-          url: queuedItem.url,
-          responseUrl: queuedItem.responseUrl,
-          testDetected: queuedItem.testDetected
-        }));
-      await saveQueue({
+    const sourceUrl = getQueueSourceUrl();
+    const vacancyKey = getVacancyDedupeKey(item);
+    if (vacancyKey) {
+      processedVacancyIds.add(vacancyKey);
+    }
+    if (sourceUrl) {
+      item.navigationQueue = {
         active: true,
         runId: activeRunId,
         index: 0,
-        items: queuedItems,
-        sourceUrl: getQueueSourceUrl(),
+        items: [
+          {
+            index: item.index,
+            vacancyId: item.vacancyId,
+            title: item.title,
+            url: item.url,
+            responseUrl: item.responseUrl || '',
+            testDetected: item.testDetected
+          }
+        ],
+        sourceUrl,
         limit,
-        counters,
-        config
-      });
+        counters: { ...counters },
+        config,
+        maxProcessed,
+        returnToSearch: true,
+        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      };
     }
 
     counters.processed += 1;
@@ -1893,21 +2235,52 @@ async function handleAutoApply(limit, existingCounters = null) {
         testDetected: item.testDetected,
         error: message
       });
-      await setRunState({ state: 'error', ...counters, lastError: message });
-      stopRequested = true;
-      break;
+      await setRunState({ state: isFatalAutoApplyError(error) ? 'error' : 'applying', ...counters, lastError: message });
+      if (isFatalAutoApplyError(error)) {
+        stopRequested = true;
+        break;
+      }
+      closeDialog();
     }
 
     await setRunState({ state: stopRequested ? 'paused' : 'applying', ...counters });
+    const processedCapReached = maxProcessed != null && counters.processed >= maxProcessed;
+    if (!stopRequested && !processedCapReached && sourceUrl && !isHhSearchPageUrl(location.href)) {
+      await saveQueue({ active: false });
+      await saveSearchQueue({
+        active: true,
+        runId: activeRunId,
+        limit,
+        counters,
+        config,
+        maxProcessed,
+        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      });
+      await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+      closeDialog();
+      navigateTo(sourceUrl);
+      return { ok: true, ...counters, navigated: true, nextPageUrl: sourceUrl };
+    }
+    if (!stopRequested && processedCapReached) {
+      break;
+    }
     if (!stopRequested) {
       await sleep(randomDelay(config.delayMinMs, config.delayMaxMs));
     }
   }
 
-  if (!stopRequested && counters.processed < limit) {
+  if (!stopRequested && counters.applied < limit && (maxProcessed == null || counters.processed < maxProcessed)) {
     const nextPageUrl = getNextSearchPageUrl();
     if (nextPageUrl) {
-      await saveSearchQueue({ active: true, runId: activeRunId, limit, counters, config });
+      await saveSearchQueue({
+        active: true,
+        runId: activeRunId,
+        limit,
+        counters,
+        config,
+        maxProcessed,
+        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      });
       await setRunState({ state: 'applying', ...counters, currentAction: 'Переход на следующую страницу HH' });
       navigateTo(nextPageUrl);
       return { ok: true, ...counters, navigated: true, nextPageUrl };
@@ -1920,15 +2293,22 @@ async function handleAutoApply(limit, existingCounters = null) {
   return { ok: true, ...counters };
 }
 
+function normalizeMaxProcessed(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.max(1, Math.min(Math.floor(parsed), 1000));
+}
+
 async function continueSearchAutoApply() {
-  if (queuedSearchStarted || isResponseFormPage()) {
+  if (queuedSearchStarted || isResponseFormPage() || !isHhSearchPageUrl(location.href)) {
     return;
   }
 
-  const { autoApplySearchQueue } = await chrome.storage.local.get(['autoApplySearchQueue']);
+  const { autoApplySearchQueue } = await storageGet(['autoApplySearchQueue']);
   if (!autoApplySearchQueue?.active) {
     return;
   }
+  requireAuthenticatedHhPage();
 
   queuedSearchStarted = true;
   activeRunId = autoApplySearchQueue.runId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
@@ -1936,7 +2316,12 @@ async function continueSearchAutoApply() {
   stopReason = '';
 
   try {
-    await handleAutoApply(autoApplySearchQueue.limit || 20, autoApplySearchQueue.counters || null);
+    await handleAutoApply(
+      autoApplySearchQueue.limit || 20,
+      autoApplySearchQueue.counters || null,
+      autoApplySearchQueue.processedVacancyIds || [],
+      { maxProcessed: autoApplySearchQueue.maxProcessed || null }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await saveSearchQueue({ active: false });
@@ -1944,25 +2329,34 @@ async function continueSearchAutoApply() {
   }
 }
 
-async function startRun(mode, limitOverride = null) {
+async function startRun(mode, limitOverride = null, options = {}) {
   const config = await getConfig();
   const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
   const limit = Math.max(1, Math.min(Number(limitSource) || 20, 100));
+  const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
-  await chrome.storage.local.set({
+  await storageSet({
     runResults: [],
     autoApplyQueue: { active: false },
     autoApplySearchQueue: { active: false },
     autoApplyPendingSubmit: null
   });
-  await appendAgentLog('start_run', { mode, limit, limitOverride: limitOverride == null ? null : limit, url: location.href });
+  await appendAgentLog('start_run', {
+    mode,
+    limit,
+    limitOverride: limitOverride == null ? null : limit,
+    maxProcessed,
+    flowVersion: AUTO_APPLY_FLOW_VERSION,
+    extensionVersion: chrome.runtime?.getManifest?.().version || '',
+    url: location.href
+  });
 
   if (mode === 'dry') {
     return handleDryRun(limit);
   }
-  return handleAutoApply(limit);
+  return handleAutoApply(limit, null, [], { maxProcessed });
 }
 
 function consumeAutoStartParam() {
@@ -1973,14 +2367,17 @@ function consumeAutoStartParam() {
       return null;
     }
     const limit = url.searchParams.get('hhjaLimit');
+    const maxProcessed = url.searchParams.get('hhjaMaxProcessed');
     const groqModel = url.searchParams.get('hhjaGroqModel') || '';
     url.searchParams.delete('hhjaAutoStart');
     url.searchParams.delete('hhjaLimit');
+    url.searchParams.delete('hhjaMaxProcessed');
     url.searchParams.delete('hhjaGroqModel');
     window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
     return {
       mode,
       limit: limit ? Number(limit) : null,
+      maxProcessed: maxProcessed ? Number(maxProcessed) : null,
       groqModel
     };
   } catch {
@@ -1988,24 +2385,52 @@ function consumeAutoStartParam() {
   }
 }
 
+function consumeReloadExtensionParam() {
+  try {
+    const url = new URL(location.href);
+    if (url.searchParams.get('hhjaReloadExtension') !== '1') {
+      return false;
+    }
+    url.searchParams.delete('hhjaReloadExtension');
+    window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function maybeReloadExtensionFromUrlParam() {
+  if (!consumeReloadExtensionParam()) {
+    return false;
+  }
+
+  await appendAgentLog('url_trigger_reload_extension', { url: location.href });
+  await withExtensionContext(
+    () => chrome.runtime.sendMessage({ type: 'RELOAD_EXTENSION', reason: 'hhjaReloadExtension', url: location.href }),
+    { optional: true }
+  );
+  return true;
+}
+
 async function maybeStartFromUrlParam() {
   const trigger = consumeAutoStartParam();
   if (!trigger) {
-    return;
+    return false;
   }
-  const { mode, limit, groqModel } = trigger;
+  const { mode, limit, maxProcessed, groqModel } = trigger;
 
   try {
     if (groqModel) {
-      await chrome.storage.local.set({ groqModel });
+      await storageSet({ groqModel });
     }
-    await appendAgentLog('url_trigger_start', { mode, limit, groqModel, url: location.href });
-    await startRun(mode === 'dry' ? 'dry' : 'live', limit);
+    await appendAgentLog('url_trigger_start', { mode, limit, maxProcessed, groqModel, url: location.href });
+    await startRun(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
   } catch (error) {
     const messageText = error instanceof Error ? error.message : String(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
+  return true;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -2014,16 +2439,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'GET_CONTENT_STATUS':
         sendResponse({
           ok: true,
+          authenticated: hasAuthenticatedHhSignal(),
+          unsafe: isUnsafePage(),
           activeRunId,
           stopRequested,
           url: location.href
         });
         break;
       case 'START_DRY_RUN':
-        sendResponse(await startRun('dry'));
+        sendResponse(await startRun('dry', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
         break;
       case 'START_AUTO_APPLY':
-        sendResponse(await startRun('live'));
+        sendResponse(await startRun('live', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
         break;
       case 'START_CHAT_ASSIST':
         stopRequested = false;
@@ -2034,7 +2461,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'STOP_RUN':
         stopRequested = true;
         stopReason = 'user_stop';
-        await chrome.storage.local.set({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
+        await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
         await appendAgentLog('stop_run', { activeRunId, url: location.href });
         await setRunState({ state: 'stopped' });
         sendResponse({ ok: true, activeRunId });
@@ -2063,24 +2490,28 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
   }
 });
 
-finalizePendingSubmit().catch(async (error) => {
-  const messageText = error instanceof Error ? error.message : String(error);
-  await setRunState({ state: 'error', lastError: messageText });
-});
+async function initializeContentScript() {
+  const reloadedFromUrl = await maybeReloadExtensionFromUrlParam();
+  if (reloadedFromUrl) {
+    return;
+  }
+  const startedFromUrl = await maybeStartFromUrlParam();
+  if (startedFromUrl) {
+    return;
+  }
+  const finalizedPendingSubmit = await finalizePendingSubmit();
+  if (finalizedPendingSubmit) {
+    return;
+  }
+  const continuedQueue = await continueQueuedAutoApply();
+  if (continuedQueue) {
+    return;
+  }
+  await continueSearchAutoApply();
+}
 
-continueQueuedAutoApply().catch(async (error) => {
+initializeContentScript().catch(async (error) => {
   const messageText = error instanceof Error ? error.message : String(error);
-  await chrome.storage.local.set({ autoApplyQueue: { active: false } });
-  await setRunState({ state: 'error', lastError: messageText });
-});
-
-continueSearchAutoApply().catch(async (error) => {
-  const messageText = error instanceof Error ? error.message : String(error);
-  await chrome.storage.local.set({ autoApplySearchQueue: { active: false } });
-  await setRunState({ state: 'error', lastError: messageText });
-});
-
-maybeStartFromUrlParam().catch(async (error) => {
-  const messageText = error instanceof Error ? error.message : String(error);
+  await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }, { optional: true });
   await setRunState({ state: 'error', lastError: messageText });
 });

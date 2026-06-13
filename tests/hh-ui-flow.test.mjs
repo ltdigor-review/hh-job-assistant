@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { once } from 'node:events';
+import { readContentScriptSource } from './helpers/content-script-source.mjs';
 
 const root = new URL('../', import.meta.url);
 
@@ -232,7 +233,7 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
     await session.send('Runtime.enable');
     await waitForComplete(session);
 
-    const contentScriptSource = await readFile(new URL('../src/content-hh.js', import.meta.url), 'utf8');
+    const contentScriptSource = await readContentScriptSource();
     const evaluation = await session.send('Runtime.evaluate', {
       expression: buildInjection(contentScriptSource),
       awaitPromise: true,
