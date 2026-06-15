@@ -255,7 +255,7 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
     assert.equal(value.dialogCount, 0);
     assert.equal(value.navigatedTo, 'https://hh.ru/search/vacancy?text=java&page=1');
     assert.equal(results.at(-1).status, 'skipped_response_unavailable');
-    assert.match(results.at(-1).error, /Resume visibility/);
+    assert.match(results.at(-1).error, /видимость резюме/);
     assert.ok(states.some((state) => state.currentAction === 'Переход на следующую страницу HH'));
   } finally {
     session?.close();

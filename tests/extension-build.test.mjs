@@ -45,6 +45,77 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   ]);
 });
 
+test('extension user-facing text is localized for Russian-speaking users', async () => {
+  const files = [
+    'manifest.json',
+    'src/popup.html',
+    'src/options.html',
+    'src/popup.js',
+    'src/options.js',
+    'src/content-text.js',
+    'src/content-hh.js',
+    'src/background.js'
+  ];
+  const forbiddenFragments = [
+    'Assists with',
+    'Start HH auto apply',
+    'aria-label="Version"',
+    'Extension status',
+    'Run status',
+    'Apply logs',
+    'Chat reports',
+    'Agent debug',
+    'Groq settings',
+    'Save key',
+    'Test Groq',
+    'Clear',
+    'Resume URL',
+    'Expected salary',
+    'Cover-letter prompt',
+    'Daily apply limit',
+    'Delay min',
+    'Delay max',
+    'Process unread chats only',
+    'Chat assistant',
+    'Chat reply mode',
+    'Draft only',
+    'Auto-send',
+    'Chat limit',
+    '>Save<',
+    'No chat reports yet.',
+    'No agent debug events yet.',
+    'Groq key saved.',
+    'Groq key cleared.',
+    'Testing Groq...',
+    'Groq test failed.',
+    'Sample length',
+    'Login, captcha, or anti-bot page detected',
+    'Login or captcha page detected',
+    'Login or signup page detected',
+    'Cover letter generation failed',
+    'Test assistance generation failed',
+    'Chat reply generation failed',
+    'Skipped because Groq API key is missing',
+    'response button was not found',
+    'submit button was not found',
+    'employer questions were detected',
+    'did not finish loading in time',
+    'Generated answer'
+  ];
+
+  const findings = [];
+  for (const file of files) {
+    const text = await readFile(new URL(file, root), 'utf8');
+    for (const fragment of forbiddenFragments) {
+      if (text.includes(fragment)) {
+        findings.push(`${file}: ${fragment}`);
+      }
+    }
+  }
+
+  assert.deepEqual(findings, []);
+});
+
 test('version guard checks configured repo versions', async () => {
   const { stdout } = await execFileAsync('python3', ['scripts/version_guard.py', '--check'], {
     cwd: new URL('.', root)

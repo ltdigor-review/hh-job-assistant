@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HH Job Assistant",
-  "description": "Assists with hh.ru resume refresh, vacancy responses, Groq cover letters, and test hints.",
-  "version": "0.1.62",
+  "description": "Помогает обновлять резюме hh.ru, отправлять отклики, писать сопроводительные письма через Groq и отвечать на вопросы работодателя.",
+  "version": "0.1.64",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -55,7 +55,7 @@
         "default": "Alt+Shift+A",
         "mac": "Alt+Shift+A"
       },
-      "description": "Start HH auto apply from the active hh.ru search page"
+      "description": "Запустить отклики HH с активной страницы поиска hh.ru"
     }
   },
   "options_page": "src/options.html"

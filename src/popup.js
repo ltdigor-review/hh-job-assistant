@@ -96,21 +96,21 @@ function renderState(runState = {}) {
 
 function resultMessage(item) {
   if (item.status === 'skipped_missing_groq_key') {
-    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} needs a cover letter, but Groq API key is missing.`;
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует сопроводительное письмо, но ключ Groq API не указан.`;
   }
   if (item.status === 'skipped_test_missing_groq_key') {
-    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} needs employer questions/test assistance, but Groq API key is missing.`;
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует ответы на вопросы работодателя или тест, но ключ Groq API не указан.`;
   }
   if (/^skipped/.test(item.status || '')) {
-    return `Skipped: ${item.title || item.vacancyId || 'vacancy'} — ${item.error || item.status}`;
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} — ${item.error || item.status}`;
   }
   if (item.status === 'error') {
-    return `Error: ${item.title || item.vacancyId || 'vacancy'} — ${item.error || 'unknown error'}`;
+    return `Ошибка: ${item.title || item.vacancyId || 'вакансия'} — ${item.error || 'неизвестная ошибка'}`;
   }
   if (/^applied/.test(item.status || '')) {
-    return `Applied: ${item.title || item.vacancyId || 'vacancy'}`;
+    return `Отправлено: ${item.title || item.vacancyId || 'вакансия'}`;
   }
-  return `${item.status || 'Result'}: ${item.title || item.vacancyId || 'vacancy'}`;
+  return `${item.status || 'Результат'}: ${item.title || item.vacancyId || 'вакансия'}`;
 }
 
 function resultClass(item) {
@@ -141,18 +141,18 @@ function renderResults(runResults = []) {
 
 function reportMessage(item) {
   if (item.status === 'reported_external_contact') {
-    return `External contact: ${item.employerName || item.vacancyTitle || 'chat'}`;
+    return `Внешний контакт: ${item.employerName || item.vacancyTitle || 'чат'}`;
   }
   if (item.status === 'sent') {
-    return `Sent: ${item.employerName || item.vacancyTitle || 'chat'}`;
+    return `Отправлено: ${item.employerName || item.vacancyTitle || 'чат'}`;
   }
   if (item.status === 'drafted') {
-    return `Drafted: ${item.employerName || item.vacancyTitle || 'chat'}`;
+    return `Черновик: ${item.employerName || item.vacancyTitle || 'чат'}`;
   }
   if (item.status === 'error') {
-    return `Error: ${item.employerName || item.vacancyTitle || 'chat'} — ${item.error || 'unknown error'}`;
+    return `Ошибка: ${item.employerName || item.vacancyTitle || 'чат'} — ${item.error || 'неизвестная ошибка'}`;
   }
-  return `${item.status || 'Report'}: ${item.employerName || item.vacancyTitle || 'chat'}`;
+  return `${item.status || 'Отчет'}: ${item.employerName || item.vacancyTitle || 'чат'}`;
 }
 
 function renderChatReports(chatReports = []) {
@@ -160,7 +160,7 @@ function renderChatReports(chatReports = []) {
   if (items.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'report';
-    empty.textContent = 'No chat reports yet.';
+    empty.textContent = 'Отчетов по чатам пока нет.';
     nodes.chatReports.replaceChildren(empty);
     return;
   }
@@ -202,7 +202,7 @@ function renderAgentDebugLog(agentDebugLog = []) {
   if (items.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'report';
-    empty.textContent = 'No agent debug events yet.';
+    empty.textContent = 'Технических событий пока нет.';
     nodes.agentDebugLog.replaceChildren(empty);
     return;
   }
@@ -217,17 +217,17 @@ function renderAgentDebugLog(agentDebugLog = []) {
   summary.className = 'debug-summary';
   summary.append(
     document.createElement('strong'),
-    document.createTextNode(`${items.length} events`),
-    document.createTextNode('Applied'),
+    document.createTextNode(`${items.length} событий`),
+    document.createTextNode('Отправлено'),
     document.createTextNode(String(applied)),
-    document.createTextNode('Skipped'),
+    document.createTextNode('Пропущено'),
     document.createTextNode(String(skipped)),
-    document.createTextNode('Errors'),
+    document.createTextNode('Ошибки'),
     document.createTextNode(String(errors)),
-    document.createTextNode('Latest'),
+    document.createTextNode('Последнее'),
     document.createTextNode(`${latest?.scope || 'n/a'}:${latest?.event || 'n/a'}`)
   );
-  summary.querySelector('strong').textContent = 'Extension log';
+  summary.querySelector('strong').textContent = 'Лог расширения';
 
   const recent = Object.entries(counts)
     .sort((left, right) => right[1] - left[1])
@@ -399,7 +399,7 @@ document.getElementById('chatAssist').addEventListener('click', () => {
 document.getElementById('clearReports').addEventListener('click', async () => {
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_CHAT_REPORTS' });
-    setStatus('Chat reports cleared.');
+    setStatus('Отчеты по чатам очищены.');
     await refreshStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
@@ -409,7 +409,7 @@ document.getElementById('clearReports').addEventListener('click', async () => {
 document.getElementById('clearAgentDebugLog').addEventListener('click', async () => {
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_AGENT_DEBUG_LOG' });
-    setStatus('Agent debug log cleared.');
+    setStatus('Технический лог очищен.');
     await refreshStatus();
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
@@ -431,7 +431,7 @@ document.getElementById('saveGroqKey').addEventListener('click', async () => {
     }
     await chrome.storage.local.set(patch);
     await loadPopupSettings();
-    setStatus(patch.groqApiKey ? 'Groq key saved.' : 'Groq key cleared.');
+    setStatus(patch.groqApiKey ? 'Ключ Groq сохранен.' : 'Ключ Groq очищен.');
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
   }
@@ -439,13 +439,13 @@ document.getElementById('saveGroqKey').addEventListener('click', async () => {
 
 document.getElementById('testGroq').addEventListener('click', async () => {
   try {
-    setStatus('Testing Groq...');
+    setStatus('Проверяю Groq...');
     const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
     if (!response?.ok) {
-      setStatus(response?.error || 'Groq test failed.', true);
+      setStatus(response?.error || 'Проверка Groq не прошла.', true);
       return;
     }
-    setStatus(`Groq OK. Sample length: ${response.sampleLength}`);
+    setStatus(`Groq работает. Длина примера: ${response.sampleLength}`);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
   }

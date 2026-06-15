@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HH Job Assistant Options</title>
+    <title>Настройки HH Job Assistant</title>
     <style>
       :root {
         color-scheme: light;
@@ -111,7 +111,7 @@
     <main>
       <h1>HH Job Assistant</h1>
 
-      <label for="groqModel">Groq model</label>
+      <label for="groqModel">Модель Groq</label>
       <select id="groqModel">
         <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
         <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
@@ -119,58 +119,58 @@
         <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B</option>
       </select>
 
-      <label for="resumeUrl">Resume URL on hh.ru</label>
+      <label for="resumeUrl">Ссылка на резюме hh.ru</label>
       <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">
 
-      <label for="expectedSalary">Expected salary for questions</label>
+      <label for="expectedSalary">Ожидаемая зарплата для ответов</label>
       <input id="expectedSalary" type="text" placeholder="Например: 250 000 руб. на руки">
 
-      <label for="coverPrompt">Cover-letter prompt</label>
+      <label for="coverPrompt">Промпт для сопроводительного письма</label>
       <textarea id="coverPrompt"></textarea>
 
       <div class="row">
         <div>
-          <label for="dailyLimit">Daily apply limit</label>
+          <label for="dailyLimit">Дневной лимит откликов</label>
           <input id="dailyLimit" type="number" min="1" max="100">
         </div>
         <div>
-          <label for="delayMinMs">Delay min, ms</label>
+          <label for="delayMinMs">Минимальная пауза, мс</label>
           <input id="delayMinMs" type="number" min="500" step="250">
         </div>
         <div>
-          <label for="delayMaxMs">Delay max, ms</label>
+          <label for="delayMaxMs">Максимальная пауза, мс</label>
           <input id="delayMaxMs" type="number" min="500" step="250">
         </div>
       </div>
 
-      <h2>Chat assistant</h2>
+      <h2>Помощник по чатам</h2>
 
       <label class="checkbox" for="chatUnreadOnly">
         <input id="chatUnreadOnly" type="checkbox">
-        Process unread chats only
+        Обрабатывать только непрочитанные чаты
       </label>
 
       <div class="row">
         <div>
-          <label for="chatReplyMode">Chat reply mode</label>
+          <label for="chatReplyMode">Режим ответа в чатах</label>
           <select id="chatReplyMode">
-            <option value="draft">Draft only</option>
-            <option value="auto_send">Auto-send</option>
+            <option value="draft">Только черновик</option>
+            <option value="auto_send">Отправлять автоматически</option>
           </select>
         </div>
         <div>
-          <label for="chatLimit">Chat limit</label>
+          <label for="chatLimit">Лимит чатов</label>
           <input id="chatLimit" type="number" min="1" max="100">
         </div>
       </div>
 
       <h2>Groq API</h2>
-      <label for="groqApiKey">Groq API key</label>
+      <label for="groqApiKey">Ключ Groq API</label>
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
 
       <div class="actions">
-        <button id="save">Save</button>
-        <button id="testGroq" class="secondary">Test Groq</button>
+        <button id="save">Сохранить</button>
+        <button id="testGroq" class="secondary">Проверить Groq</button>
       </div>
 
       <div id="status" role="status"></div>

@@ -333,12 +333,12 @@
     <header class="header">
       <h1>HH Job Assistant</h1>
       <div class="header-meta">
-        <span id="version" aria-label="Version"></span>
+        <span id="version" aria-label="Версия"></span>
         <button id="openOptions" class="icon-button" type="button" title="Настройки" aria-label="Настройки">⚙</button>
       </div>
     </header>
 
-    <section class="health" aria-label="Extension status">
+    <section class="health" aria-label="Статус расширения">
       <div class="health-row">
         <span>Расширение</span>
         <span id="extensionStatus" class="health-value warn">
@@ -365,7 +365,7 @@
       <button id="chatAssist" class="secondary">Обработка чатов</button>
     </div>
 
-    <section id="runPanel" class="run-panel hidden" aria-label="Run status">
+    <section id="runPanel" class="run-panel hidden" aria-label="Статус запуска">
       <dl>
         <dt>Статус</dt>
         <dd id="state">Ожидание</dd>
@@ -383,32 +383,32 @@
       <div id="lastError"></div>
     </section>
 
-    <section id="logsPanel" class="logs-panel hidden" aria-label="Apply logs">
+    <section id="logsPanel" class="logs-panel hidden" aria-label="Логи откликов">
       <div class="logs-head">
         <h2>Логи</h2>
       </div>
       <div id="recentResults" aria-live="polite"></div>
     </section>
-    <section aria-label="Chat reports">
+    <section aria-label="Отчеты по чатам">
       <div class="reports-head">
-        <h2>Chat reports</h2>
-        <button id="clearReports" class="secondary">Clear</button>
+        <h2>Отчеты по чатам</h2>
+        <button id="clearReports" class="secondary">Очистить</button>
       </div>
       <div id="chatReports" aria-live="polite"></div>
     </section>
-    <section aria-label="Agent debug log">
+    <section aria-label="Технический лог агента">
       <div class="reports-head">
-        <h2>Agent debug</h2>
-        <button id="clearAgentDebugLog" class="secondary">Clear</button>
+        <h2>Технический лог</h2>
+        <button id="clearAgentDebugLog" class="secondary">Очистить</button>
       </div>
       <div id="agentDebugLog" aria-live="polite"></div>
     </section>
-    <section class="settings" aria-label="Groq settings">
-      <label for="groqApiKey">Groq API key</label>
+    <section class="settings" aria-label="Настройки Groq">
+      <label for="groqApiKey">Ключ Groq API</label>
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
       <div class="settings-actions">
-        <button id="saveGroqKey" class="secondary">Save key</button>
-        <button id="testGroq" class="secondary">Test Groq</button>
+        <button id="saveGroqKey" class="secondary">Сохранить ключ</button>
+        <button id="testGroq" class="secondary">Проверить Groq</button>
       </div>
     </section>
     <script src="popup.js"></script>

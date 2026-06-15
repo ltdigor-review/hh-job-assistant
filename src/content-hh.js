@@ -125,7 +125,7 @@ globalThis.addEventListener?.('unhandledrejection', (event) => {
 async function withExtensionContext(operation, { optional = false } = {}) {
   if (extensionContextInvalidated) {
     if (optional) return null;
-    throw new Error('Extension context invalidated. Reload the extension and refresh the HH page.');
+    throw new Error('Контекст расширения устарел. Перезагрузите расширение и обновите страницу HH.');
   }
 
   try {
@@ -134,7 +134,7 @@ async function withExtensionContext(operation, { optional = false } = {}) {
     if (isExtensionContextInvalidatedError(error)) {
       markExtensionContextInvalidated();
       if (optional) return null;
-      throw new Error('Extension context invalidated. Reload the extension and refresh the HH page.');
+      throw new Error('Контекст расширения устарел. Перезагрузите расширение и обновите страницу HH.');
     }
     throw error;
   }
@@ -230,7 +230,7 @@ function hasAuthenticatedHhSignal() {
 
 function requireAuthenticatedHhPage() {
   if (hasAuthenticatedHhSignal()) return;
-  throw new Error('HH authorization required. Sign in to hh.ru before using HH Job Assistant.');
+  throw new Error('Требуется авторизация HH. Войдите на hh.ru перед использованием HH Job Assistant.');
 }
 
 function isUnsafeHhUrl(value) {
@@ -572,10 +572,10 @@ function hasSubmitControl(root = getDialogRoot()) {
 function detectBlockedResponseReason(root = getDialogRoot()) {
   const text = textOf(root) || textOf(root?.body) || textOf(document.body);
   if (/поменяйте видимость резюме|видно компаниям-клиентам headhunter/i.test(text)) {
-    return 'Skipped: Resume visibility does not allow this response. Change visibility to "Видно компаниям-клиентам HeadHunter".';
+    return 'Пропущено: видимость резюме не позволяет отправить этот отклик. Измените видимость на "Видно компаниям-клиентам HeadHunter".';
   }
   if (/откликнуться на эту вакансию невозможно|нельзя откликнуться|отклик недоступен/i.test(text)) {
-    return 'Skipped: HH disabled the response button for this vacancy.';
+    return 'Пропущено: HH отключил кнопку отклика для этой вакансии.';
   }
   return '';
 }
@@ -677,7 +677,7 @@ async function sendRuntimeMessage(message, options = {}) {
   if (!options.timeoutMs) {
     return response;
   }
-  return withTimeout(response, options.timeoutMs, options.timeoutMessage || 'Runtime message timed out.');
+  return withTimeout(response, options.timeoutMs, options.timeoutMessage || 'Ответ расширения не получен вовремя.');
 }
 
 async function setRunState(patch) {
@@ -911,33 +911,33 @@ async function generateCoverLetter(vacancyText) {
     vacancyText
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Groq cover letter request timed out.'
+    timeoutMessage: 'Запрос сопроводительного письма Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Cover letter generation failed');
+    throw new Error(response?.error || 'Не удалось сгенерировать сопроводительное письмо');
   }
   return sanitizeGeneratedText(response.text);
 }
 
 function isMissingGroqKeyError(error) {
-  return /groq api key is not configured/i.test(error instanceof Error ? error.message : String(error));
+  return /groq api key is not configured|ключ groq api не настроен/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
-  return /login|captcha|anti-bot|слишком много запросов|не робот/i.test(
+  return /login|captcha|anti-bot|слишком много запросов|не робот|страница входа|антибот/i.test(
     error instanceof Error ? error.message : String(error)
   );
 }
 
 function missingGroqMessage(kind) {
   if (kind === 'test') {
-    return 'Skipped because Groq API key is missing: vacancy needs employer questions/test assistance.';
+    return 'Пропущено: не указан ключ Groq API, а вакансия требует ответы на вопросы работодателя или тест.';
   }
-  return 'Skipped because Groq API key is missing: vacancy needs a cover letter.';
+  return 'Пропущено: не указан ключ Groq API, а вакансия требует сопроводительное письмо.';
 }
 
 async function generateTestAssistance(vacancyText, extraText) {
@@ -948,10 +948,10 @@ async function generateTestAssistance(vacancyText, extraText) {
     extraText
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Groq test assistance request timed out.'
+    timeoutMessage: 'Запрос помощи с вопросами Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Test assistance generation failed');
+    throw new Error(response?.error || 'Не удалось подготовить ответы на вопросы работодателя');
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -981,10 +981,10 @@ async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
     chatText
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Groq chat reply request timed out.'
+    timeoutMessage: 'Запрос ответа в чат Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Chat reply generation failed');
+    throw new Error(response?.error || 'Не удалось сгенерировать ответ в чат');
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -1215,7 +1215,7 @@ async function processChatItem(item, config, counters) {
   await setRunState({ state: 'processing_chat', ...counters, currentAction: `Чат: ${item.employerName || item.index}` });
   const openedChatUrl = await openChatItem(item);
   if (isUnsafePage()) {
-    throw new Error('Login, captcha, or anti-bot page detected');
+    throw new Error('Обнаружена страница входа, captcha или антибот-проверка');
   }
 
   const meta = getCurrentChatMeta({ ...item, chatUrl: openedChatUrl });
@@ -1282,7 +1282,7 @@ async function processChatItem(item, config, counters) {
   if (config.chatReplyMode === 'auto_send') {
     const sendButton = findChatSendButton();
     if (!sendButton) {
-      throw new Error('Chat send button was not found');
+      throw new Error('Кнопка отправки сообщения в чате не найдена');
     }
     await setRunState({ state: 'sending_chat_reply', ...counters });
     await waitBeforeClick();
@@ -1307,7 +1307,7 @@ async function processChatItem(item, config, counters) {
 
 async function handleChatAssist() {
   if (isUnsafePage()) {
-    throw new Error('Login, captcha, or anti-bot page detected');
+    throw new Error('Обнаружена страница входа, captcha или антибот-проверка');
   }
   requireAuthenticatedHhPage();
 
@@ -1411,7 +1411,7 @@ async function waitForNavigationQueueSettle(beforeUrl, currentRoot) {
 
 async function handleDryRun(limit) {
   if (isUnsafePage()) {
-    throw new Error('Login, captcha, or anti-bot page detected');
+    throw new Error('Обнаружена страница входа, captcha или антибот-проверка');
   }
   requireAuthenticatedHhPage();
 
@@ -1487,7 +1487,7 @@ async function applyToVacancy(item, counters) {
         status: 'skipped_no_response_button',
         coverLetterUsed: false,
         testDetected: item.testDetected,
-        error: 'Skipped: response button was not found.'
+        error: 'Пропущено: кнопка отклика не найдена.'
       });
     }
     return;
@@ -1511,7 +1511,7 @@ async function applyToVacancy(item, counters) {
     await sleep(250);
     await waitBeforeClick();
     if (isUnsafeHhUrl(item.responseButton.href)) {
-      throw new Error('Login or signup page detected before response click');
+      throw new Error('Перед нажатием отклика обнаружена страница входа или регистрации');
     }
     prepareResponseButtonForCurrentTab(item.responseButton);
     item.responseButton.click();
@@ -1529,7 +1529,7 @@ async function applyToVacancy(item, counters) {
   }
 
   if (isUnsafePage()) {
-    throw new Error('Login, captcha, or anti-bot page detected after click');
+    throw new Error('После нажатия обнаружена страница входа, captcha или антибот-проверка');
   }
 
   if (isAlreadyAppliedPage(root)) {
@@ -1562,7 +1562,7 @@ async function applyToVacancy(item, counters) {
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     let coverLetterUsed = false;
     if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
-      const message = 'Skipped: employer questions were detected, but no fillable HH question fields were found.';
+      const message = 'Пропущено: обнаружены вопросы работодателя, но заполняемые поля HH не найдены.';
       counters.skipped += 1;
       await appendResult({
         index: item.index,
@@ -1668,7 +1668,7 @@ async function applyToVacancy(item, counters) {
         labels: selectedChoices.labels.slice(0, 20)
       });
       if (selectedChoices.selected === 0) {
-        const message = 'Skipped: Groq did not return any matching HH choice option labels.';
+        const message = 'Пропущено: Groq не вернул подходящие варианты ответов HH.';
         counters.skipped += 1;
         await appendResult({
           index: item.index,
@@ -1760,7 +1760,7 @@ async function applyToVacancy(item, counters) {
         await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
         return;
       }
-      await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Skipped: test submit button was not found.');
+      await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: кнопка отправки теста не найдена.');
       return;
     }
 
@@ -1878,7 +1878,7 @@ async function applyToVacancy(item, counters) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
       return;
     }
-    await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Skipped: submit button was not found.');
+    await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: кнопка отправки не найдена.');
     return;
   }
 
@@ -2125,7 +2125,7 @@ async function continueQueuedAutoApply() {
 
 async function handleAutoApply(limit, existingCounters = null, existingProcessedVacancyIds = [], options = {}) {
   if (isUnsafePage()) {
-    throw new Error('Login, captcha, or anti-bot page detected');
+    throw new Error('Обнаружена страница входа, captcha или антибот-проверка');
   }
   requireAuthenticatedHhPage();
 
@@ -2467,7 +2467,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, activeRunId });
         break;
       default:
-        sendResponse({ ok: false, error: `Unknown content message type: ${message?.type || 'empty'}` });
+        sendResponse({ ok: false, error: `Неизвестный тип сообщения контент-скрипта: ${message?.type || 'пусто'}` });
     }
   })().catch(async (error) => {
     const messageText = error instanceof Error ? error.message : String(error);

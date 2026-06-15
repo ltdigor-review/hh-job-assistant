@@ -228,7 +228,7 @@ test('resume refresh fails before navigation when configured resume URL is missi
   const { response, updatedUrls, editClicks } = await runBackgroundResumeRefresh({ resumeUrl: '' });
 
   assert.equal(response.ok, false);
-  assert.equal(response.error, 'Укажите Resume URL в настройках');
+  assert.equal(response.error, 'Укажите ссылку на резюме в настройках');
   assert.deepEqual(updatedUrls, []);
   assert.equal(editClicks, 0);
 });
@@ -239,19 +239,19 @@ test('resume refresh stops on login or captcha page', async () => {
   });
 
   assert.equal(response.ok, false);
-  assert.equal(response.error, 'Login or captcha page detected');
+  assert.equal(response.error, 'Обнаружена страница входа или captcha');
   assert.equal(editClicks, 0);
   assert.equal(saveClicks, 0);
   assert.equal(raiseClicks, 0);
   assert.equal(localData.runState.state, 'error');
-  assert.equal(localData.runState.lastError, 'Login or captcha page detected');
+  assert.equal(localData.runState.lastError, 'Обнаружена страница входа или captcha');
 });
 
 test('resume refresh fails when edit button is missing', async () => {
   const { response, editClicks, saveClicks, raiseClicks } = await runBackgroundResumeRefresh({ hasEdit: false });
 
   assert.equal(response.ok, false);
-  assert.equal(response.error, 'Edit button not found');
+  assert.equal(response.error, 'Кнопка редактирования не найдена');
   assert.equal(editClicks, 0);
   assert.equal(saveClicks, 0);
   assert.equal(raiseClicks, 0);
@@ -261,7 +261,7 @@ test('resume refresh fails when save button is missing', async () => {
   const { response, editClicks, saveClicks, raiseClicks } = await runBackgroundResumeRefresh({ hasSave: false });
 
   assert.equal(response.ok, false);
-  assert.equal(response.error, 'Save button not found');
+  assert.equal(response.error, 'Кнопка сохранения не найдена');
   assert.equal(editClicks, 1);
   assert.equal(saveClicks, 0);
   assert.equal(raiseClicks, 0);

@@ -29,27 +29,27 @@
 
   function getGeneratedTextInvalidReason(value, { minLength = 3 } = {}) {
     const text = cleanText(value);
-    if (text.length < minLength) return 'Generated answer is too short.';
+    if (text.length < minLength) return 'Сгенерированный ответ слишком короткий.';
     if (/(?:^|\n)\s*(?:text\s+question|choice\s+group|question|answer|text\s+field|input\s+field|field)\s*\d+\s*[:.)-]/i.test(text)) {
-      return 'Generated answer contains prompt labels instead of a clean final answer.';
+      return 'Сгенерированный ответ содержит служебные метки промпта вместо готового ответа.';
     }
     if (/(?:^|\n)\s*(?:open\s+text\s+questions?|choice\s+questions?|return exact option labels|question\/context|visible hh response form text)\s*:/i.test(text)) {
-      return 'Generated answer contains prompt context instead of a clean final answer.';
+      return 'Сгенерированный ответ содержит контекст промпта вместо готового ответа.';
     }
     if (/[*_`#]{2,}|```/.test(text)) {
-      return 'Generated answer contains markdown formatting artifacts.';
+      return 'Сгенерированный ответ содержит лишнюю markdown-разметку.';
     }
     if (/^\s*[{[]|["']role["']\s*:|["']content["']\s*:/.test(text)) {
-      return 'Generated answer contains JSON or prompt metadata.';
+      return 'Сгенерированный ответ содержит JSON или служебные данные промпта.';
     }
     if (/^(?:не могу|невозможно|как ии|as an ai|i cannot|cannot answer)/i.test(text)) {
-      return 'Generated answer is a model refusal or filler response.';
+      return 'Сгенерированный ответ похож на отказ модели или пустую отписку.';
     }
     if (/(?:резюме кандидата|текст вакансии|структурированные вопросы|visible hh response form text)/i.test(text)) {
-      return 'Generated answer copied prompt context instead of answering.';
+      return 'Сгенерированный ответ копирует контекст промпта вместо ответа.';
     }
     if (/(?:^|\s)(?:task_\d+|question text not found|писать тут)(?:\s|$)/i.test(text)) {
-      return 'Generated answer copied HH field metadata instead of answering.';
+      return 'Сгенерированный ответ копирует служебные данные поля HH вместо ответа.';
     }
     return '';
   }

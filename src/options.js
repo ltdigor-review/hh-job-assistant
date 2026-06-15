@@ -90,17 +90,17 @@ async function saveOptions() {
 
   await chrome.storage.local.set(patch);
   await loadOptions();
-  setStatus('Saved.');
+  setStatus('Сохранено.');
 }
 
 async function testGroq() {
-  setStatus('Testing Groq...');
+  setStatus('Проверяю Groq...');
   const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
   if (!response?.ok) {
-    setStatus(response?.error || 'Groq test failed.', true);
+    setStatus(response?.error || 'Проверка Groq не прошла.', true);
     return;
   }
-  setStatus(`Groq OK. Sample length: ${response.sampleLength}`);
+  setStatus(`Groq работает. Длина примера: ${response.sampleLength}`);
 }
 
 fields.groqApiKey.addEventListener('focus', () => {

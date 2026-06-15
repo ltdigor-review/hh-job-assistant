@@ -224,7 +224,7 @@ test('chat assist requires hh authorization before reading chats', async () => {
   });
 
   assert.equal(result.response.ok, false);
-  assert.match(result.response.error, /authorization required/i);
+  assert.match(result.response.error, /Требуется авторизация HH/);
   assert.equal(result.reports.length, 0);
   assert.equal(result.groqCalls.length, 0);
   assert.equal(result.sendClicks, 0);

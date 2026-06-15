@@ -274,7 +274,7 @@ function extractResumeTextScript() {
     .trim();
 
   if (/\/account\/login|\/account\/signup/.test(location.pathname) || /captcha|подтвердите, что вы не робот|не робот/i.test(text)) {
-    return { ok: false, error: 'Login or captcha page detected', text: '' };
+    return { ok: false, error: 'Обнаружена страница входа или captcha', text: '' };
   }
 
   const main = document.querySelector('main')?.innerText || text;
@@ -298,7 +298,7 @@ function extractVacancyTextScript() {
     .trim();
 
   if (/\/account\/login|\/account\/signup/.test(location.pathname) || /captcha|подтвердите, что вы не робот|не робот/i.test(text)) {
-    return { ok: false, error: 'Login or captcha page detected', text: '' };
+    return { ok: false, error: 'Обнаружена страница входа или captcha', text: '' };
   }
 
   const node =
@@ -344,9 +344,9 @@ async function getVacancyContextByUrl(vacancyUrl) {
       target: { tabId: tab.id },
       func: extractVacancyTextScript
     });
-    const result = execution?.result || { ok: false, error: 'No vacancy parse result', text: '' };
+    const result = execution?.result || { ok: false, error: 'Не получен результат разбора вакансии', text: '' };
     if (!result.ok) {
-      throw new Error(result.error || 'Vacancy parse failed');
+      throw new Error(result.error || 'Не удалось разобрать вакансию');
     }
     return String(result.text || '').slice(0, 12000);
   } finally {
@@ -380,9 +380,9 @@ async function getResumeContext() {
       target: { tabId: tab.id },
       func: extractResumeTextScript
     });
-    const result = execution?.result || { ok: false, error: 'No resume parse result', text: '' };
+    const result = execution?.result || { ok: false, error: 'Не получен результат разбора резюме', text: '' };
     if (!result.ok) {
-      throw new Error(result.error || 'Resume parse failed');
+      throw new Error(result.error || 'Не удалось разобрать резюме');
     }
     const text = String(result.text || '').slice(0, 12000);
     await storageSet({
@@ -406,7 +406,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'coverPrompt']);
 
   if (!groqApiKey) {
-    throw new Error('Groq API key is not configured');
+    throw new Error('Ключ Groq API не настроен');
   }
 
   const resumeText = await getResumeContext();
@@ -447,7 +447,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   } catch (error) {
     if (error?.name === 'AbortError') {
       await appendAgentLog('groq_request_error', { task, error: 'timeout', timeoutMs });
-      throw new Error(`Groq request timed out after ${timeoutMs}ms`);
+      throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
     }
     throw error;
   } finally {
@@ -461,14 +461,14 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       status: response.status,
       responseText: text.slice(0, 200)
     });
-    throw new Error(`Groq request failed: ${response.status} ${text.slice(0, 200)}`);
+    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
   }
 
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content?.trim();
   if (!content) {
     await appendAgentLog('groq_request_error', { task, status: response.status, error: 'empty_response' });
-    throw new Error('Groq returned an empty response');
+    throw new Error('Groq вернул пустой ответ');
   }
   await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
   return content;
@@ -518,7 +518,7 @@ async function waitForTabReady(tabId, timeoutMs = 30000) {
     const timeout = setTimeout(() => {
       clearInterval(poll);
       chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error('Tab ready timed out'));
+      reject(new Error('Вкладка не загрузилась вовремя'));
     }, timeoutMs);
 
     function finish() {
@@ -708,14 +708,14 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     }
 
     if (isUnsafePage) {
-      ensureOverlay('Login or captcha page detected', 'error');
-      return { ok: false, error: 'Login or captcha page detected' };
+      ensureOverlay('Обнаружена страница входа или captcha', 'error');
+      return { ok: false, error: 'Обнаружена страница входа или captcha' };
     }
 
     if (kind === 'click_edit') {
       ensureOverlay(actionText || 'Нажимаю Редактировать');
       const button = findControl([/редактировать/i, /изменить/i], [/видимость/i, /настро/i]);
-      if (!button) return { ok: false, error: 'Edit button not found' };
+      if (!button) return { ok: false, error: 'Кнопка редактирования не найдена' };
       highlight(button);
       await sleep(500);
       button.click();
@@ -726,7 +726,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     if (kind === 'click_save') {
       ensureOverlay(actionText || 'Сохраняю без изменений');
       const button = findControl([/сохранить/i, /^готово$/i, /save/i], [/отмена/i, /cancel/i]);
-      if (!button) return { ok: false, error: 'Save button not found' };
+      if (!button) return { ok: false, error: 'Кнопка сохранения не найдена' };
       highlight(button);
       await sleep(500);
       button.click();
@@ -758,7 +758,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
       return { ok: true, title: document.title, action: 'clicked_raise', raiseSkipped: false };
     }
 
-    return { ok: false, error: `Unknown resume refresh action: ${kind || 'empty'}` };
+    return { ok: false, error: `Неизвестное действие обновления резюме: ${kind || 'пусто'}` };
   })();
 }
 
@@ -776,7 +776,7 @@ async function executeResumeRefreshPageAction(tabId, kind, actionText = '', stat
     func: resumeRefreshPageActionScript,
     args: [kind, actionText, status]
   });
-  return execution?.result || { ok: false, error: 'No resume refresh page action result' };
+  return execution?.result || { ok: false, error: 'Не получен результат действия на странице резюме' };
 }
 
 async function setResumeRefreshAction(tabId, currentAction, status = 'running') {
@@ -788,7 +788,7 @@ async function runCheckedResumePageAction(tabId, kind, currentAction) {
   await setResumeRefreshAction(tabId, currentAction);
   const result = await executeResumeRefreshPageAction(tabId, kind, currentAction);
   if (!result.ok) {
-    throw new Error(result.error || `${currentAction} failed`);
+    throw new Error(result.error || `${currentAction}: действие не выполнено`);
   }
   return result;
 }
@@ -802,7 +802,7 @@ async function runResumeRefresh() {
     const { resumeUrl = '' } = await storageGet(['resumeUrl']);
     normalizedUrl = normalizeResumeUrl(resumeUrl);
     if (!normalizedUrl) {
-      throw new Error('Укажите Resume URL в настройках');
+      throw new Error('Укажите ссылку на резюме в настройках');
     }
 
     const tab = await getActiveHhTab();
@@ -838,7 +838,7 @@ async function runResumeRefresh() {
     await setResumeRefreshAction(tabId, currentAction);
     const raiseCheck = await executeResumeRefreshPageAction(tabId, 'find_raise', currentAction);
     if (!raiseCheck.ok) {
-      throw new Error(raiseCheck.error || 'Raise check failed');
+      throw new Error(raiseCheck.error || 'Не удалось проверить поднятие резюме');
     }
 
     let raiseResult = raiseCheck;
@@ -985,7 +985,7 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
 
   const item = autoApplyQueue.items?.[autoApplyQueue.index || 0] || {};
   const vacancyId = item.vacancyId || getVacancyIdFromUrl(expectedUrl);
-  const message = 'Skipped: HH response page did not finish loading in time.';
+  const message = 'Пропущено: страница отклика HH не загрузилась вовремя.';
   await appendRunResult({
     index: item.index || Number(autoApplyQueue.index || 0) + 1,
     vacancyId,
@@ -1034,7 +1034,7 @@ function scheduleResponseNavigationWatchdog(tabId, url) {
 async function startAutoApplyFromActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
-    throw new Error('Open https://hh.ru/search/vacancy?... before starting auto apply');
+    throw new Error('Перед запуском откликов откройте https://hh.ru/search/vacancy?...');
   }
   await appendAgentLog('command_start_auto_apply', { tabId: tab.id, url: tab.url });
   return chrome.tabs.sendMessage(tab.id, { type: 'START_AUTO_APPLY' });

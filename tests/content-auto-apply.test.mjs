@@ -574,7 +574,7 @@ test('auto apply skips cover-letter vacancy when Groq key is missing', async () 
   assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 1);
   assert.equal(result.appended.at(-1).status, 'skipped_missing_groq_key');
-  assert.match(result.appended.at(-1).error, /Groq API key is missing/);
+  assert.match(result.appended.at(-1).error, /ключ Groq API/);
 });
 
 test('auto apply stops before response link that redirects to signup', async () => {
@@ -586,7 +586,7 @@ test('auto apply stops before response link that redirects to signup', async () 
 
   assert.equal(result.response.ok, true);
   assert.equal(result.appended.at(-1).status, 'error');
-  assert.match(result.appended.at(-1).error, /Login or signup page detected/);
+  assert.match(result.appended.at(-1).error, /страница входа или регистрации/);
   assert.equal(result.states.some((state) => state.state === 'error'), true);
 });
 
@@ -599,7 +599,7 @@ test('auto apply requires hh authorization before scanning vacancies', async () 
   });
 
   assert.equal(result.response.ok, false);
-  assert.match(result.response.error, /authorization required/i);
+  assert.match(result.response.error, /Требуется авторизация HH/);
   assert.equal(result.appended.length, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.states.at(-1).state, 'error');
@@ -629,7 +629,7 @@ test('dry run requires hh authorization before scanning vacancies', async () => 
   });
 
   assert.equal(result.response.ok, false);
-  assert.match(result.response.error, /authorization required/i);
+  assert.match(result.response.error, /Требуется авторизация HH/);
   assert.equal(result.appended.length, 0);
   assert.equal(result.states.at(-1).state, 'error');
 });
@@ -677,7 +677,7 @@ test('auto apply skips test vacancy when no fillable question fields are found',
   assert.equal(result.response.skipped, 1);
   assert.equal(result.appended.at(-1).status, 'skipped_question_fields_not_found');
   assert.equal(result.appended.at(-1).testDetected, true);
-  assert.match(result.appended.at(-1).error, /no fillable HH question fields/);
+  assert.match(result.appended.at(-1).error, /заполняемые поля HH не найдены/);
 });
 
 test('auto apply does not submit test vacancy when Groq answers but no fields are found', async () => {
@@ -712,7 +712,7 @@ test('auto apply skips vacancy when hh disables response because resume visibili
   assert.equal(result.submitClicks, 0);
   assert.equal(result.dialogOpen, false);
   assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
-  assert.match(result.appended.at(-1).error, /Resume visibility/);
+  assert.match(result.appended.at(-1).error, /видимость резюме/);
 });
 
 test('auto apply skips open response form when blocked text is only in document body', async () => {
@@ -731,7 +731,7 @@ test('auto apply skips open response form when blocked text is only in document 
   assert.equal(result.submitClicks, 0);
   assert.equal(result.dialogOpen, false);
   assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
-  assert.match(result.appended.at(-1).error, /^Skipped: Resume visibility/);
+  assert.match(result.appended.at(-1).error, /^Пропущено: видимость резюме/);
 });
 
 test('auto apply counts already applied open response form without submit button as confirmed', async () => {
@@ -791,7 +791,7 @@ test('auto apply does not count submit as sent when hh keeps response dialog ope
   assert.equal(result.submitClicks, 1);
   assert.equal(result.dialogOpen, false);
   assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
-  assert.match(result.appended.at(-1).error, /Resume visibility/);
+  assert.match(result.appended.at(-1).error, /видимость резюме/);
 });
 
 test('auto apply confirms country warning follow-up modal', async () => {
@@ -1007,7 +1007,7 @@ test('auto apply skips prompt context leaked into generated text answer', async 
   assert.equal(result.response.skipped, 1);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
-  assert.match(result.appended.at(-1).error, /prompt context|prompt labels|field metadata/);
+  assert.match(result.appended.at(-1).error, /контекст промпта|служебные метки промпта|служебные данные поля HH/);
 });
 
 test('auto apply fills mixed checkbox radio and open employer questions', async () => {

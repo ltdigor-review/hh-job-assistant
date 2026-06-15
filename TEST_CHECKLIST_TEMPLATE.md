@@ -182,8 +182,8 @@ Result:
 
 Expected result:
 
-- [ ] Save reports `Groq key saved.`.
-- [ ] Test reports `Groq OK. Sample length: ...` for valid key.
+- [ ] Save reports `Ключ Groq сохранен.`.
+- [ ] Test reports `Groq работает. Длина примера: ...` for valid key.
 - [ ] Invalid or missing key reports a clear Groq error.
 - [ ] Key is never displayed in plaintext after saving.
 
@@ -207,8 +207,8 @@ Result:
 - [ ] Edit cover-letter prompt.
 - [ ] Set daily apply limit.
 - [ ] Set delay min and max.
-- [ ] Toggle `Process unread chats only`.
-- [ ] Switch chat reply mode between `Draft only` and `Auto-send`.
+- [ ] Toggle `Обрабатывать только непрочитанные чаты`.
+- [ ] Switch chat reply mode between `Только черновик` and `Отправлять автоматически`.
 - [ ] Set chat limit.
 - [ ] Save settings.
 - [ ] Reload options page.
@@ -573,8 +573,8 @@ Result:
 - [ ] Inspect recent results.
 - [ ] Inspect Chat reports.
 - [ ] Inspect Agent debug.
-- [ ] Click `Clear` for Chat reports.
-- [ ] Click `Clear` for Agent debug.
+- [ ] Click `Очистить` for chat reports.
+- [ ] Click `Очистить` for technical log.
 
 Expected result:
 
