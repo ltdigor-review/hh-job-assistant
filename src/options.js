@@ -1,15 +1,4 @@
-const DEFAULTS = {
-  groqModel: 'llama-3.3-70b-versatile',
-  resumeUrl: '',
-  expectedSalary: '',
-  coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
-  dailyLimit: 20,
-  delayMinMs: 2500,
-  delayMaxMs: 5000,
-  chatUnreadOnly: true,
-  chatReplyMode: 'draft',
-  chatLimit: 10
-};
+const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const GROQ_MODELS = new Set([
   'llama-3.3-70b-versatile',
@@ -24,6 +13,7 @@ const fields = {
   groqApiKey: document.getElementById('groqApiKey'),
   groqModel: document.getElementById('groqModel'),
   resumeUrl: document.getElementById('resumeUrl'),
+  resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   expectedSalary: document.getElementById('expectedSalary'),
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
@@ -35,6 +25,10 @@ const fields = {
 };
 
 const statusNode = document.getElementById('status');
+
+function localizeError(error, fallback) {
+  return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
+}
 
 function setStatus(text, isError = false) {
   statusNode.textContent = text;
@@ -48,6 +42,7 @@ async function loadOptions() {
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
   fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
+  fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
     ? DEFAULTS.coverPrompt
@@ -65,6 +60,7 @@ async function saveOptions() {
   const patch = {
     groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
     resumeUrl: fields.resumeUrl.value.trim(),
+    resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
@@ -97,7 +93,7 @@ async function testGroq() {
   setStatus('Проверяю Groq...');
   const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
   if (!response?.ok) {
-    setStatus(response?.error || 'Проверка Groq не прошла.', true);
+    setStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);
     return;
   }
   setStatus(`Groq работает. Длина примера: ${response.sampleLength}`);
@@ -111,11 +107,11 @@ fields.groqApiKey.addEventListener('focus', () => {
 });
 
 document.getElementById('save').addEventListener('click', () => {
-  saveOptions().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
+  saveOptions().catch((error) => setStatus(localizeError(error), true));
 });
 
 document.getElementById('testGroq').addEventListener('click', () => {
-  testGroq().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
+  testGroq().catch((error) => setStatus(localizeError(error), true));
 });
 
-loadOptions().catch((error) => setStatus(error instanceof Error ? error.message : String(error), true));
+loadOptions().catch((error) => setStatus(localizeError(error), true));

@@ -1,33 +1,8 @@
 import './agent-log.js';
+import './error-text.js';
+import './defaults.js';
 
-const DEFAULTS = {
-  groqModel: 'llama-3.3-70b-versatile',
-  resumeText: '',
-  resumeUrl: '',
-  resumeParsedText: '',
-  resumeParsedAt: '',
-  expectedSalary: '',
-  coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
-  dailyLimit: 20,
-  delayMinMs: 2500,
-  delayMaxMs: 5000,
-  chatUnreadOnly: true,
-  chatReplyMode: 'draft',
-  chatLimit: 10,
-  runState: {
-    state: 'idle',
-    found: 0,
-    processed: 0,
-    applied: 0,
-    skipped: 0,
-    errors: 0,
-    lastError: '',
-    currentAction: '',
-    updatedAt: null
-  },
-  runResults: [],
-  chatReports: []
-};
+const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 const OLD_DEFAULT_DELAY_MIN_MS = 8000;
@@ -42,6 +17,10 @@ function nowIso() {
 function sleep(ms) {
   if (globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function localizeError(error, fallback) {
+  return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
 }
 
 function getGroqRequestTimeoutMs() {
@@ -361,15 +340,17 @@ async function getResumeContext() {
     resumeUrl = '',
     resumeParsedText = '',
     resumeParsedAt = '',
+    resumeCacheTtlHours = DEFAULTS.resumeCacheTtlHours,
     resumeText = ''
-  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeText']);
+  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeCacheTtlHours', 'resumeText']);
   const normalizedUrl = normalizeResumeUrl(resumeUrl);
   if (!normalizedUrl) {
     return String(resumeText || '').slice(0, 12000);
   }
 
+  const ttlHours = Math.max(0.1, Math.min(Number(resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
   const cacheAgeMs = Date.now() - Date.parse(resumeParsedAt || 0);
-  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < 24 * 60 * 60 * 1000) {
+  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < ttlHours * 60 * 60 * 1000) {
     return String(resumeParsedText).slice(0, 12000);
   }
 
@@ -421,6 +402,23 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   const timeoutMs = getGroqRequestTimeoutMs();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const requestBody = {
+    model: groqModel || DEFAULTS.groqModel,
+    messages: buildGroqMessages({
+      task,
+      resumeText: String(resumeText).slice(0, 12000),
+      expectedSalary: String(expectedSalary).slice(0, 1000),
+      coverPrompt: String(coverPrompt).slice(0, 4000),
+      vacancyText: String(vacancyText).slice(0, 12000),
+      extraText: String(extraText).slice(0, 8000)
+    }),
+    temperature: task === 'test_assist' ? 0.2 : 0.35,
+    max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
+  };
+  await appendAgentLog('groq_request_payload', {
+    task,
+    requestBody
+  });
   let response;
   try {
     response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -430,19 +428,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         'Content-Type': 'application/json'
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        model: groqModel || DEFAULTS.groqModel,
-        messages: buildGroqMessages({
-          task,
-          resumeText: String(resumeText).slice(0, 12000),
-          expectedSalary: String(expectedSalary).slice(0, 1000),
-          coverPrompt: String(coverPrompt).slice(0, 4000),
-          vacancyText: String(vacancyText).slice(0, 12000),
-          extraText: String(extraText).slice(0, 8000)
-        }),
-        temperature: task === 'test_assist' ? 0.2 : 0.35,
-        max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
-      })
+      body: JSON.stringify(requestBody)
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -461,6 +447,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       status: response.status,
       responseText: text.slice(0, 200)
     });
+    await appendAgentLog('groq_error_payload', {
+      task,
+      status: response.status,
+      responseText: text
+    });
     throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
   }
 
@@ -470,6 +461,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     await appendAgentLog('groq_request_error', { task, status: response.status, error: 'empty_response' });
     throw new Error('Groq вернул пустой ответ');
   }
+  await appendAgentLog('groq_response_payload', {
+    task,
+    content,
+    rawResponse: data
+  });
   await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
   return content;
 }
@@ -670,7 +666,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     node.setAttribute?.(HIGHLIGHT_ATTR, 'true');
     node.style.outline = '3px solid #2563eb';
     node.style.boxShadow = '0 0 0 6px rgba(37,99,235,.18)';
-    node.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+    node.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     showCursorFor(node);
   };
 
@@ -799,6 +795,9 @@ async function runResumeRefresh() {
   let normalizedUrl = '';
 
   try {
+    await globalThis.HHJobAssistantLog?.reset?.('background', 'resume_refresh_started', {
+      action: 'refresh_resumes'
+    });
     const { resumeUrl = '' } = await storageGet(['resumeUrl']);
     normalizedUrl = normalizeResumeUrl(resumeUrl);
     if (!normalizedUrl) {
@@ -879,7 +878,7 @@ async function runResumeRefresh() {
     await executeResumeRefreshPageAction(tabId, 'complete', 'Готово', 'complete').catch(() => {});
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     await setRunState({ state: 'error', errors: 1, currentAction, lastError: message });
     if (tabId) {
       await executeResumeRefreshPageAction(tabId, 'error', `${currentAction}\n${message}`, 'error').catch(() => {});
@@ -889,6 +888,9 @@ async function runResumeRefresh() {
 }
 
 async function runChatAssistFromActiveTab() {
+  await globalThis.HHJobAssistantLog?.reset?.('background', 'chat_assist_started', {
+    action: 'chat_assist'
+  });
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let tab = activeTab;
 
@@ -1025,7 +1027,7 @@ function scheduleResponseNavigationWatchdog(tabId, url) {
       appendAgentLog('response_navigation_watchdog_error', {
         tabId,
         url,
-        error: error instanceof Error ? error.message : String(error)
+        error: localizeError(error)
       }).catch(() => {});
     });
   }, getResponseNavigationWatchdogMs());
@@ -1058,7 +1060,7 @@ chrome.commands?.onCommand?.addListener((command) => {
   })().catch((error) => {
     appendAgentLog('command_error', {
       command,
-      error: error instanceof Error ? error.message : String(error)
+      error: localizeError(error)
     }).catch(() => {});
   });
 });
@@ -1085,16 +1087,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'CLEAR_CHAT_REPORTS': {
         await storageSet({ chatReports: [] });
-        sendResponse({ ok: true });
-        break;
-      }
-      case 'GET_AGENT_DEBUG_LOG': {
-        const { agentDebugLog = [] } = await storageGet(['agentDebugLog']);
-        sendResponse({ ok: true, agentDebugLog });
-        break;
-      }
-      case 'CLEAR_AGENT_DEBUG_LOG': {
-        await storageSet({ agentDebugLog: [] });
         sendResponse({ ok: true });
         break;
       }
@@ -1159,12 +1151,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: `Unknown message type: ${message?.type || 'empty'}` });
     }
   })().catch((error) => {
-    sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    sendResponse({ ok: false, error: localizeError(error) });
   });
 
   return true;
 });
 
 ensureDefaults().catch((error) => {
-  console.error('HH Job Assistant initialization failed:', error);
+  console.error('Ошибка запуска HH Job Assistant:', error);
 });

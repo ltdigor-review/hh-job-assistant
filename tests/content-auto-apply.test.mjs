@@ -11,8 +11,12 @@ async function runContentAutoApply({
   broadVacancySelectorIncludesButton = false,
   startOnResponseForm = false,
   hasQuestionField = false,
+  questionFieldCount = 1,
   hasContentEditableQuestion = false,
+  hasContentEditableCoverLetter = false,
   hasCoverLetterField = false,
+  questionFieldLabel = '',
+  questionFieldLabels = [],
   bodyText = 'HH вакансии',
   responseHref = '',
   responseAttrs = {},
@@ -24,9 +28,13 @@ async function runContentAutoApply({
   initialFollowupBodyOnlyText = '',
   followupDialogText = '',
   followupConfirmText = 'Все равно откликнуться',
+  submitButtonText = 'Отправить',
+  dialogTextAfterCoverInput = '',
   disabledSubmit = false,
   keepDialogOpenAfterSubmit = false,
   postSubmitDialogText = '',
+  submitNavigateHref = '',
+  submitBodyTextAfterClick = '',
   hideDialogReadsAfterSubmit = 0,
   nextPageUrl = '',
   dailyLimit = 1,
@@ -38,7 +46,8 @@ async function runContentAutoApply({
   message = null,
   initialLocalStore = null,
   sendMessageAfterImport = true,
-  authenticated = true
+  authenticated = true,
+  stopWhenState = ''
 }) {
   const source = await readContentScriptSource();
   const appended = [];
@@ -54,18 +63,56 @@ async function runContentAutoApply({
   let hiddenDialogReads = 0;
   const localStore = {};
   Object.assign(localStore, initialLocalStore || {});
+  function setDialogAndBodyText(text) {
+    if (!text) return;
+    if (dialog) {
+      dialog.innerText = text;
+      dialog.textContent = text;
+    }
+    if (bodyNode) {
+      bodyNode.innerText = text;
+      bodyNode.textContent = text;
+    }
+  }
 
-  const textarea = new FakeElement({
-    text: hasQuestionField ? 'Писать тут' : '',
-    attrs: hasQuestionField ? { name: 'task_235076159_text' } : {}
+  const questionTextareas = Array.from({ length: hasQuestionField ? questionFieldCount : hasTextarea ? 1 : 0 }, (_, index) => new FakeElement({
+    text: hasQuestionField ? 'Писать тут' : 'Сопроводительное письмо',
+    attrs: hasQuestionField ? { name: `task_${235076159 + index}_text` } : { placeholder: 'Сопроводительное письмо' },
+    dispatch(event) {
+      if (!hasQuestionField && event?.type === 'input') {
+        setDialogAndBodyText(dialogTextAfterCoverInput);
+      }
+    }
+  }));
+  const textarea = questionTextareas[0] || new FakeElement();
+  const effectiveQuestionLabels = questionFieldLabels.length > 0 ? questionFieldLabels : questionFieldLabel ? [questionFieldLabel] : [];
+  questionTextareas.forEach((field, index) => {
+    if (effectiveQuestionLabels[index]) {
+      field.parentElement = new FakeElement({ text: `${effectiveQuestionLabels[index]}\nПисать тут` });
+    }
   });
   const contentEditableQuestion = new FakeElement({
     text: hasContentEditableQuestion ? 'Писать тут' : '',
     attrs: hasContentEditableQuestion ? { contenteditable: 'true' } : {}
   });
+  const contentEditableCoverLetter = new FakeElement({
+    text: hasContentEditableCoverLetter ? 'Сопроводительное письмо' : '',
+    attrs: hasContentEditableCoverLetter ? { contenteditable: 'true', role: 'textbox', placeholder: 'Сопроводительное письмо' } : {},
+    dispatch(event) {
+      if (event?.type === 'input') {
+        submitButton.disabled = false;
+        setDialogAndBodyText(dialogTextAfterCoverInput);
+      }
+    }
+  });
   const coverTextarea = new FakeElement({
     text: hasCoverLetterField ? 'Сопроводительное письмо обязательное' : '',
-    attrs: hasCoverLetterField ? { 'data-qa': 'vacancy-response-letter-input' } : {}
+    attrs: hasCoverLetterField ? { 'data-qa': 'vacancy-response-letter-input' } : {},
+    dispatch(event) {
+      if (event?.type === 'input') {
+        setDialogAndBodyText(dialogTextAfterCoverInput);
+      }
+    }
   });
   const selectableControls = questionControls.map((item) => {
     const input = new FakeElement({
@@ -91,10 +138,19 @@ async function runContentAutoApply({
     }
   });
   const submitButton = new FakeElement({
-    text: 'Отправить',
+    text: submitButtonText,
     disabled: disabledSubmit,
     click() {
       submitClicks += 1;
+      if (submitBodyTextAfterClick && bodyNode) {
+        bodyNode.innerText = submitBodyTextAfterClick;
+        bodyNode.textContent = submitBodyTextAfterClick;
+      }
+      if (submitNavigateHref) {
+        const parsed = new URL(submitNavigateHref);
+        globalThis.location.href = parsed.href;
+        globalThis.location.pathname = parsed.pathname;
+      }
       if (followupDialogText) {
         dialog = new FakeElement({
           text: followupDialogText,
@@ -125,14 +181,16 @@ async function runContentAutoApply({
     dialog = new FakeElement({
       text: dialogText,
       selectorMap: {
-        '[data-qa="vacancy-response-popup-form-letter-input"]': hasCoverLetterField ? [coverTextarea] : hasTextarea ? [textarea] : [],
-        '[data-qa="vacancy-response-letter-input"]': hasCoverLetterField ? [coverTextarea] : hasTextarea ? [textarea] : [],
+        '[data-qa="vacancy-response-popup-form-letter-input"]': hasCoverLetterField ? [coverTextarea] : hasTextarea ? questionTextareas : [],
+        '[data-qa="vacancy-response-letter-input"]': hasCoverLetterField ? [coverTextarea] : hasTextarea ? questionTextareas : [],
         '[data-qa="vacancy-response-submit-popup"]': [submitButton],
         '[data-qa="vacancy-response-letter-submit"]': [submitButton],
         '[data-qa*="submit"]': [submitButton],
         'input[type="checkbox"]': selectableControls.filter((item) => item.type === 'checkbox').map((item) => item.input),
         'input[type="radio"]': selectableControls.filter((item) => item.type === 'radio').map((item) => item.input),
-        textarea: [hasQuestionField || hasTextarea ? textarea : null, hasCoverLetterField ? coverTextarea : null].filter(Boolean),
+        textarea: [...(hasQuestionField || hasTextarea ? questionTextareas : []), hasCoverLetterField ? coverTextarea : null].filter(Boolean),
+        '[contenteditable="true"]': [hasContentEditableQuestion ? contentEditableQuestion : null, hasContentEditableCoverLetter ? contentEditableCoverLetter : null].filter(Boolean),
+        '[role="textbox"]': hasContentEditableCoverLetter ? [contentEditableCoverLetter] : [],
         '[data-qa="bloko-modal-close"]': [closeButton],
         button: [submitButton, closeButton]
       }
@@ -268,10 +326,13 @@ async function runContentAutoApply({
       if ((currentResponseForm || startOnResponseForm) && selector === '[data-qa="vacancy-response-letter-submit"]') return [submitButton];
       if ((currentResponseForm || startOnResponseForm) && selector === '[data-qa*="submit"]') return [submitButton];
       if ((currentResponseForm || startOnResponseForm) && selector === 'textarea') {
-        return [hasQuestionField || hasTextarea ? textarea : null, hasCoverLetterField ? coverTextarea : null].filter(Boolean);
+        return [...(hasQuestionField || hasTextarea ? questionTextareas : []), hasCoverLetterField ? coverTextarea : null].filter(Boolean);
       }
       if ((currentResponseForm || startOnResponseForm) && selector === '[contenteditable="true"]') {
-        return hasContentEditableQuestion ? [contentEditableQuestion] : [];
+        return [hasContentEditableQuestion ? contentEditableQuestion : null, hasContentEditableCoverLetter ? contentEditableCoverLetter : null].filter(Boolean);
+      }
+      if ((currentResponseForm || startOnResponseForm) && selector === '[role="textbox"]') {
+        return hasContentEditableCoverLetter ? [contentEditableCoverLetter] : [];
       }
       if ((currentResponseForm || startOnResponseForm) && selector === 'input[type="checkbox"]') {
         return selectableControls.filter((item) => item.type === 'checkbox').map((item) => item.input);
@@ -329,6 +390,9 @@ async function runContentAutoApply({
         }
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
+          if (message.patch.state === stopWhenState && listener) {
+            listener({ type: 'STOP_RUN' }, {}, () => {});
+          }
           return settle({ ok: true });
         }
         if (message.type === 'APPEND_RUN_RESULT') {
@@ -382,7 +446,9 @@ async function runContentAutoApply({
     submitClicks,
     followupClicks,
     textareaValue: textarea.value,
+    textareaValues: questionTextareas.map((field) => field.value),
     contentEditableQuestionText: contentEditableQuestion.textContent,
+    contentEditableCoverLetterText: contentEditableCoverLetter.textContent,
     coverTextareaValue: coverTextarea.value,
     checkedLabels: selectableControls.filter((item) => item.input.checked).map((item) => item.label),
     localStore,
@@ -811,6 +877,7 @@ test('auto apply confirms country warning follow-up modal', async () => {
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.followupClicks, 1);
+  assert.ok(result.states.some((state) => state.currentAction === 'HH предупреждает: отклик может получить отказ — подтверждаю отклик'));
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -831,6 +898,7 @@ test('auto apply confirms country warning before response form opens', async () 
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.followupClicks, 1);
+  assert.ok(result.states.some((state) => state.currentAction === 'HH предупреждает: отклик может получить отказ — подтверждаю отклик'));
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -853,6 +921,7 @@ test('auto apply confirms country warning when hh modal is only in document body
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.followupClicks, 1);
+  assert.ok(result.states.some((state) => state.currentAction === 'HH предупреждает: отклик может получить отказ — подтверждаю отклик'));
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -896,6 +965,69 @@ test('auto apply fills required question on open response form', async () => {
   assert.ok(result.states.some((state) => state.currentAction === 'ИИ: отвечаю на вопросы работодателя'));
   assert.ok(result.states.some((state) => state.currentAction === 'Заполняю вопросы работодателя'));
   assert.equal(result.bodyCursor, '');
+});
+
+test('auto apply fills required contenteditable cover letter before submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Сопроводительное письмо',
+      'Сопроводительное письмо обязательное для этой вакансии',
+      'Такой отклик может получить отказ',
+      'Откликнуться'
+    ].join('\n'),
+    hasTextarea: false,
+    hasContentEditableCoverLetter: true,
+    disabledSubmit: true,
+    groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить задачи и опыт.' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.contentEditableCoverLetterText, 'Здравствуйте! Готов обсудить задачи и опыт.');
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
+test('auto apply counts already-applied cover form update before submit lookup', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Сопроводительное письмо',
+      'Сопроводительное письмо обязательное для этой вакансии',
+      'Откликнуться'
+    ].join('\n'),
+    hasCoverLetterField: true,
+    submitButtonText: 'Закрыть',
+    dialogTextAfterCoverInput: 'Отклик на вакансию Вы откликнулись Чат',
+    groqResponse: { ok: true, text: 'Здравствуйте!' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.coverTextareaValue, 'Здравствуйте!');
+  assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
+  assert.equal(result.appended.at(-1).error, '');
+});
+
+test('stop before submit preserves generated answers and prevents application submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    groqResponse: { ok: true, text: '250 000 руб. на руки' },
+    stopWhenState: 'submitting'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '250 000 руб. на руки');
+  assert.equal(result.appended.some((item) => /^applied/.test(item.status)), false);
+  assert.equal(result.states.at(-1).state, 'stopped');
 });
 
 test('auto apply strips markdown from generated question answers before submit', async () => {
@@ -1008,6 +1140,98 @@ test('auto apply skips prompt context leaked into generated text answer', async 
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
   assert.match(result.appended.at(-1).error, /контекст промпта|служебные метки промпта|служебные данные поля HH/);
+});
+
+test('auto apply sends visible messenger question text and skips non-contact answer', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nУкажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Укажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
+    groqResponse: {
+      ok: true,
+      text: 'Text question 1: Опыт работы в банках и финтехе составляет более 6 лет.'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.match(result.groqRequests.at(-1).extraText, /Укажите, пожалуйста, ник для связи в телеграмме/);
+  assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Text question 1: task_235076159_text\s*Писать тут/);
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.match(result.appended.at(-1).error, /не похож на контакт/);
+});
+
+test('auto apply fills messenger question when answer contains contact handle', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nУкажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Укажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
+    groqResponse: {
+      ok: true,
+      text: 'Text question 1: t.me/vadim_software_engineer'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 't.me/vadim_software_engineer');
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply fills salary and messenger fields from settings when Groq returns experience text', async () => {
+  const fullFormText = [
+    'Ответьте на вопросы',
+    'Был ли у Вас опыт реализации IT проектов в банках или в финтехе?',
+    'Да, был опыт в банках или финтехе',
+    'Нет, но был опыт в ecom, где тоже высоконагруженные сервисы',
+    'Нет, опыт не в банках/финтехе/ecom',
+    'Свой вариант',
+    'Были ли у Вас в работе проекты, где нужен был распил монолита на микросервисы?',
+    'Да',
+    'Нет',
+    'Свой вариант',
+    'Был ли у Вас опыт координации от 5 команд одновременно?',
+    'Да',
+    'Нет, на проектах было от 1 до 5 команд',
+    'Свой вариант',
+    'Укажите, пожалуйста, свои зарплатные ожидания по фиксированной части (окладу) до вычета налога (т.е. gross).',
+    'Писать тут',
+    'Укажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
+    'Писать тут'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: fullFormText,
+    bodyText: fullFormText,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    expectedSalary: '600000',
+    initialLocalStore: {
+      resumeText: 'Tech Lead\nКонтакт: t.me/vadim_software_engineer'
+    },
+    groqResponse: {
+      ok: true,
+      text: [
+        'Text question 1: Руководил 2 кросс-функциональными командами (15 инженеров суммарно) в Альфа-Банке.',
+        'Text question 2: Опыт управления ИТ-проектами включает координацию процесса декомпозиции монолитного ДБО.'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.textareaValues, ['600000', 't.me/vadim_software_engineer']);
+  assert.match(result.groqRequests.at(-1).extraText, /Text question 1: Укажите, пожалуйста, свои зарплатные ожидания/);
+  assert.match(result.groqRequests.at(-1).extraText, /Text question 2: Укажите, пожалуйста, ник для связи/);
 });
 
 test('auto apply fills mixed checkbox radio and open employer questions', async () => {
@@ -1270,6 +1494,30 @@ test('auto apply processed cap stops after skipped navigation response form', as
   assert.equal(result.states.at(-1).state, 'complete');
 });
 
+test('auto apply returns to search after assisted question submit opens vacancy detail at processed cap', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nНа какой уровень дохода вы ориентируетесь?',
+    hasTextarea: true,
+    hasQuestionField: true,
+    responseHref: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+    responseAttrs: { href: 'https://hh.ru/applicant/vacancy_response?vacancyId=123' },
+    navigateOnResponseClick: true,
+    submitNavigateHref: 'https://hh.ru/vacancy/123',
+    submitBodyTextAfterClick: 'Вы откликнулись на вакансию',
+    expectedSalary: '250 000 руб. на руки',
+    dailyLimit: 1,
+    message: { type: 'START_AUTO_APPLY', limitOverride: 1, maxProcessed: 1 }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, '250 000 руб. на руки');
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java');
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.states.at(-1).state, 'complete');
+});
+
 test('auto apply keeps navigation queue while hh response URL settles after transitional body', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию',
@@ -1388,6 +1636,20 @@ test('auto apply counts already confirmed response page as applied', async () =>
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
 });
 
+test('auto apply clicks generate resume submit button in hh response dialog', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nСгенерировать резюме',
+    hasTextarea: false,
+    submitButtonText: 'Сгенерировать резюме'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
 test('auto apply clicks hh list response button even when it has a response link', async () => {
   const responseHref = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&hhtmFrom=vacancy_search_list';
   const result = await runContentAutoApply({
@@ -1435,6 +1697,10 @@ test('auto apply navigates to next hh search page when limit remains', async () 
   assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
   assert.equal(result.localStore.autoApplySearchQueue.active, true);
   assert.equal(result.localStore.autoApplySearchQueue.counters.processed, 1);
+  const pauseIndex = result.states.findIndex((state) => state.currentAction === 'Пауза перед следующим откликом');
+  const nextPageIndex = result.states.findIndex((state) => state.currentAction === 'Переход на следующую страницу HH');
+  assert.ok(pauseIndex >= 0);
+  assert.ok(nextPageIndex > pauseIndex);
 });
 
 test('auto apply search resume skips already processed vacancy ids', async () => {

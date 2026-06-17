@@ -95,6 +95,20 @@ function devToolsHttpOrigin(wsUrl) {
   return parsed.href.replace(/\/$/, '');
 }
 
+async function closePageTargets(cdpUrl) {
+  const response = await fetch(`${cdpUrl}/json/list`);
+  if (!response.ok) {
+    throw new Error(`Could not list Chromium tabs: ${response.status} ${await response.text()}`);
+  }
+
+  const targets = await response.json();
+  await Promise.all(
+    targets
+      .filter((target) => target.type === 'page' && target.id)
+      .map((target) => fetch(`${cdpUrl}/json/close/${target.id}`).catch(() => null))
+  );
+}
+
 function runSmoke(cdpUrl) {
   return new Promise((resolveRun) => {
     const child = spawn(process.execPath, [join(scriptDir, 'hh-live-smoke.mjs')], {
@@ -112,6 +126,7 @@ function runSmoke(cdpUrl) {
 
 let browser = null;
 let browserOutput = '';
+let cdpUrl = '';
 
 try {
   await mkdir(profileDir, { recursive: true });
@@ -123,7 +138,7 @@ try {
     '--no-first-run',
     '--no-default-browser-check',
     '--window-size=1280,900',
-    targetUrl
+    'about:blank'
   ], {
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -135,8 +150,10 @@ try {
   });
 
   const devToolsUrl = await waitForDevToolsUrl(browser);
-  const cdpUrl = devToolsHttpOrigin(devToolsUrl);
+  cdpUrl = devToolsHttpOrigin(devToolsUrl);
+  await closePageTargets(cdpUrl);
   const result = await runSmoke(cdpUrl);
+  await closePageTargets(cdpUrl);
 
   if (result.code !== 0) {
     throw new Error(
@@ -152,6 +169,9 @@ try {
   ].filter(Boolean).join('\n');
   fail(details);
 } finally {
+  if (cdpUrl) {
+    await closePageTargets(cdpUrl).catch(() => {});
+  }
   if (browser && !browser.killed && !keepOpen) {
     browser.kill('SIGTERM');
   }

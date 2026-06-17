@@ -1,10 +1,18 @@
 # HH Job Assistant Test Checklist Template
 
-Template version date: 2026-06-10
+Template version date: 2026-06-17
 Extension version source: `manifest.json`, `package.json`
 
 ## How To Use This Template
 
+- Keep this checklist current at all times.
+- Any feature change, behavior change, UI copy change, production-flow fix, or bugfix must update the relevant checklist items in the same branch.
+- If a change creates a new user-visible risk or regression path, add a manual test case and map it in the feature traceability matrix.
+- Do not treat implementation as ready for handoff while this checklist is stale or missing coverage for the changed behavior.
+- Unit tests, static checks, mocked browser renders, and local smoke checks do not count as completed testing for this project.
+- Treat those checks as regression gates only. Report them as `unit/static checks passed`, not as `tested`.
+- `Tested` means a real production/prod-like browser run against hh.ru with the extension loaded, matching the feature being changed.
+- If production testing is not performed, state that explicitly and mark the relevant checklist items as `Blocked` or `Skipped` with the reason.
 - Before testing, copy this file or create a separate test-run record from it.
 - Fill `Test Run Metadata` and permission fields in the copy before running any checklist item.
 - Only after metadata and permissions are filled, go through the checklist from top to bottom.
@@ -77,18 +85,29 @@ Run before manual checks:
 
 ```bash
 npm test
+npm run test:extension
+npm run test:hh:chromium
 ```
 
 - [ ] Manifest is MV3, exposes popup UI, content scripts, options page, host permissions, and `Alt+Shift+A` command.
 - [ ] JavaScript files parse.
 - [ ] Background service worker initializes defaults and registers listeners.
 - [ ] Popup controls are present and wired.
+- [ ] Popup current action has no secondary detail block and does not show `Расширение выполняет задачу`.
+- [ ] Popup current action text renders compactly without overflow.
+- [ ] Popup exposes copy buttons for status errors and error/warning result text.
 - [ ] Options page exposes current settings.
 - [ ] Groq prompts include resume, vacancy, question/chat context, expected salary, and configured model.
 - [ ] Auto-apply DOM tests pass for dry run, live apply, questions, skip/error handling, pagination, queue resume, stop, and Groq fallback paths.
+- [ ] Auto-apply regression passes for employer-question submit that opens a vacancy detail page and must return to the original search page.
+- [ ] Auto-apply regression passes for HH `Сгенерировать резюме` response dialogs.
+- [ ] Auto-apply status is updated before configured delay, then updated again before the next action.
 - [ ] Chat assistant tests pass for unread-only, draft-only, auto-send, external-contact reports, generated text cleanup, and bad output skip.
 - [ ] Resume refresh tests pass for configured URL, edit/save/raise, captcha/login failures, and missing buttons.
 - [ ] Browser UI regression test passes for blocked hh response modal continuation.
+- [ ] Extension smoke loads the current extension version in Chromium.
+- [ ] Authorized hh.ru Chromium smoke confirms `authenticated: true`.
+- [ ] Chromium hh.ru smoke harness closes stale tabs before and after each run.
 
 Optional live smoke test, only after explicit permission:
 
@@ -134,15 +153,21 @@ Result:
 
 - [ ] Open any non-hh.ru page and click extension icon.
 - [ ] Popup shows extension version.
-- [ ] Extension health shows ready state.
-- [ ] Current tab health shows non-hh warning.
-- [ ] Click `Предпросмотр`, `Запустить отклики`, or `Стоп` on non-hh tab.
+- [ ] Header shows `HH Job Assistant`, version, and the settings gear.
+- [ ] Status shows a concrete blocker, for example `Откройте hh.ru`.
+- [ ] Current action shows `Ожидание`.
+- [ ] Current action text is compact and does not overflow popup width.
+- [ ] Popup does not show `Расширение выполняет задачу`.
+- [ ] Popup does not contain a secondary current-action detail line.
+- [ ] Status and recent error/warning rows can be copied from popup using `Копировать`.
+- [ ] Click `Запуск откликов`, `Поднятие резюме`, `Обработка чатов`, or `Стоп` on non-hh tab.
 
 Expected result:
 
 - [ ] User sees a clear message to open hh.ru first.
+- [ ] Red status uses concrete blocker text, not generic `Есть ошибки`.
 - [ ] No crash or stuck spinner.
-- [ ] Logs/debug section remains readable.
+- [ ] Popup remains readable without a technical-log section.
 
 Result:
 
@@ -154,13 +179,17 @@ Result:
 
 - [ ] Open `https://hh.ru` while signed in.
 - [ ] Click extension icon.
-- [ ] Popup shows `Готово к работе`.
-- [ ] Popup shows `hh.ru подключен`.
+- [ ] With Groq key configured, popup shows green `ГОТОВО`.
+- [ ] With Groq key configured, popup detail shows `hh.ru открыт · Groq подключен`.
+- [ ] Without Groq key, popup shows yellow `ГОТОВО, без автоответов`.
+- [ ] Without Groq key, popup detail shows `Вакансии с письмами/вопросами будут пропущены`.
+- [ ] On logged-out hh.ru, popup shows red `Войдите в hh.ru`.
 - [ ] If login or captcha appears, extension shows an error and does not continue automated actions.
 
 Expected result:
 
 - [ ] Extension can communicate with hh.ru content script.
+- [ ] Missing Groq key is warning, not error.
 - [ ] Unsafe login/captcha state stops user flows.
 
 Result:
@@ -169,16 +198,16 @@ Result:
 - Evidence:
 - Notes:
 
-### 4. Groq Key From Popup
+### 4. Groq Key From Settings
 
-- [ ] Open popup.
+- [ ] Open settings through the popup gear.
 - [ ] Paste Groq API key.
-- [ ] Click `Save key`.
-- [ ] Reopen popup.
+- [ ] Click `Сохранить`.
+- [ ] Reopen settings.
 - [ ] Key field is masked as `********`.
 - [ ] Focus masked field.
 - [ ] Field clears for replacement.
-- [ ] Click `Test Groq`.
+- [ ] Click `Проверить Groq`.
 
 Expected result:
 
@@ -229,11 +258,11 @@ Result:
 - Evidence:
 - Notes:
 
-### 6. Vacancy Preview
+### 6. Developer Dry Run
 
 - [ ] Open `https://hh.ru/search/vacancy?...`.
-- [ ] Click `Предпросмотр`.
-- [ ] Observe run panel.
+- [ ] Run a dry-run smoke command or send `START_DRY_RUN` from a test harness.
+- [ ] Observe run state.
 - [ ] Observe recent result log.
 
 Expected result:
@@ -252,8 +281,8 @@ Result:
 
 ### 7. Auto-Apply Start Guards
 
-- [ ] Try `Запустить отклики` from non-hh page.
-- [ ] Try `Запустить отклики` from hh.ru page that is not `/search/vacancy?...`.
+- [ ] Try `Запуск откликов` from non-hh page.
+- [ ] Try `Запуск откликов` from hh.ru page that is not `/search/vacancy?...`.
 - [ ] Try from `https://hh.ru/search/vacancy?...`.
 
 Expected result:
@@ -275,7 +304,7 @@ Requires explicit permission because this can submit real applications.
 - [ ] Confirm daily apply limit.
 - [ ] Confirm delays.
 - [ ] Confirm Groq key state.
-- [ ] Click `Запустить отклики`.
+- [ ] Click `Запуск откликов`.
 - [ ] Monitor status, counters, and logs.
 
 Expected result:
@@ -326,6 +355,8 @@ Requires explicit permission to send question/resume/vacancy text to Groq and po
 - [ ] Use vacancy where no fillable fields are found.
 - [ ] Use vacancy with expected salary question and no Groq key.
 - [ ] Use generated answer containing markdown, prompt labels, JSON-like text, or copied prompt context.
+- [ ] Use a vacancy where HH opens the vacancy detail page after question answers are submitted.
+- [ ] Run that flow with the processed/application cap reached by this vacancy.
 
 Expected result:
 
@@ -336,6 +367,9 @@ Expected result:
 - [ ] Bad generated text is skipped, not submitted.
 - [ ] Expected salary fallback is used when appropriate.
 - [ ] Missing fillable fields cause skip, not blind submit.
+- [ ] After successful question submit opens a vacancy detail page, extension returns to the original search results page.
+- [ ] When the cap is reached after that submit, the search queue is inactive and the final state is complete.
+- [ ] Skipped question/response forms do not force unexpected return navigation.
 
 Result:
 
@@ -349,6 +383,8 @@ Result:
 - [ ] Already applied response form without submit button.
 - [ ] Submit button missing for another reason.
 - [ ] hh.ru country warning or follow-up modal appears.
+- [ ] hh.ru warning says the response may be rejected and shows `Все равно откликнуться`.
+- [ ] hh.ru response dialog shows `Сгенерировать резюме`.
 - [ ] hh.ru keeps response dialog open after submit.
 - [ ] Response page navigation times out.
 
@@ -358,6 +394,8 @@ Expected result:
 - [ ] Already confirmed responses count as applied only when confirmation is detected.
 - [ ] Missing submit is skipped with clear reason.
 - [ ] Country warning is confirmed when needed.
+- [ ] Current action/status shows `HH предупреждает: отклик может получить отказ — подтверждаю отклик` before the confirm click.
+- [ ] `Сгенерировать резюме` is treated as a valid submit/generate action, not skipped as missing submit button.
 - [ ] Open dialog after submit is not counted as sent until confirmation.
 - [ ] Stalled response page is recovered, skipped, and search flow resumes.
 
@@ -375,6 +413,7 @@ Requires explicit permission if live submissions continue.
 - [ ] Start auto-apply below and above one-page capacity.
 - [ ] Let flow navigate to a response form URL.
 - [ ] Let flow return from detail/response page to search.
+- [ ] Let HH redirect from question submit to a vacancy detail page, then verify return to search.
 - [ ] Reload during queued navigation if safe to do so.
 
 Expected result:
@@ -384,6 +423,7 @@ Expected result:
 - [ ] Queue resumes from response form or vacancy detail page.
 - [ ] Queue does not loop back to the same response form.
 - [ ] Pending submit can finalize after return to search or detail confirmation page.
+- [ ] Return-to-search happens before the run is considered done when HH leaves the search page.
 
 Result:
 
@@ -396,14 +436,14 @@ Result:
 - [ ] Start preview or auto-apply.
 - [ ] Click `Стоп`.
 - [ ] Observe run panel.
-- [ ] Check logs.
+- [ ] Check local logs with `npm run inspect:logs` or profile storage.
 - [ ] Start a new run afterward.
 
 Expected result:
 
 - [ ] Active queue is cleared.
 - [ ] State becomes stopped.
-- [ ] `stop_run` debug event is recorded.
+- [ ] `stop_run` event is recorded in local extension logs.
 - [ ] New run starts from clean run results.
 
 Result:
@@ -565,23 +605,22 @@ Result:
 - Evidence:
 - Notes:
 
-### 21. Reports And Debug Log
+### 21. Reports And Local Logs
 
 - [ ] Generate at least one apply result.
 - [ ] Generate at least one chat report.
 - [ ] Open popup.
 - [ ] Inspect recent results.
-- [ ] Inspect Chat reports.
-- [ ] Inspect Agent debug.
+- [ ] Inspect chat reports.
+- [ ] Inspect local extension logs via `npm run inspect:logs` or profile storage.
 - [ ] Click `Очистить` for chat reports.
-- [ ] Click `Очистить` for technical log.
 
 Expected result:
 
 - [ ] Recent results show applied/skipped/error messages.
-- [ ] Chat reports show latest reports with direct chat links.
-- [ ] Agent debug shows event count and summary.
-- [ ] Clear buttons clear only their own section.
+- [ ] Chat report section shows latest reports with direct chat links.
+- [ ] Local logs include `agentDebugLogFile`, `agentDebugLogText`, `runState`, and recent events.
+- [ ] Chat report clear button clears only chat reports.
 - [ ] Popup refreshes without reload.
 
 Result:
@@ -621,19 +660,19 @@ Result:
 | --- | --- | --- | --- |
 | Install/load extension | Chrome Load unpacked | Manifest, permissions, popup/options/content scripts | `extension-build.test.mjs` |
 | Popup health | Open popup on hh.ru and non-hh page | Extension ready, tab status, version | `extension-build.test.mjs` |
-| Popup Groq key | Save/test key | Masking, replacement, valid/invalid test | `extension-build.test.mjs` |
+| Popup current action/copy | Open popup during active run or error | Compact current action, no secondary detail text, copyable status/errors | `extension-build.test.mjs` |
 | Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, chat settings | `extension-build.test.mjs` |
-| Vacancy preview | `Предпросмотр` | Scan only, counters, no clicks | `content-auto-apply.test.mjs` |
-| Auto-apply | `Запустить отклики` | Limit, delays, submit confirmation, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
-| Employer questions | Auto-apply on test forms | Text/radio/checkbox, salary fallback, bad output skip | `content-auto-apply.test.mjs` |
-| Stop | `Стоп` | Queue cleared, stopped state, debug event | `content-auto-apply.test.mjs` |
+| Auto-apply | `Запуск откликов` | Limit, delays, submit confirmation, status-before-delay, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
+| Employer questions | Auto-apply on test forms | Text/radio/checkbox, salary fallback, bad output skip, return to search after HH opens vacancy detail | `content-auto-apply.test.mjs` |
+| HH generated resume response | Auto-apply on HH response modal | `Сгенерировать резюме` button is clicked and confirmed | `content-auto-apply.test.mjs` |
+| Stop | `Стоп` | Queue cleared, stopped state, local log event | `content-auto-apply.test.mjs` |
 | Keyboard command | `Alt+Shift+A` | Valid URL guard, start auto-apply | `extension-build.test.mjs` |
 | Resume refresh | `Обновить резюме` | Configured URL, edit/save/raise, error states | `resume-refresh.test.mjs` |
 | Chat navigation | `Обработка чатов` | Open `/chat`, rerun after load | `content-chat-assist.test.mjs` |
 | Chat draft | Draft mode | Fill input, do not send, report | `content-chat-assist.test.mjs` |
 | Chat auto-send | Auto-send mode | Click send only after valid draft | `content-chat-assist.test.mjs` |
 | External contact reports | Chat asks for phone/messenger/email/link | Report and skip reply | `content-chat-assist.test.mjs` |
-| Reports/logs | Popup sections | Recent results, chat reports, debug clear | `extension-build.test.mjs` |
+| Reports/logs | Popup plus local storage | Recent results, chat reports, local debug artifact | `extension-build.test.mjs` |
 | Safety errors | Login/captcha/Groq/selector failures | Stop/skip/error with evidence | `content-auto-apply.test.mjs`, `resume-refresh.test.mjs` |
 
 ## Test Case Result Template

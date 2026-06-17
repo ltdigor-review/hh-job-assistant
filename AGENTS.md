@@ -4,10 +4,14 @@
 - At the start of non-trivial work in this repository, read this file from disk before acting.
 - Always use English for visible reasoning summaries and final answers unless the user explicitly asks for another language in the current turn.
 - Use terse `caveman` style by default while preserving exact commands, code, errors, and safety warnings.
+- Do not use `superpowers` skills for this repository unless the current user turn explicitly asks for them.
 - Use relative paths for repository files.
-- Develop new features in a new Git branch, then merge deliberately.
+- Work directly on the repository primary branch (`master` or `main`) by default; do not create a feature branch unless the user explicitly asks for one.
 - Increment the project version for code or behavior changes before final verification. Use the repository version sync tooling when available.
-- `push to master` means push to the repository primary branch, whether named `master` or `main`.
+- This repository is public. Never commit credentials, API keys, cookies, tokens, local browser profiles, or other secrets. Keep secrets in local environment/profile storage only.
+- Production/prod-like hh.ru browser checks must use an authorized hh.ru profile. Prefer `.hhja-chromium-profile`; if a fresh profile is opened, wait for the user to sign in before treating the check as valid.
+- Analyze extension logs from local Chrome/Chromium profile storage, not downloads. Use `npm run inspect:logs -- --storage-dir <Local Extension Settings path>` or inspect `chrome.storage.local` keys `agentDebugLogFile`, `agentDebugLogText`, `agentDebugLog`, `runState`, and `runResults`.
+- `push to master` means push directly to the repository primary branch, whether named `master` or `main`.
 - For GitHub operations in this repository, use account `ltdigor-review`.
 
 ## Multi-Agent Work Loop

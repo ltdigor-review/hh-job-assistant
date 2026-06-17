@@ -16,7 +16,9 @@ const HH_SELECTORS = {
   textareas: [
     '[data-qa="vacancy-response-popup-form-letter-input"]',
     '[data-qa="vacancy-response-letter-input"]',
-    'textarea'
+    'textarea',
+    '[contenteditable="true"]',
+    '[role="textbox"]'
   ],
   submitButtons: [
     '[data-qa="vacancy-response-submit-popup"]',
@@ -107,6 +109,12 @@ function serializeProcessedVacancyIds(processedIds) {
 function isExtensionContextInvalidatedError(error) {
   return /extension context invalidated|context invalidated/i.test(error instanceof Error ? error.message : String(error));
 }
+
+function localizeError(error, fallback) {
+  return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
+}
+
+const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 function markExtensionContextInvalidated() {
   extensionContextInvalidated = true;
@@ -430,20 +438,148 @@ function isAlreadyAppliedPage(root = document) {
 }
 
 function findTextarea(root = getDialogRoot()) {
-  return queryFirst(HH_SELECTORS.textareas, root);
+  const fields = queryAll(HH_SELECTORS.textareas, root);
+  return fields.find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field))) || fields[0] || null;
 }
 
 function getFieldMarker(field) {
   const name = field.getAttribute('name') || '';
   const dataQa = field.getAttribute('data-qa') || '';
   const placeholder = field.getAttribute('placeholder') || '';
+  const ariaLabel = field.getAttribute('aria-label') || '';
   const label = typeof field.closest === 'function' ? field.closest('label') : null;
   const nearText = textOf(label || field.parentElement || field);
-  return `${name}\n${dataQa}\n${placeholder}\n${nearText}`;
+  return `${name}\n${dataQa}\n${placeholder}\n${ariaLabel}\n${nearText}`;
+}
+
+function getTaskBody(node) {
+  return typeof node?.closest === 'function' ? node.closest('[data-qa="task-body"]') : null;
+}
+
+function getTaskBodyQuestionText(node) {
+  const taskBody = getTaskBody(node);
+  if (!taskBody) return '';
+  return (
+    cleanText(textOf(taskBody))
+      .split('\n')
+      .map((line) => cleanText(line))
+      .find((line) => line && !/^(?:да|нет|свой вариант|писать тут|\d+\s+из\s+\d+)$/i.test(line)) || ''
+  );
+}
+
+function getMeaningfulQuestionText(field) {
+  const technicalMarkers = [
+    field.getAttribute('name') || '',
+    field.getAttribute('data-qa') || '',
+    field.getAttribute('id') || ''
+  ].filter(Boolean);
+  const candidates = [
+    getTaskBodyQuestionText(field),
+    field.getAttribute('aria-label') || '',
+    field.getAttribute('placeholder') || '',
+    textOf(typeof field.closest === 'function' ? field.closest('label') : null),
+    textOf(field.parentElement || null),
+    textOf(field)
+  ];
+
+  const cleaned = candidates
+    .map((candidate) => {
+      let text = cleanText(candidate);
+      for (const marker of technicalMarkers) {
+        text = cleanText(text.replaceAll(marker, ' '));
+      }
+      return text
+        .split('\n')
+        .map((line) => cleanText(line))
+        .filter((line) => line && !/^(?:task_\d+(?:_text)?|писать тут|answer|ответ)$/i.test(line))
+        .join('\n');
+    })
+    .find((candidate) => {
+      if (!candidate) return false;
+      if (/^(?:task_\d+(?:_text)?|писать тут)$/i.test(candidate)) return false;
+      return /[а-яa-z]{3,}/i.test(candidate);
+    });
+
+  return cleanText(cleaned || '');
+}
+
+function getFieldQuestionText(field) {
+  return cleanText(field?.__hhjaQuestionText || getMeaningfulQuestionText(field));
+}
+
+function extractVisibleQuestionLabels(text, { textOnly = false } = {}) {
+  const lines = cleanText(text)
+    .split('\n')
+    .map((line) => cleanText(line))
+    .filter(Boolean);
+  const labels = [];
+  for (const line of lines) {
+    if (line.length < 12 || line.length > 500) continue;
+    if (/^(?:да|нет|ecom|\/ecom|отправить|откликнуться|писать тут)$/i.test(line)) continue;
+    if (/task_\d+/i.test(line)) continue;
+    const isTextFieldLabel = /укажите|напишите|опишите|расскажите|зарплат|доход|оклад|gross|телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line);
+    if (textOnly && !isTextFieldLabel) continue;
+    if (
+      /[?]$/.test(line) ||
+      /^(?:укажите|расскажите|опишите|напишите|какие|какой|какую|сколько|готовы|есть ли|имеется ли|на какой|почему|были ли|был ли)\b/i.test(line) ||
+      /зарплат|доход|оклад|gross|телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line)
+    ) {
+      if (!labels.includes(line)) labels.push(line);
+    }
+  }
+  return labels;
+}
+
+function isContactQuestion(field) {
+  return /telegram|телеграм|телеграмм|мессендж|messenger|whatsapp|ватсап|контакт|contact|ник/i.test(
+    `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`
+  );
+}
+
+function isSalaryQuestion(field) {
+  return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
+}
+
+function extractContactFromText(text) {
+  return (
+    cleanText(text).match(/(?:https?:\/\/)?t\.me\/[a-z0-9_]+|@[a-z0-9_]{4,}|(?:https?:\/\/)?wa\.me\/\S+/i)?.[0] || ''
+  );
+}
+
+function getQuestionAnswerInvalidReason(answer, field) {
+  const text = cleanText(answer);
+  const genericReason = getGeneratedTextInvalidReason(text, { minLength: 2 });
+  if (genericReason) return genericReason;
+  if (isContactQuestion(field) && !/(?:^|\s)(?:@[a-z0-9_]{4,}|t\.me\/[a-z0-9_]+|https?:\/\/\S+|телеграм|telegram|whatsapp|wa\.me\/\S+)/i.test(text)) {
+    return 'Сгенерированный ответ не похож на контакт для вопроса про мессенджер.';
+  }
+  if (isSalaryQuestion(field) && !/\d/.test(text)) {
+    return 'Сгенерированный ответ не содержит сумму для вопроса про доход.';
+  }
+  return '';
+}
+
+async function normalizeQuestionAnswers(answers, questionFields) {
+  const { expectedSalary = '', resumeText = '', resumeCache = null } = await storageGet(
+    ['expectedSalary', 'resumeText', 'resumeCache'],
+    { optional: true }
+  );
+  const resumeSource = [resumeText, resumeCache?.text].filter(Boolean).join('\n');
+  const contact = extractContactFromText(resumeSource);
+  return answers.map((answer, index) => {
+    const field = questionFields[index];
+    if (isSalaryQuestion(field) && String(expectedSalary || '').trim()) {
+      return String(expectedSalary || '').trim();
+    }
+    if (isContactQuestion(field) && contact) {
+      return contact;
+    }
+    return answer;
+  });
 }
 
 function findCoverLetterTextarea(root = getDialogRoot()) {
-  return [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"]')]
+  return [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"],[role="textbox"]')]
     .filter(isVisible)
     .find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
 }
@@ -482,6 +618,13 @@ function getControlGroupKey(control, index) {
   return groupMarker ? `${type}:${groupMarker}` : `${type}:control-${index}`;
 }
 
+function getControlQuestionText(control) {
+  const taskText = getTaskBodyQuestionText(control);
+  if (taskText) return taskText;
+  const group = typeof control.closest === 'function' ? control.closest('fieldset,[role="group"],[data-qa*="task"]') : null;
+  return cleanText(textOf(group).split('\n').find((line) => /[?]$/.test(cleanText(line))) || '');
+}
+
 function isSelectableQuestionControl(control) {
   if (!control || isDisabled(control)) return false;
   const type = getControlType(control);
@@ -508,7 +651,7 @@ function findQuestionControlGroups(root = getDialogRoot()) {
     const group = byGroup.get(option.groupKey) || {
       type: option.type,
       key: option.groupKey,
-      question: cleanText(option.groupKey.replace(/^(checkbox|radio):/, '')),
+      question: getControlQuestionText(option.control) || cleanText(option.groupKey.replace(/^(checkbox|radio):/, '')),
       options: []
     };
     group.options.push(option);
@@ -520,7 +663,9 @@ function findQuestionControlGroups(root = getDialogRoot()) {
 
 function buildEmployerQuestionContext(root, questionFields, questionControlGroups) {
   const sections = [];
-  const pageText = cleanText(textOf(root)).slice(0, 5000);
+  const fullRootText = getRootText(root);
+  const pageText = cleanText(fullRootText).slice(0, 5000);
+  const visibleQuestionLabels = extractVisibleQuestionLabels(fullRootText, { textOnly: true });
   if (pageText) {
     sections.push(['Visible HH response form text:', pageText].join('\n'));
   }
@@ -530,7 +675,8 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
       [
         'Open text questions:',
         ...questionFields.map((field, index) => {
-          const marker = cleanText(getFieldMarker(field)).slice(0, 600);
+          const marker = cleanText(getMeaningfulQuestionText(field) || visibleQuestionLabels[index] || getFieldMarker(field)).slice(0, 600);
+          field.__hhjaQuestionText = marker;
           return `Text question ${index + 1}: ${marker || 'question text not found'}`;
         })
       ].join('\n')
@@ -556,17 +702,19 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
   return sections.join('\n\n').slice(0, 8000);
 }
 
+const SUBMIT_ACTION_PATTERN = /отправить|откликнуться|продолжить|сгенерировать\s+резюме/i;
+
 function findSubmitButton(root = getDialogRoot()) {
   return (
     queryAll(HH_SELECTORS.submitButtons, root)
       .filter((button) => !isDisabled(button))
-      .find((button) => /отправить|откликнуться|продолжить/i.test(textOf(button))) ||
-    findEnabledClickableByText(root, [/отправить/i, /откликнуться/i, /продолжить/i])
+      .find((button) => SUBMIT_ACTION_PATTERN.test(textOf(button))) ||
+    findEnabledClickableByText(root, [/отправить/i, /откликнуться/i, /продолжить/i, /сгенерировать\s+резюме/i])
   );
 }
 
 function hasSubmitControl(root = getDialogRoot()) {
-  return queryAll(HH_SELECTORS.submitButtons, root).some((button) => /отправить|откликнуться|продолжить/i.test(textOf(button)));
+  return queryAll(HH_SELECTORS.submitButtons, root).some((button) => SUBMIT_ACTION_PATTERN.test(textOf(button)));
 }
 
 function detectBlockedResponseReason(root = getDialogRoot()) {
@@ -596,7 +744,12 @@ function findFollowupConfirmButton(root = getDialogRoot()) {
 }
 
 async function clickFollowupConfirmButton(confirmButton, counters) {
-  await setRunState({ state: 'submitting', ...counters });
+  await setRunState({
+    state: 'submitting',
+    ...counters,
+    currentAction: 'HH предупреждает: отклик может получить отказ — подтверждаю отклик',
+    lastError: ''
+  });
   await waitBeforeClick();
   confirmButton.click();
   await sleep(window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 1800);
@@ -668,7 +821,7 @@ async function sendRuntimeMessage(message, options = {}) {
     chrome.runtime.sendMessage(message, (result) => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
-        reject(new Error(lastError.message || String(lastError)));
+        reject(new Error(localizeError(lastError.message || String(lastError))));
         return;
       }
       resolve(result);
@@ -746,6 +899,28 @@ async function appendSkippedResponse(item, counters, status, error) {
   });
   await setRunState({ state: 'applying', ...counters, lastError: error });
   closeDialog();
+}
+
+async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = false, testDetected = item.testDetected } = {}) {
+  counters.applied += 1;
+  await appendResult({
+    index: item.index,
+    vacancyId: item.vacancyId,
+    title: item.title,
+    url: item.url,
+    status: 'applied_already_confirmed',
+    coverLetterUsed,
+    testDetected,
+    error: ''
+  });
+  closeDialog();
+}
+
+async function stopBeforeSubmitIfRequested(counters) {
+  if (!stopRequested) return false;
+  await clearPendingSubmit();
+  await setRunState({ state: 'stopped', ...counters, currentAction: 'Остановлено', lastError: '' });
+  return true;
 }
 
 async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected }) {
@@ -895,12 +1070,12 @@ async function getConfig() {
     'chatLimit'
   ]);
   return {
-    dailyLimit: Number(values.dailyLimit) || 20,
-    delayMinMs: Number(values.delayMinMs) || 2500,
-    delayMaxMs: Number(values.delayMaxMs) || 5000,
+    dailyLimit: Number(values.dailyLimit) || DEFAULTS.dailyLimit,
+    delayMinMs: Number(values.delayMinMs) || DEFAULTS.delayMinMs,
+    delayMaxMs: Number(values.delayMaxMs) || DEFAULTS.delayMaxMs,
     chatUnreadOnly: values.chatUnreadOnly !== false,
-    chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : 'draft',
-    chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || 10, 100))
+    chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
+    chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || DEFAULTS.chatLimit, 100))
   };
 }
 
@@ -914,7 +1089,7 @@ async function generateCoverLetter(vacancyText) {
     timeoutMessage: 'Запрос сопроводительного письма Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось сгенерировать сопроводительное письмо');
+    throw new Error(localizeError(response?.error, 'Не удалось сгенерировать сопроводительное письмо'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -924,7 +1099,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
@@ -951,7 +1126,7 @@ async function generateTestAssistance(vacancyText, extraText) {
     timeoutMessage: 'Запрос помощи с вопросами Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось подготовить ответы на вопросы работодателя');
+    throw new Error(localizeError(response?.error, 'Не удалось подготовить ответы на вопросы работодателя'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -984,7 +1159,7 @@ async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
     timeoutMessage: 'Запрос ответа в чат Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось сгенерировать ответ в чат');
+    throw new Error(localizeError(response?.error, 'Не удалось сгенерировать ответ в чат'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -1137,7 +1312,6 @@ function getChatItemInfo(node, index) {
 }
 
 async function openChatItem(item) {
-  item.node.scrollIntoView?.({ block: 'center', inline: 'center' });
   await sleep(250);
   await waitBeforeClick();
   const beforeUrl = location.href;
@@ -1337,7 +1511,7 @@ async function handleChatAssist() {
     try {
       await processChatItem(item, config, counters);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = localizeError(error);
       counters.errors += 1;
       await appendChatReport({
         chatUrl: item.chatUrl,
@@ -1507,7 +1681,6 @@ async function applyToVacancy(item, counters) {
     if (item.navigationQueue) {
       await saveQueue(item.navigationQueue);
     }
-    item.responseButton.scrollIntoView({ block: 'center', inline: 'center' });
     await sleep(250);
     await waitBeforeClick();
     if (isUnsafeHhUrl(item.responseButton.href)) {
@@ -1690,11 +1863,12 @@ async function applyToVacancy(item, counters) {
     if (questionFields.length > 0) {
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       setBusyCursor(true);
-      const answers = splitGeneratedAnswers(assistance, questionFields.length);
-      const invalidAnswer = answers.find((answer) => getGeneratedTextInvalidReason(answer, { minLength: 2 }));
-      if (invalidAnswer) {
+      const answers = await normalizeQuestionAnswers(splitGeneratedAnswers(assistance, questionFields.length), questionFields);
+      const invalidReason = answers
+        .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
+        .find(Boolean);
+      if (invalidReason) {
         setBusyCursor(false);
-        const message = getGeneratedTextInvalidReason(invalidAnswer, { minLength: 2 });
         counters.skipped += 1;
         await appendResult({
           index: item.index,
@@ -1704,9 +1878,9 @@ async function applyToVacancy(item, counters) {
           status: 'skipped_bad_generated_answer',
           coverLetterUsed: false,
           testDetected: true,
-          error: message
+          error: invalidReason
         });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
+        await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
         closeDialog();
         return;
       }
@@ -1755,6 +1929,10 @@ async function applyToVacancy(item, counters) {
 
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
+      if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
+        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: true });
+        return;
+      }
       const blockedReason = detectBlockedResponseReason(root);
       if (blockedReason) {
         await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
@@ -1766,6 +1944,9 @@ async function applyToVacancy(item, counters) {
 
     await setRunState({ state: 'submitting', ...counters });
     await waitBeforeClick();
+    if (await stopBeforeSubmitIfRequested(counters)) {
+      return;
+    }
     const beforeSubmitText = textOf(document.body);
     await savePendingSubmit({
       item,
@@ -1774,6 +1955,9 @@ async function applyToVacancy(item, counters) {
       coverLetterUsed,
       testDetected: true
     });
+    if (await stopBeforeSubmitIfRequested(counters)) {
+      return;
+    }
     submitButton.click();
     await sleep(1800);
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -1873,6 +2057,10 @@ async function applyToVacancy(item, counters) {
 
   const submitButton = findSubmitButton(root);
   if (!submitButton) {
+    if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
+      await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: false });
+      return;
+    }
     const blockedReason = detectBlockedResponseReason(root);
     if (blockedReason) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
@@ -1884,6 +2072,9 @@ async function applyToVacancy(item, counters) {
 
   await setRunState({ state: 'submitting', ...counters });
   await waitBeforeClick();
+  if (await stopBeforeSubmitIfRequested(counters)) {
+    return;
+  }
   const beforeSubmitText = textOf(document.body);
   await savePendingSubmit({
     item,
@@ -1892,6 +2083,9 @@ async function applyToVacancy(item, counters) {
     coverLetterUsed,
     testDetected: false
   });
+  if (await stopBeforeSubmitIfRequested(counters)) {
+    return;
+  }
   submitButton.click();
   await sleep(1800);
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -2061,7 +2255,7 @@ async function continueQueuedAutoApply() {
   try {
     await applyToVacancy(item, counters);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     counters.errors += 1;
     await appendResult({
       index: item.index,
@@ -2116,9 +2310,10 @@ async function continueQueuedAutoApply() {
 
   const nextItem = queue.items[nextIndex];
   await saveQueue({ ...queue, index: nextIndex, counters });
-  await setRunState({ state: 'applying', ...counters });
+  await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
   const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
   await sleep(delayMs);
+  await setRunState({ state: 'applying', ...counters, currentAction: 'Открываю следующую форму отклика HH', lastError: '' });
   navigateTo(nextItem.responseUrl);
   return true;
 }
@@ -2213,6 +2408,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     }
 
     counters.processed += 1;
+    const appliedBeforeItem = counters.applied;
 
     try {
       await applyToVacancy(item, counters);
@@ -2220,7 +2416,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         await saveQueue({ active: false });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = localizeError(error);
       counters.errors += 1;
       if (item.responseUrl) {
         await saveQueue({ active: false });
@@ -2245,18 +2441,28 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
 
     await setRunState({ state: stopRequested ? 'paused' : 'applying', ...counters });
     const processedCapReached = maxProcessed != null && counters.processed >= maxProcessed;
-    if (!stopRequested && !processedCapReached && sourceUrl && !isHhSearchPageUrl(location.href)) {
+    const appliedThisItem = counters.applied > appliedBeforeItem;
+    if (!stopRequested && sourceUrl && !isHhSearchPageUrl(location.href) && (!processedCapReached || appliedThisItem)) {
       await saveQueue({ active: false });
-      await saveSearchQueue({
-        active: true,
-        runId: activeRunId,
-        limit,
-        counters,
-        config,
-        maxProcessed,
-        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      if (processedCapReached) {
+        await saveSearchQueue({ active: false });
+      } else {
+        await saveSearchQueue({
+          active: true,
+          runId: activeRunId,
+          limit,
+          counters,
+          config,
+          maxProcessed,
+          processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+        });
+      }
+      await setRunState({
+        state: processedCapReached ? 'complete' : 'applying',
+        ...counters,
+        currentAction: 'Возвращаюсь на страницу поиска HH',
+        lastError: ''
       });
-      await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
       closeDialog();
       navigateTo(sourceUrl);
       return { ok: true, ...counters, navigated: true, nextPageUrl: sourceUrl };
@@ -2265,7 +2471,9 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       break;
     }
     if (!stopRequested) {
+      await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
       await sleep(randomDelay(config.delayMinMs, config.delayMaxMs));
+      await setRunState({ state: 'applying', ...counters, currentAction: 'Продолжаю отклики', lastError: '' });
     }
   }
 
@@ -2323,7 +2531,7 @@ async function continueSearchAutoApply() {
       { maxProcessed: autoApplySearchQueue.maxProcessed || null }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     await saveSearchQueue({ active: false });
     await setRunState({ state: 'error', ...(autoApplySearchQueue.counters || {}), lastError: message });
   }
@@ -2337,6 +2545,14 @@ async function startRun(mode, limitOverride = null, options = {}) {
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  await globalThis.HHJobAssistantLog?.reset?.('content', 'auto_apply_started', {
+    mode,
+    limit,
+    limitOverride: limitOverride == null ? null : limit,
+    maxProcessed,
+    runId: activeRunId,
+    url: location.href
+  });
   await storageSet({
     runResults: [],
     autoApplyQueue: { active: false },
@@ -2426,7 +2642,7 @@ async function maybeStartFromUrlParam() {
     await appendAgentLog('url_trigger_start', { mode, limit, maxProcessed, groqModel, url: location.href });
     await startRun(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
@@ -2456,6 +2672,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         stopRequested = false;
         stopReason = '';
         activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        await globalThis.HHJobAssistantLog?.reset?.('content', 'chat_assist_content_started', {
+          runId: activeRunId,
+          url: location.href
+        });
         sendResponse(await handleChatAssist());
         break;
       case 'STOP_RUN':
@@ -2470,7 +2690,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: `Неизвестный тип сообщения контент-скрипта: ${message?.type || 'пусто'}` });
     }
   })().catch(async (error) => {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('content_message_error', { type: message?.type || '', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
     sendResponse({ ok: false, error: messageText });
@@ -2484,7 +2704,7 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
     await appendAgentLog('page_trigger_start_auto_apply', { url: location.href });
     await startRun('live');
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
@@ -2511,7 +2731,7 @@ async function initializeContentScript() {
 }
 
 initializeContentScript().catch(async (error) => {
-  const messageText = error instanceof Error ? error.message : String(error);
+  const messageText = localizeError(error);
   await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }, { optional: true });
   await setRunState({ state: 'error', lastError: messageText });
 });

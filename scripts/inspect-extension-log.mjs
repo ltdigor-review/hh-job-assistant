@@ -193,6 +193,25 @@ function extractLatestStartRun(text) {
   return starts.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || ''))).at(-1) || null;
 }
 
+function extractLatestDebugFile(text) {
+  const files = extractJsonObjects(text, 'agentDebugLogFile')
+    .filter((item) => item?.name || item?.agentDebugLogFile?.name)
+    .map((item) => item.agentDebugLogFile || item);
+  const fragments = [
+    ...text.matchAll(/agentDebugLogFile\s*\n\s*(\{[^\n]*"name":"[^"]+\.debug"[^\n]*\})/g),
+    ...text.matchAll(/"agentDebugLogFile":(\{[^}]*"name":"[^"]+\.debug"[^}]*\})/g)
+  ]
+    .map((match) => ({
+      name: extractField(match[1], 'name') || '',
+      createdAt: extractField(match[1], 'createdAt') || '',
+      runId: extractField(match[1], 'runId') || ''
+    }))
+    .filter((item) => item.name);
+  return [...files, ...fragments]
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+    .at(-1) || null;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!existsSync(args.storageDir)) {
@@ -207,6 +226,8 @@ async function main() {
   const fragmentResults = extractRunResultFragments(stdout);
   const latestState = extractLatestRunState(stdout);
   const latestStart = extractLatestStartRun(stdout);
+  const latestDebugFile = extractLatestDebugFile(stdout);
+  const hasLocalDebugText = stdout.includes('agentDebugLogText');
 
   const results = dedupeResults(
     [
@@ -230,6 +251,8 @@ async function main() {
     },
     latestStart,
     latestState,
+    latestDebugFile,
+    hasLocalDebugText,
     applied
   };
 
@@ -249,6 +272,11 @@ async function main() {
   }
   if (latestStart) {
     console.log(`Latest start: mode=${latestStart.mode}, limit=${latestStart.limit}, extension=${latestStart.extensionVersion || 'unknown'}, flow=${latestStart.flowVersion || 'unknown'}`);
+  }
+  if (latestDebugFile) {
+    console.log(`Debug file: ${latestDebugFile.name}`);
+  } else if (hasLocalDebugText) {
+    console.log('Debug file: local agentDebugLogText found');
   }
   for (const item of applied.slice(-10)) {
     console.log(`${item.timestamp || ''} ${item.status || ''} ${item.vacancyId || ''} ${item.title || ''}`.trim());

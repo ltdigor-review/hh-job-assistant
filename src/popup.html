@@ -7,23 +7,48 @@
     <style>
       :root {
         color-scheme: light;
-        font-family: Arial, sans-serif;
-        color: #172033;
-        background: #fff;
+        font-family: Inter, Arial, sans-serif;
+        color: #1f2933;
+        background: #f5f7fa;
+      }
+
+      * {
+        box-sizing: border-box;
       }
 
       body {
-        width: 340px;
-        min-height: 560px;
+        width: 380px;
+        min-height: 620px;
         margin: 0;
         padding: 14px;
-        box-sizing: border-box;
         overflow-y: auto;
+        background: #f5f7fa;
       }
 
-      h1 {
-        font-size: 18px;
+      h1,
+      h2,
+      p {
         margin: 0;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 0 12px;
+        font: 700 13px/1 Arial, sans-serif;
+        cursor: pointer;
+        transition: background .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: .45;
+      }
+
+      .shell {
+        display: grid;
+        gap: 10px;
       }
 
       .header {
@@ -31,7 +56,12 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 12px;
+      }
+
+      h1 {
+        font-size: 18px;
+        line-height: 1.15;
+        letter-spacing: 0;
       }
 
       .header-meta {
@@ -41,221 +71,184 @@
       }
 
       #version {
-        color: #94a3b8;
-        font-size: 10px;
+        color: #6b7280;
+        font-size: 11px;
         line-height: 1;
         white-space: nowrap;
       }
 
-      .health {
-        display: grid;
-        gap: 6px;
-        margin-bottom: 12px;
-        padding: 10px;
-        border: 1px solid #d8e0ea;
-        border-radius: 8px;
-        background: #f8fafc;
+      .icon-button {
+        width: 30px;
+        min-height: 30px;
+        height: 30px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        border-color: #d4dbe5;
+        background: #fff;
+        color: #1f2933;
+        font-size: 16px;
+        box-shadow: 0 1px 2px rgba(17, 24, 39, .08);
       }
 
-      .health-row {
+      .panel {
+        border: 1px solid #d9e1ea;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 1px 2px rgba(17, 24, 39, .04);
+      }
+
+      .status-panel {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 10px;
+        padding: 12px;
+      }
+
+      .status-dot {
+        width: 12px;
+        height: 12px;
+        margin-top: 3px;
+        border-radius: 999px;
+        background: #9ca3af;
+        box-shadow: 0 0 0 4px rgba(156, 163, 175, .14);
+      }
+
+      .status-panel.ok .status-dot {
+        background: #16a34a;
+        box-shadow: 0 0 0 4px rgba(22, 163, 74, .13);
+      }
+
+      .status-panel.warn .status-dot {
+        background: #f59e0b;
+        box-shadow: 0 0 0 4px rgba(245, 158, 11, .16);
+      }
+
+      .status-panel.error .status-dot {
+        background: #dc2626;
+        box-shadow: 0 0 0 4px rgba(220, 38, 38, .13);
+      }
+
+      .status-title {
+        font-size: 16px;
+        font-weight: 800;
+        line-height: 1.2;
+        word-break: break-word;
+        user-select: text;
+      }
+
+      .status-detail,
+      .muted {
+        color: #64748b;
+        font-size: 12px;
+        line-height: 1.35;
+        user-select: text;
+      }
+
+      .section {
+        display: grid;
+        gap: 8px;
+        padding: 11px;
+      }
+
+      .section-head {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
+        gap: 8px;
+      }
+
+      .section-head h2 {
         font-size: 12px;
+        font-weight: 800;
+        color: #667085;
+        text-transform: uppercase;
+        letter-spacing: 0;
       }
 
-      .health-value {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        max-width: 190px;
-        font-weight: 700;
-        text-align: right;
-      }
-
-      .health-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #94a3b8;
-        flex: 0 0 auto;
-      }
-
-      .health-value.ok {
-        color: #166534;
-      }
-
-      .health-value.ok .health-dot {
-        background: #22c55e;
-      }
-
-      .health-value.warn {
-        color: #92400e;
-      }
-
-      .health-value.warn .health-dot {
-        background: #f59e0b;
-      }
-
-      .health-value.error {
-        color: #991b1b;
-      }
-
-      .health-value.error .health-dot {
-        background: #ef4444;
+      .action-title {
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.3;
+        word-break: break-word;
+        user-select: text;
       }
 
       .actions {
         display: grid;
-        gap: 8px;
-      }
-
-      .action-row {
-        display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
 
-      button {
-        min-height: 38px;
-        border: 1px solid #1f5fbf;
-        border-radius: 6px;
-        background: #2563eb;
+      .primary {
+        grid-column: 1 / 2;
+        border-color: #b91c1c;
+        background: #d71920;
         color: #fff;
-        font: 13px Arial, sans-serif;
-        cursor: pointer;
       }
 
-      button.secondary {
-        background: #f1f5f9;
-        border-color: #b8c4d4;
-        color: #172033;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
-      }
-
-      button.danger {
-        background: #dc2626;
-        border-color: #991b1b;
-      }
-
-      .icon-button {
-        width: 28px;
-        min-height: 28px;
-        height: 28px;
-        padding: 0;
-        display: inline-grid;
-        place-items: center;
-        border-color: #b8c4d4;
-        background: #f8fafc;
-        color: #172033;
-        font-size: 16px;
-        line-height: 1;
-        box-shadow: 0 1px 2px rgba(15, 23, 42, .12);
-      }
-
-      .settings {
-        display: grid;
-        gap: 8px;
-        margin-top: 14px;
-        padding: 10px;
-        border: 1px solid #d8e0ea;
-        border-radius: 8px;
+      .danger {
+        border-color: #d4dbe5;
         background: #fff;
+        color: #b91c1c;
       }
 
-      label {
-        font-size: 12px;
-        font-weight: 700;
+      .secondary {
+        border-color: #d4dbe5;
+        background: #f8fafc;
+        color: #1f2933;
       }
 
-      input {
-        box-sizing: border-box;
-        width: 100%;
-        min-height: 34px;
-        border: 1px solid #b8c4d4;
-        border-radius: 6px;
-        padding: 8px 10px;
-        font: 13px Arial, sans-serif;
-      }
-
-      .settings-actions {
+      .counter-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
       }
 
-      .run-panel,
-      .logs-panel {
-        margin-top: 12px;
-      }
-
-      .hidden {
-        display: none !important;
-      }
-
-      dl {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 6px 12px;
-        margin: 0;
-        padding: 10px;
-        border: 1px solid #d8e0ea;
+      .counter {
+        min-width: 0;
+        padding: 8px 6px;
+        border: 1px solid #e2e8f0;
         border-radius: 8px;
         background: #f8fafc;
+        text-align: center;
       }
 
-      dt,
-      dd {
-        margin: 0;
-        font-size: 13px;
+      .counter-value {
+        display: block;
+        font-size: 16px;
+        font-weight: 800;
+        line-height: 1.1;
       }
 
-      dd {
-        font-weight: 700;
+      .counter-label {
+        display: block;
+        margin-top: 3px;
+        color: #64748b;
+        font-size: 10px;
+        line-height: 1.1;
+        white-space: nowrap;
       }
 
-      #lastError {
-        margin-top: 10px;
-        min-height: 18px;
-        color: #b91c1c;
-        font-size: 12px;
-        word-break: break-word;
-      }
-
-      #statusLine {
-        margin-top: 10px;
-        color: #475569;
-        font-size: 12px;
-      }
-
-      .logs-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        margin-bottom: 8px;
-      }
-
-      .logs-head h2 {
-        margin: 0;
-        font-size: 14px;
-      }
-
-      #recentResults {
+      .list {
         display: grid;
         gap: 6px;
-        max-height: 170px;
+        max-height: 132px;
         overflow-y: auto;
-        padding-right: 2px;
+        padding-right: 1px;
       }
 
-      .result {
+      .result,
+      .report {
+        display: grid;
+        gap: 6px;
         padding: 8px;
-        border: 1px solid #d8e0ea;
-        border-radius: 6px;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
         background: #f8fafc;
         font-size: 12px;
+        line-height: 1.35;
+        user-select: text;
       }
 
       .result.warn {
@@ -270,147 +263,124 @@
         color: #991b1b;
       }
 
-      .reports-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        margin-top: 14px;
+      .result.copyable {
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: start;
       }
 
-      .reports-head h2 {
-        margin: 0;
-        font-size: 14px;
-      }
-
-      #clearReports {
-        min-height: 30px;
-        padding: 4px 8px;
-      }
-
-      #chatReports {
-        display: grid;
-        gap: 6px;
-        margin-top: 8px;
-      }
-
-      #agentDebugLog {
-        display: grid;
-        gap: 6px;
-        margin-top: 8px;
-      }
-
-      .report {
-        padding: 8px;
-        border: 1px solid #d8e0ea;
-        border-radius: 6px;
-        background: #fff;
-        font-size: 12px;
-      }
-
-      .report a {
-        color: #1d4ed8;
+      .result-text {
+        min-width: 0;
         word-break: break-word;
       }
 
-      .debug-summary {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 4px 10px;
-        padding: 8px;
-        border: 1px solid #d8e0ea;
-        border-radius: 6px;
-        background: #f8fafc;
+      .report a {
+        color: #b91c1c;
+        word-break: break-word;
+      }
+
+      .small-button {
+        min-height: 28px;
+        padding: 0 8px;
         font-size: 12px;
       }
 
-      .debug-summary strong {
+      .copy-button {
+        width: 28px;
+        min-height: 28px;
+        height: 28px;
+        padding: 0;
+        justify-self: start;
+        border-color: #d4dbe5;
+        background: #fff;
+        color: #475569;
         font-size: 13px;
+        line-height: 1;
       }
+
+      .copy-toast {
+        position: fixed;
+        left: 50%;
+        top: 14px;
+        z-index: 10;
+        padding: 8px 10px;
+        border: 1px solid #bbf7d0;
+        border-radius: 8px;
+        background: #ecfdf5;
+        color: #166534;
+        font: 800 12px/1 Arial, sans-serif;
+        box-shadow: 0 6px 16px rgba(17, 24, 39, .16);
+        transform: translateX(-50%);
+        pointer-events: none;
+      }
+
     </style>
   </head>
   <body>
-    <header class="header">
-      <h1>HH Job Assistant</h1>
-      <div class="header-meta">
-        <span id="version" aria-label="Версия"></span>
-        <button id="openOptions" class="icon-button" type="button" title="Настройки" aria-label="Настройки">⚙</button>
-      </div>
-    </header>
+    <main class="shell">
+      <header class="header">
+        <h1>HH Job Assistant</h1>
+        <div class="header-meta">
+          <span id="version" aria-label="Версия"></span>
+          <button id="openOptions" class="icon-button" type="button" title="Настройки" aria-label="Настройки">⚙</button>
+        </div>
+      </header>
 
-    <section class="health" aria-label="Статус расширения">
-      <div class="health-row">
-        <span>Расширение</span>
-        <span id="extensionStatus" class="health-value warn">
-          <span class="health-dot" aria-hidden="true"></span>
-          Проверяю
-        </span>
-      </div>
-      <div class="health-row">
-        <span>Текущая вкладка</span>
-        <span id="tabStatus" class="health-value warn">
-          <span class="health-dot" aria-hidden="true"></span>
-          Проверяю
-        </span>
-      </div>
-    </section>
+      <section id="appStatus" class="panel status-panel warn" aria-label="Статус расширения">
+        <span id="appStatusDot" class="status-dot" aria-hidden="true"></span>
+        <div>
+          <div id="appStatusTitle" class="status-title">Проверяю</div>
+          <p id="appStatusDetail" class="status-detail">Проверяю hh.ru и настройки Groq</p>
+        </div>
+      </section>
 
-    <div class="actions">
-      <button id="dryRun" class="secondary">Предпросмотр</button>
-      <div class="action-row">
-        <button id="autoApply">Запустить отклики</button>
-        <button id="stop" class="danger">Стоп</button>
-      </div>
-      <button id="refreshResumes" class="secondary">Обновить резюме</button>
-      <button id="chatAssist" class="secondary">Обработка чатов</button>
-    </div>
+      <section class="panel section" aria-label="Текущее действие">
+        <div class="section-head">
+          <h2>Текущее действие</h2>
+        </div>
+        <div id="currentAction" class="action-title">Ожидание</div>
+      </section>
 
-    <section id="runPanel" class="run-panel hidden" aria-label="Статус запуска">
-      <dl>
-        <dt>Статус</dt>
-        <dd id="state">Ожидание</dd>
-        <dt>Найдено</dt>
-        <dd id="found">0</dd>
-        <dt>Отправлено</dt>
-        <dd id="applied">0</dd>
-        <dt>Пропущено</dt>
-        <dd id="skipped">0</dd>
-        <dt>Ошибки</dt>
-        <dd id="errors">0</dd>
-      </dl>
+      <section class="panel section" aria-label="Управление">
+        <div class="actions">
+          <button id="autoApply" class="primary" type="button">Запуск откликов</button>
+          <button id="stop" class="danger" type="button" disabled>Стоп</button>
+          <button id="refreshResumes" class="secondary" type="button">Поднятие резюме</button>
+          <button id="chatAssist" class="secondary" type="button">Обработка чатов</button>
+        </div>
+      </section>
 
-      <div id="statusLine">Откройте страницу hh.ru с вакансиями и запустите проверку.</div>
-      <div id="lastError"></div>
-    </section>
+      <section class="panel section" aria-label="Счетчики">
+        <div class="counter-grid">
+          <div class="counter">
+            <span id="applied" class="counter-value">0</span>
+            <span class="counter-label">Отклики</span>
+          </div>
+          <div class="counter">
+            <span id="skipped" class="counter-value">0</span>
+            <span class="counter-label">Пропуски</span>
+          </div>
+          <div class="counter">
+            <span id="errors" class="counter-value">0</span>
+            <span class="counter-label">Ошибки</span>
+          </div>
+        </div>
+      </section>
 
-    <section id="logsPanel" class="logs-panel hidden" aria-label="Логи откликов">
-      <div class="logs-head">
-        <h2>Логи</h2>
-      </div>
-      <div id="recentResults" aria-live="polite"></div>
-    </section>
-    <section aria-label="Отчеты по чатам">
-      <div class="reports-head">
-        <h2>Отчеты по чатам</h2>
-        <button id="clearReports" class="secondary">Очистить</button>
-      </div>
-      <div id="chatReports" aria-live="polite"></div>
-    </section>
-    <section aria-label="Технический лог агента">
-      <div class="reports-head">
-        <h2>Технический лог</h2>
-        <button id="clearAgentDebugLog" class="secondary">Очистить</button>
-      </div>
-      <div id="agentDebugLog" aria-live="polite"></div>
-    </section>
-    <section class="settings" aria-label="Настройки Groq">
-      <label for="groqApiKey">Ключ Groq API</label>
-      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
-      <div class="settings-actions">
-        <button id="saveGroqKey" class="secondary">Сохранить ключ</button>
-        <button id="testGroq" class="secondary">Проверить Groq</button>
-      </div>
-    </section>
-    <script src="popup.js"></script>
+      <section class="panel section" aria-label="Последние действия">
+        <div class="section-head">
+          <h2>Последние действия</h2>
+        </div>
+        <div id="recentResults" class="list" aria-live="polite"></div>
+      </section>
+
+      <section class="panel section" aria-label="Отчеты по чатам">
+        <div class="section-head">
+          <h2>Отчеты по чатам</h2>
+          <button id="clearReports" class="secondary small-button" type="button">Очистить</button>
+        </div>
+        <div id="chatReports" class="list" aria-live="polite"></div>
+      </section>
+    </main>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>
