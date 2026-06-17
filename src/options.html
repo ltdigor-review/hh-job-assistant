@@ -111,14 +111,6 @@
     <main>
       <h1>HH Job Assistant</h1>
 
-      <label for="groqModel">Модель Groq</label>
-      <select id="groqModel">
-        <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
-        <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
-        <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B</option>
-        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B</option>
-      </select>
-
       <label for="resumeUrl">Ссылка на резюме hh.ru</label>
       <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">
 
@@ -146,28 +138,43 @@
         </div>
       </div>
 
-      <h2>Помощник по чатам</h2>
-
-      <label class="checkbox" for="chatUnreadOnly">
-        <input id="chatUnreadOnly" type="checkbox">
-        Обрабатывать только непрочитанные чаты
+      <label class="checkbox" for="experimentalFeaturesEnabled">
+        <input id="experimentalFeaturesEnabled" type="checkbox">
+        Экспериментальные функции
       </label>
 
-      <div class="row">
-        <div>
-          <label for="chatReplyMode">Режим ответа в чатах</label>
-          <select id="chatReplyMode">
-            <option value="draft">Только черновик</option>
-            <option value="auto_send">Отправлять автоматически</option>
-          </select>
+      <section id="chatAssistantSettings" hidden>
+        <h2>Помощник по чатам</h2>
+
+        <label class="checkbox" for="chatUnreadOnly">
+          <input id="chatUnreadOnly" type="checkbox">
+          Обрабатывать только непрочитанные чаты
+        </label>
+
+        <div class="row">
+          <div>
+            <label for="chatReplyMode">Режим ответа в чатах</label>
+            <select id="chatReplyMode">
+              <option value="draft">Только черновик</option>
+              <option value="auto_send">Отправлять автоматически</option>
+            </select>
+          </div>
+          <div>
+            <label for="chatLimit">Лимит чатов</label>
+            <input id="chatLimit" type="number" min="1" max="100">
+          </div>
         </div>
-        <div>
-          <label for="chatLimit">Лимит чатов</label>
-          <input id="chatLimit" type="number" min="1" max="100">
-        </div>
-      </div>
+      </section>
 
       <h2>Groq API</h2>
+      <label for="groqModel">Модель Groq</label>
+      <select id="groqModel">
+        <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
+        <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
+        <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B</option>
+        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B</option>
+      </select>
+
       <label for="groqApiKey">Ключ Groq API</label>
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
 

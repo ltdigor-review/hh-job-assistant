@@ -39,7 +39,7 @@
     if (/groq api key is not configured/i.test(text)) {
       return 'Ключ Groq API не настроен.';
     }
-    if (/groq request failed:\s*429|rate limit/i.test(text)) {
+    if (/groq request failed:\s*429|rate limit|groq .*ограничил|пауза до|cooldown/i.test(text)) {
       return 'Groq временно ограничил запросы. Повторите позже.';
     }
     if (/timed out|timeout/i.test(text)) {

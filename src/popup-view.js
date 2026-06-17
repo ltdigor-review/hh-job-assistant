@@ -132,7 +132,12 @@ function deriveStopTitle(activeRun) {
   return activeRun ? 'Остановить текущий запуск' : 'Нет активного запуска';
 }
 
-export function derivePopupView({ runState = {}, tabState = {}, hasGroqKey = false } = {}) {
+export function derivePopupView({
+  runState = {},
+  tabState = {},
+  hasGroqKey = false,
+  experimentalFeaturesEnabled = false
+} = {}) {
   const activeRun = isActiveRun(runState);
   const tabReady = tabState.kind === 'ready';
   return {
@@ -142,6 +147,7 @@ export function derivePopupView({ runState = {}, tabState = {}, hasGroqKey = fal
       autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,
+      chatAssistVisible: experimentalFeaturesEnabled === true,
       chatAssistDisabled: activeRun || !tabReady || !hasGroqKey,
       autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
       stopTitle: deriveStopTitle(activeRun)

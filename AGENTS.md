@@ -7,6 +7,7 @@
 - Do not use `superpowers` skills for this repository unless the current user turn explicitly asks for them.
 - Use relative paths for repository files.
 - Work directly on the repository primary branch (`master` or `main`) by default; do not create a feature branch unless the user explicitly asks for one.
+- Multiple agents may work in the same branch at the same time and conflict with each other; this is normal.
 - Increment the project version for code or behavior changes before final verification. Use the repository version sync tooling when available.
 - This repository is public. Never commit credentials, API keys, cookies, tokens, local browser profiles, or other secrets. Keep secrets in local environment/profile storage only.
 - Production/prod-like hh.ru browser checks must use an authorized hh.ru profile. Prefer `.hhja-chromium-profile`; if a fresh profile is opened, wait for the user to sign in before treating the check as valid.

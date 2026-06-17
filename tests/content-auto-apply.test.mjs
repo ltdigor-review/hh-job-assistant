@@ -34,7 +34,7 @@ async function runContentAutoApply({
   keepDialogOpenAfterSubmit = false,
   postSubmitDialogText = '',
   submitNavigateHref = '',
-  submitBodyTextAfterClick = '',
+  submitBodyTextAfterClick = 'Вы откликнулись',
   hideDialogReadsAfterSubmit = 0,
   nextPageUrl = '',
   dailyLimit = 1,
@@ -455,6 +455,9 @@ async function runContentAutoApply({
     responseButtonTarget: responseButton.getAttribute('target'),
     navigateUrl,
     bodyCursor: globalThis.document.body.style.cursor || '',
+    autoApplyCursorCount: bodyNode.children.filter((child) => child.id === 'hh-job-assistant-auto-apply-cursor').length,
+    responseButtonHighlighted: responseButton.attrs['data-hh-job-assistant-auto-apply-highlight'] === 'true',
+    submitButtonHighlighted: submitButton.attrs['data-hh-job-assistant-auto-apply-highlight'] === 'true',
     dialogOpen: Boolean(dialog)
   };
 }
@@ -511,6 +514,8 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
       text: 'Откликнуться',
       click() {
         submitClicks += 1;
+        globalThis.document.body.innerText = 'Вы откликнулись';
+        globalThis.document.body.textContent = 'Вы откликнулись';
       }
     });
 
@@ -671,6 +676,18 @@ test('auto apply requires hh authorization before scanning vacancies', async () 
   assert.equal(result.states.at(-1).state, 'error');
 });
 
+test('auto apply shows action cursor while clicking response and submit buttons', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию',
+    hasTextarea: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.ok(result.autoApplyCursorCount >= 1);
+  assert.equal(result.submitButtonHighlighted, true);
+});
+
 test('dry run scans vacancies without clicking response buttons', async () => {
   const result = await runContentAutoApply({
     messageType: 'START_DRY_RUN',
@@ -814,7 +831,7 @@ test('auto apply counts already applied open response form without submit button
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
   assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).currentAction, '');
+  assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
 });
 
 test('auto apply closes blocked response dialog and continues to next hh page', async () => {
@@ -965,6 +982,54 @@ test('auto apply fills required question on open response form', async () => {
   assert.ok(result.states.some((state) => state.currentAction === 'ИИ: отвечаю на вопросы работодателя'));
   assert.ok(result.states.some((state) => state.currentAction === 'Заполняю вопросы работодателя'));
   assert.equal(result.bodyCursor, '');
+});
+
+test('auto apply fills choice and text questions on open response form before submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Если ответ да, опишите проект',
+    questionControls: [
+      { type: 'checkbox', name: 'task_302888680', label: 'да', value: '302888681' },
+      { type: 'checkbox', name: 'task_302888680', label: 'нет', value: '302888682' }
+    ],
+    groqResponse: {
+      ok: true,
+      text: 'Choice group 1: нет\nText question 1: Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['нет']);
+  assert.equal(
+    result.textareaValue,
+    'Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.'
+  );
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply does not count open response form submit without hh confirmation', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    groqResponse: { ok: true, text: '250 000 руб. на руки' },
+    submitBodyTextAfterClick: '',
+    keepDialogOpenAfterSubmit: true
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_confirmed');
+  assert.equal(result.localStore.autoApplyPendingSubmit, null);
 });
 
 test('auto apply fills required contenteditable cover letter before submit', async () => {
@@ -1185,6 +1250,30 @@ test('auto apply fills messenger question when answer contains contact handle', 
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
+test('auto apply does not require contact for messenger experience question', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nРасскажите про опыт разработки высоконагруженных мессенджеров.',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Расскажите про опыт разработки высоконагруженных мессенджеров.',
+    groqResponse: {
+      ok: true,
+      text: 'Text question 1: Руководил backend-командой, проектировал микросервисы и интеграции для высоконагруженных коммуникационных продуктов.'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(
+    result.textareaValue,
+    'Руководил backend-командой, проектировал микросервисы и интеграции для высоконагруженных коммуникационных продуктов.'
+  );
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
 test('auto apply fills salary and messenger fields from settings when Groq returns experience text', async () => {
   const fullFormText = [
     'Ответьте на вопросы',
@@ -1215,7 +1304,7 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
     questionFieldCount: 2,
     expectedSalary: '600000',
     initialLocalStore: {
-      resumeText: 'Tech Lead\nКонтакт: t.me/vadim_software_engineer'
+      resumeParsedText: 'Tech Lead\nКонтакт: t.me/vadim_software_engineer'
     },
     groqResponse: {
       ok: true,
@@ -1230,8 +1319,7 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
   assert.equal(result.response.applied, 1);
   assert.equal(result.submitClicks, 1);
   assert.deepEqual(result.textareaValues, ['600000', 't.me/vadim_software_engineer']);
-  assert.match(result.groqRequests.at(-1).extraText, /Text question 1: Укажите, пожалуйста, свои зарплатные ожидания/);
-  assert.match(result.groqRequests.at(-1).extraText, /Text question 2: Укажите, пожалуйста, ник для связи/);
+  assert.equal(result.groqRequests.length, 0);
 });
 
 test('auto apply fills mixed checkbox radio and open employer questions', async () => {
@@ -1307,6 +1395,8 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
   assert.match(result.groqRequests.at(-1).extraText, /управление продуктом \/ внутренним продуктом/);
   assert.match(result.groqRequests.at(-1).extraText, /Choice group 4/);
   assert.match(result.groqRequests.at(-1).extraText, /Text question 1/);
+  assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Visible HH response form text/);
+  assert.ok(result.groqRequests.at(-1).extraText.length <= 2200);
 });
 
 test('auto apply retries Groq when choice answer does not match options', async () => {
@@ -1329,7 +1419,10 @@ test('auto apply retries Groq when choice answer does not match options', async 
   assert.equal(result.submitClicks, 1);
   assert.deepEqual(result.checkedLabels, ['Да']);
   assert.equal(result.groqRequests.length, 2);
+  assert.equal(result.groqRequests.at(-1).task, 'choice_retry');
+  assert.equal(result.groqRequests.at(-1).vacancyText, '');
   assert.match(result.groqRequests.at(-1).extraText, /Previous answer did not match any available HH choice labels/);
+  assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Вакансия/);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
@@ -1432,6 +1525,24 @@ test('auto apply limit targets successful applications, not skipped cards', asyn
   assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
 });
 
+test('auto apply unconfirmed submit does not consume successful application quota', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию',
+    hasTextarea: false,
+    dailyLimit: 1,
+    keepDialogOpenAfterSubmit: true,
+    submitBodyTextAfterClick: '',
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.navigated, true);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_confirmed');
+  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
+});
+
 test('auto apply processed cap stops after skipped card for bounded live smoke', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию',
@@ -1449,7 +1560,7 @@ test('auto apply processed cap stops after skipped card for bounded live smoke',
   assert.equal(result.response.navigated, undefined);
   assert.equal(result.navigateUrl, '');
   assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).currentAction, '');
+  assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
 });
 
 test('auto apply processed cap completes after employer-question skip without stale action', async () => {
@@ -1469,7 +1580,7 @@ test('auto apply processed cap completes after employer-question skip without st
   assert.equal(result.response.skipped, 1);
   assert.equal(result.appended.at(-1).status, 'skipped_test_missing_groq_key');
   assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).currentAction, '');
+  assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
 });
 
 test('auto apply processed cap stops after skipped navigation response form', async () => {
@@ -1664,7 +1775,7 @@ test('auto apply clicks hh list response button even when it has a response link
   assert.equal(result.navigateUrl, '');
   assert.equal(result.localStore.autoApplyQueue.active, false);
   assert.equal(result.appended.at(-1).status, 'applied');
-  assert.ok(result.states.some((state) => /Открываю форму отклика: Java Developer/.test(state.currentAction || '')));
+  assert.ok(result.states.some((state) => /Откликаюсь на: Java Developer/.test(state.currentAction || '')));
   assert.ok(!result.states.some((state) => /Открываю страницу вопросов HH/.test(state.currentAction || '')));
 });
 
@@ -2502,6 +2613,8 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
     text: 'Откликнуться',
     click() {
       submitClicks += 1;
+      globalThis.document.body.innerText = 'Вы откликнулись';
+      globalThis.document.body.textContent = 'Вы откликнулись';
       dialog = null;
     }
   });
@@ -2549,6 +2662,9 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
   globalThis.document = {
     title: 'HH vacancy detail page',
     body: new FakeElement({ text: 'CTO / Chief Technology Officer Откликнуться' }),
+    getElementById() {
+      return null;
+    },
     querySelectorAll(selector) {
       if (selector.includes(',')) {
         return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));

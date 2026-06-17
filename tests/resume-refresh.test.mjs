@@ -166,7 +166,13 @@ async function runBackgroundResumeRefresh({
       }
     },
     scripting: {
-      async executeScript({ func, args = [] }) {
+      async executeScript({ files, func, args = [] }) {
+        if (files) {
+          assert.deepEqual(files, ['src/action-overlay.js']);
+          const source = await readFile(new URL('src/action-overlay.js', root), 'utf8');
+          await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${crypto.randomUUID()}`);
+          return [{ result: undefined }];
+        }
         return [{ result: await func(...args) }];
       }
     }

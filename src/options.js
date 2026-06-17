@@ -19,9 +19,14 @@ const fields = {
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
+  experimentalFeaturesEnabled: document.getElementById('experimentalFeaturesEnabled'),
   chatUnreadOnly: document.getElementById('chatUnreadOnly'),
   chatReplyMode: document.getElementById('chatReplyMode'),
   chatLimit: document.getElementById('chatLimit')
+};
+
+const sections = {
+  chatAssistantSettings: document.getElementById('chatAssistantSettings')
 };
 
 const statusNode = document.getElementById('status');
@@ -35,6 +40,10 @@ function localizeError(error, fallback) {
 function setStatus(text, isError = false) {
   statusNode.textContent = text;
   statusNode.style.color = isError ? '#b91c1c' : '#475569';
+}
+
+function syncExperimentalSections() {
+  sections.chatAssistantSettings.hidden = !fields.experimentalFeaturesEnabled.checked;
 }
 
 async function loadOptions() {
@@ -54,6 +63,8 @@ async function loadOptions() {
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
+  fields.experimentalFeaturesEnabled.checked = values.experimentalFeaturesEnabled === true;
+  syncExperimentalSections();
   fields.chatUnreadOnly.checked = values.chatUnreadOnly !== false;
   fields.chatReplyMode.value = values.chatReplyMode === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode;
   fields.chatLimit.value = values.chatLimit ?? DEFAULTS.chatLimit;
@@ -85,6 +96,7 @@ async function saveOptions() {
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
+    experimentalFeaturesEnabled: fields.experimentalFeaturesEnabled.checked,
     chatUnreadOnly: fields.chatUnreadOnly.checked,
     chatReplyMode: fields.chatReplyMode.value === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
     chatLimit: Math.max(1, Math.min(Number(fields.chatLimit.value) || DEFAULTS.chatLimit, 100))
@@ -97,6 +109,10 @@ async function saveOptions() {
   if ((current.resumeUrl || '') !== patch.resumeUrl) {
     patch.resumeParsedText = '';
     patch.resumeParsedAt = '';
+    patch.resumeGroqBriefText = '';
+    patch.resumeGroqBriefSourceHash = '';
+    patch.resumeGroqBriefBuiltAt = '';
+    patch.resumeGroqBriefVersion = '';
   }
 
   if (fields.groqApiKey.dataset.masked !== 'true' && (!savedGroqKeyMasked || groqKeyDirty)) {
@@ -128,6 +144,8 @@ fields.groqApiKey.addEventListener('focus', () => {
 fields.groqApiKey.addEventListener('input', () => {
   groqKeyDirty = true;
 });
+
+fields.experimentalFeaturesEnabled.addEventListener('change', syncExperimentalSections);
 
 document.getElementById('save').addEventListener('click', () => {
   saveOptions().catch((error) => setStatus(localizeError(error), true));

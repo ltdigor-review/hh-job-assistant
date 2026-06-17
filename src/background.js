@@ -9,6 +9,13 @@ const OLD_DEFAULT_DELAY_MIN_MS = 8000;
 const OLD_DEFAULT_DELAY_MAX_MS = 15000;
 const GROQ_REQUEST_TIMEOUT_MS = 35000;
 const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
+const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
+const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
+const RESUME_GROQ_RETRY_BRIEF_MAX_CHARS = 800;
+const VACANCY_GROQ_MAX_CHARS = 2200;
+const EXTRA_GROQ_MAX_CHARS = 2200;
+const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
+const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -29,6 +36,107 @@ function getGroqRequestTimeoutMs() {
     return testOverride;
   }
   return GROQ_REQUEST_TIMEOUT_MS;
+}
+
+function cleanPlainText(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function hashText(value) {
+  let hash = 0x811c9dc5;
+  const text = String(value || '');
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function uniqueLines(text) {
+  const seen = new Set();
+  return cleanPlainText(text)
+    .split('\n')
+    .map((line) => cleanPlainText(line))
+    .filter((line) => {
+      if (!line || seen.has(line)) return false;
+      seen.add(line);
+      return true;
+    });
+}
+
+function joinCappedLines(lines, maxChars) {
+  const output = [];
+  let length = 0;
+  for (const line of lines) {
+    const nextLength = length + line.length + (output.length > 0 ? 1 : 0);
+    if (nextLength > maxChars) break;
+    output.push(line);
+    length = nextLength;
+  }
+  return output.join('\n').slice(0, maxChars);
+}
+
+function compactVacancyText(value, maxChars = VACANCY_GROQ_MAX_CHARS) {
+  const noisePattern = /^(?:откликнуться|показать контакты|в избранное|скрыть|пожаловаться|поделиться|назад|далее|похожие вакансии|вакансии компании|hh\.ru|headhunter)$/i;
+  const lines = uniqueLines(value)
+    .filter((line) => line.length <= 700)
+    .filter((line) => !noisePattern.test(line))
+    .filter((line) => !/^(?:откликнуться|показать|скрыть)\b/i.test(line));
+  return joinCappedLines(lines, maxChars);
+}
+
+function compactExtraText(value, maxChars = EXTRA_GROQ_MAX_CHARS) {
+  return joinCappedLines(uniqueLines(value).filter((line) => line.length <= 700), maxChars);
+}
+
+function buildResumeGroqBrief(sourceText, maxChars = RESUME_GROQ_BRIEF_MAX_CHARS) {
+  const lines = uniqueLines(sourceText).filter((line) => line.length >= 3 && line.length <= 260);
+  const selected = [];
+  const used = new Set();
+  const add = (line) => {
+    const normalized = cleanPlainText(line);
+    if (!normalized || used.has(normalized)) return;
+    selected.push(normalized);
+    used.add(normalized);
+  };
+  const addMatching = (pattern, limit) => {
+    let added = 0;
+    for (const line of lines) {
+      if (added >= limit) break;
+      if (pattern.test(line)) {
+        add(line);
+        added += 1;
+      }
+    }
+  };
+
+  lines.slice(0, 5).forEach(add);
+  addMatching(/(?:java|spring|sql|postgres|kafka|redis|docker|kubernetes|микросервис|microservice|backend|frontend|react|node|python|groq|llm|ai|ml|rag|архитект|architecture)/i, 12);
+  addMatching(/(?:опыт|experience|проект|project|разработ|develop|руковод|lead|team|команд|менедж|product|аналит|систем|интеграц|автоматизац)/i, 12);
+  addMatching(/(?:t\.me\/|@[a-z0-9_]{4,}|wa\.me\/|telegram|телеграм|whatsapp|email|почта|телефон|contact|контакт)/i, 4);
+
+  let brief = joinCappedLines(selected, maxChars);
+  if (brief.length < Math.min(900, maxChars)) {
+    for (const line of lines) {
+      add(line);
+      brief = joinCappedLines(selected, maxChars);
+      if (brief.length >= Math.min(900, maxChars)) break;
+    }
+  }
+  return brief || cleanPlainText(sourceText).slice(0, maxChars);
+}
+
+function parseRetryAfterMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const retryAt = Date.parse(raw);
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : 0;
 }
 
 async function storageGet(keys) {
@@ -155,7 +263,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
       {
         role: 'system',
         content:
-          'You help a job applicant answer hh.ru employer chat questions. Answer in concise Russian. Use only the resume, vacancy, chat context, and expected salary. Do not invent experience, contacts, availability, or certainty when information is missing. Return only the final reply text.'
+          'Answer hh.ru employer chat in concise Russian. Use only resume brief, vacancy, chat, salary. Do not invent facts. Return final reply only.'
       },
       {
         role: 'user',
@@ -176,12 +284,32 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
     ];
   }
 
+  if (task === 'choice_retry') {
+    return [
+      {
+        role: 'system',
+        content:
+          'Pick exact hh.ru choice option labels. Use only listed options and resume brief. Return lines: "Choice group N: <exact label>".'
+      },
+      {
+        role: 'user',
+        content: [
+          'Резюме кратко:',
+          resumeText || '(резюме не указано)',
+          '',
+          'Варианты и предыдущий ответ:',
+          extraText || '(нет)'
+        ].join('\n')
+      }
+    ];
+  }
+
   if (task === 'test_assist') {
     return [
       {
         role: 'system',
         content:
-          'You help a job applicant answer hh.ru employer screening questions. Base answers on the resume, vacancy, numbered question text, exact answer options, and expected salary. For each "Choice group N", return a line "Choice group N: <exact option label(s)>" using only option labels from that group. For radio groups choose one best option. For checkbox groups choose all labels that honestly fit the resume. For each "Text question N", return a line "Text question N: <Russian draft answer>" with enough detail, not ultra-short fragments. Avoid first-person pronouns: write "делал", "работал", "использовал" instead of "я делал", "я работал", "я использовал". Do not invent experience or claim certainty when information is missing. Return only the numbered answers.'
+          'Answer hh.ru screening questions in Russian. Use resume brief, vacancy, salary, exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Avoid first-person pronouns. Do not invent facts.'
       },
       {
         role: 'user',
@@ -206,7 +334,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
     {
       role: 'system',
       content:
-        'Write a very short, honest cover letter in Russian for hh.ru: 3-4 sentences total. Do not invent experience. Do not include placeholders, bracketed template text, labels, greetings with unknown names, or instructions. Return only the final cover letter text.'
+        'Write a short honest hh.ru cover letter in Russian, 3-4 sentences. No invented facts, placeholders, labels, or unknown names. Return final text only.'
     },
     {
       role: 'user',
@@ -368,7 +496,11 @@ async function getResumeContext() {
     const text = String(result.text || '').slice(0, 12000);
     await storageSet({
       resumeParsedText: text,
-      resumeParsedAt: nowIso()
+      resumeParsedAt: nowIso(),
+      resumeGroqBriefText: '',
+      resumeGroqBriefSourceHash: '',
+      resumeGroqBriefBuiltAt: '',
+      resumeGroqBriefVersion: ''
     });
     return text;
   } finally {
@@ -378,25 +510,108 @@ async function getResumeContext() {
   }
 }
 
+async function getResumeGroqContext(sourceText, maxChars = RESUME_GROQ_BRIEF_MAX_CHARS) {
+  const source = String(sourceText || '').slice(0, 12000);
+  const sourceHash = hashText(source);
+  const {
+    resumeGroqBriefText = '',
+    resumeGroqBriefSourceHash = '',
+    resumeGroqBriefVersion = '',
+    resumeGroqBriefBuiltAt = ''
+  } = await storageGet(['resumeGroqBriefText', 'resumeGroqBriefSourceHash', 'resumeGroqBriefVersion', 'resumeGroqBriefBuiltAt']);
+
+  if (
+    resumeGroqBriefText &&
+    resumeGroqBriefSourceHash === sourceHash &&
+    resumeGroqBriefVersion === RESUME_GROQ_BRIEF_VERSION
+  ) {
+    return {
+      text: String(resumeGroqBriefText).slice(0, maxChars),
+      sourceHash,
+      sourceLength: source.length,
+      briefLength: String(resumeGroqBriefText).length,
+      version: resumeGroqBriefVersion,
+      builtAt: resumeGroqBriefBuiltAt,
+      cached: true
+    };
+  }
+
+  const brief = buildResumeGroqBrief(source, RESUME_GROQ_BRIEF_MAX_CHARS);
+  const builtAt = nowIso();
+  await storageSet({
+    resumeGroqBriefText: brief,
+    resumeGroqBriefSourceHash: sourceHash,
+    resumeGroqBriefBuiltAt: builtAt,
+    resumeGroqBriefVersion: RESUME_GROQ_BRIEF_VERSION
+  });
+  return {
+    text: brief.slice(0, maxChars),
+    sourceHash,
+    sourceLength: source.length,
+    briefLength: brief.length,
+    version: RESUME_GROQ_BRIEF_VERSION,
+    builtAt,
+    cached: false
+  };
+}
+
+function getMaxTokensForTask(task) {
+  if (task === 'test_assist') return 700;
+  if (task === 'choice_retry') return 300;
+  return 250;
+}
+
+function normalizeUsage(usage = {}) {
+  return {
+    promptTokens: Number.isFinite(Number(usage.prompt_tokens)) ? Number(usage.prompt_tokens) : null,
+    completionTokens: Number.isFinite(Number(usage.completion_tokens)) ? Number(usage.completion_tokens) : null,
+    totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null
+  };
+}
+
 async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '' }) {
   const {
     groqApiKey,
     groqModel = DEFAULTS.groqModel,
     expectedSalary = '',
-    coverPrompt = DEFAULTS.coverPrompt
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'coverPrompt']);
+    coverPrompt = DEFAULTS.coverPrompt,
+    groqCooldownUntil = ''
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'coverPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
   }
 
-  const resumeText = await getResumeContext();
+  const cooldownUntilMs = Date.parse(groqCooldownUntil || 0);
+  if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now()) {
+    await appendAgentLog('groq_request_skipped', {
+      task,
+      reason: 'cooldown',
+      cooldownUntil: groqCooldownUntil
+    });
+    throw new Error(`Groq временно ограничил запросы. Пауза до ${groqCooldownUntil}.`);
+  }
+
+  const resumeSourceText = await getResumeContext();
+  const resumeContext = await getResumeGroqContext(
+    resumeSourceText,
+    task === 'choice_retry' ? RESUME_GROQ_RETRY_BRIEF_MAX_CHARS : RESUME_GROQ_BRIEF_MAX_CHARS
+  );
+  const payloadParts = {
+    resumeText: resumeContext.text,
+    expectedSalary: String(expectedSalary).slice(0, 1000),
+    coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
+    vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
+    extraText: compactExtraText(extraText)
+  };
   await appendAgentLog('groq_request_start', {
     task,
     model: groqModel || DEFAULTS.groqModel,
     vacancyTextLength: String(vacancyText).length,
     extraTextLength: String(extraText).length,
-    resumeTextLength: String(resumeText).length
+    resumeSourceLength: String(resumeSourceText).length,
+    resumeBriefLength: payloadParts.resumeText.length,
+    resumeBriefVersion: resumeContext.version
   });
 
   const timeoutMs = getGroqRequestTimeoutMs();
@@ -406,14 +621,10 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     model: groqModel || DEFAULTS.groqModel,
     messages: buildGroqMessages({
       task,
-      resumeText: String(resumeText).slice(0, 12000),
-      expectedSalary: String(expectedSalary).slice(0, 1000),
-      coverPrompt: String(coverPrompt).slice(0, 4000),
-      vacancyText: String(vacancyText).slice(0, 12000),
-      extraText: String(extraText).slice(0, 8000)
+      ...payloadParts
     }),
     temperature: task === 'test_assist' ? 0.2 : 0.35,
-    max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
+    max_tokens: getMaxTokensForTask(task)
   };
   await appendAgentLog('groq_request_payload', {
     task,
@@ -424,7 +635,23 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       contentLength: String(message.content || '').length
     })),
     temperature: requestBody.temperature,
-    maxTokens: requestBody.max_tokens
+    maxTokens: requestBody.max_tokens,
+    componentLengths: {
+      resumeSource: resumeContext.sourceLength,
+      resumeBrief: payloadParts.resumeText.length,
+      expectedSalary: payloadParts.expectedSalary.length,
+      coverPrompt: payloadParts.coverPrompt.length,
+      vacancy: payloadParts.vacancyText.length,
+      extra: payloadParts.extraText.length
+    },
+    componentHashes: {
+      resumeSource: resumeContext.sourceHash,
+      resumeBrief: hashText(payloadParts.resumeText),
+      vacancy: hashText(payloadParts.vacancyText),
+      extra: hashText(payloadParts.extraText)
+    },
+    resumeBriefVersion: resumeContext.version,
+    resumeBriefCached: resumeContext.cached
   });
   let response;
   try {
@@ -449,6 +676,12 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
+    if (response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+      const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
+      await storageSet({ groqCooldownUntil: cooldownUntil });
+      await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
+    }
     await appendAgentLog('groq_request_error', {
       task,
       status: response.status,
@@ -457,7 +690,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     await appendAgentLog('groq_error_payload', {
       task,
       status: response.status,
-      responseText: text
+      responseText: text.slice(0, 500)
     });
     throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
   }
@@ -472,9 +705,10 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     task,
     responseLength: content.length,
     choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-    model: data?.model || ''
+    model: data?.model || '',
+    usage: normalizeUsage(data?.usage)
   });
-  await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
+  await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage: normalizeUsage(data?.usage) });
   return content;
 }
 
@@ -589,6 +823,12 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
   const PANEL_ID = 'hh-job-assistant-resume-refresh-panel';
   const CURSOR_ID = 'hh-job-assistant-resume-refresh-cursor';
   const HIGHLIGHT_ATTR = 'data-hh-job-assistant-highlight';
+  const overlay = new globalThis.HHJobAssistantActionOverlay({
+    panelId: PANEL_ID,
+    cursorId: CURSOR_ID,
+    highlightAttr: HIGHLIGHT_ATTR,
+    defaultText: 'Обновление резюме'
+  });
 
   const visible = (node) => {
     if (!node) return false;
@@ -614,86 +854,8 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     return new Promise((resolve) => setTimeout(resolve, ms));
   };
 
-  const ensureOverlay = (text, state = 'running') => {
-    let panel = document.getElementById(PANEL_ID);
-    if (!panel) {
-      panel = document.createElement('aside');
-      panel.id = PANEL_ID;
-      panel.style.cssText = [
-        'position:fixed',
-        'right:16px',
-        'top:16px',
-        'z-index:2147483647',
-        'width:min(360px,calc(100vw - 32px))',
-        'background:#fff',
-        'border:1px solid #b6c2d1',
-        'box-shadow:0 16px 48px rgba(0,0,0,.22)',
-        'border-radius:8px',
-        'font:14px/1.45 Arial,sans-serif',
-        'color:#1f2937',
-        'padding:12px'
-      ].join(';');
-
-      const title = document.createElement('strong');
-      title.textContent = 'HH Job Assistant';
-      title.style.cssText = 'display:block;margin-bottom:6px';
-
-      const body = document.createElement('div');
-      body.id = `${PANEL_ID}-body`;
-      body.style.cssText = 'white-space:pre-wrap';
-
-      panel.append(title, body);
-      document.body.append(panel);
-    }
-
-    const body = document.getElementById(`${PANEL_ID}-body`);
-    if (body) {
-      body.textContent = text || 'Обновление резюме';
-      body.style.color = state === 'error' ? '#b91c1c' : '#1f2937';
-    }
-    panel.style.borderColor = state === 'error' ? '#f2a1a1' : state === 'complete' ? '#86efac' : '#b6c2d1';
-  };
-
-  const clearHighlights = () => {
-    for (const node of [...document.querySelectorAll(`[${HIGHLIGHT_ATTR}]`)]) {
-      node.style.outline = '';
-      node.style.boxShadow = '';
-      node.removeAttribute?.(HIGHLIGHT_ATTR);
-    }
-  };
-
-  const showCursorFor = (node) => {
-    let cursor = document.getElementById(CURSOR_ID);
-    if (!cursor) {
-      cursor = document.createElement('div');
-      cursor.id = CURSOR_ID;
-      cursor.style.cssText = [
-        'position:fixed',
-        'z-index:2147483647',
-        'width:14px',
-        'height:14px',
-        'border:2px solid #2563eb',
-        'border-radius:999px',
-        'background:#fff',
-        'box-shadow:0 4px 14px rgba(37,99,235,.35)',
-        'pointer-events:none',
-        'transition:left .15s ease,top .15s ease'
-      ].join(';');
-      document.body.append(cursor);
-    }
-
-    const rect = node.getBoundingClientRect();
-    cursor.style.left = `${Math.max(8, rect.left + Math.min(rect.width - 8, 16))}px`;
-    cursor.style.top = `${Math.max(8, rect.top + Math.min(rect.height - 8, 12))}px`;
-  };
-
   const highlight = (node) => {
-    clearHighlights();
-    node.setAttribute?.(HIGHLIGHT_ATTR, 'true');
-    node.style.outline = '3px solid #2563eb';
-    node.style.boxShadow = '0 0 0 6px rgba(37,99,235,.18)';
-    node.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-    showCursorFor(node);
+    overlay.highlight(node);
   };
 
   const findByText = (root, selectors, patterns, rejectPatterns = []) => {
@@ -714,28 +876,28 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
 
   return (async () => {
     if (kind === 'status') {
-      ensureOverlay(actionText, status);
+      overlay.setStatus(actionText, status);
       return { ok: true, title: document.title, action: 'status' };
     }
 
     if (kind === 'complete') {
-      clearHighlights();
-      ensureOverlay(actionText || 'Готово', 'complete');
+      overlay.clearHighlights();
+      overlay.setStatus(actionText || 'Готово', 'complete');
       return { ok: true, title: document.title, action: 'complete' };
     }
 
     if (kind === 'error') {
-      ensureOverlay(actionText || 'Ошибка', 'error');
+      overlay.setStatus(actionText || 'Ошибка', 'error');
       return { ok: true, title: document.title, action: 'error' };
     }
 
     if (isUnsafePage) {
-      ensureOverlay('Обнаружена страница входа или captcha', 'error');
+      overlay.setStatus('Обнаружена страница входа или captcha', 'error');
       return { ok: false, error: 'Обнаружена страница входа или captcha' };
     }
 
     if (kind === 'click_edit') {
-      ensureOverlay(actionText || 'Нажимаю Редактировать');
+      overlay.setStatus(actionText || 'Нажимаю Редактировать');
       const button = findControl([/редактировать/i, /изменить/i], [/видимость/i, /настро/i]);
       if (!button) return { ok: false, error: 'Кнопка редактирования не найдена' };
       highlight(button);
@@ -746,7 +908,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     }
 
     if (kind === 'click_save') {
-      ensureOverlay(actionText || 'Сохраняю без изменений');
+      overlay.setStatus(actionText || 'Сохраняю без изменений');
       const button = findControl([/сохранить/i, /^готово$/i, /save/i], [/отмена/i, /cancel/i]);
       if (!button) return { ok: false, error: 'Кнопка сохранения не найдена' };
       highlight(button);
@@ -757,7 +919,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     }
 
     if (kind === 'find_raise' || kind === 'click_raise') {
-      ensureOverlay(actionText || 'Проверяю возможность поднятия');
+      overlay.setStatus(actionText || 'Проверяю возможность поднятия');
       const button = findControl(
         [
           /^обновить$/i,
@@ -793,6 +955,10 @@ async function getActiveHhTab() {
 }
 
 async function executeResumeRefreshPageAction(tabId, kind, actionText = '', status = 'running') {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['src/action-overlay.js']
+  });
   const [execution] = await chrome.scripting.executeScript({
     target: { tabId },
     func: resumeRefreshPageActionScript,

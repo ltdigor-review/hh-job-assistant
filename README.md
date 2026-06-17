@@ -34,7 +34,7 @@ Chrome-расширение для hh.ru: помогает запускать о
 
 Основные поля:
 
-- Модель Groq: по умолчанию `llama-3.3-70b-versatile`. Доступны `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `openai/gpt-oss-120b`, `openai/gpt-oss-20b`.
+- Модель Groq: по умолчанию `openai/gpt-oss-120b`. Доступны `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `openai/gpt-oss-120b`, `openai/gpt-oss-20b`.
 - Ссылка на резюме hh.ru: URL вида `https://hh.ru/resume/...`.
 - Кэш резюме, часов: по умолчанию `1`, допустимый диапазон от `0.1` до `168`.
 - Ожидаемая зарплата: используется как честное запасное значение для вопросов о зарплате.

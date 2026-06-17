@@ -26,6 +26,7 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
 let hasGroqKey = false;
+let experimentalFeaturesEnabled = false;
 let copyToastTimeout = null;
 
 async function copyText(text) {
@@ -68,7 +69,8 @@ function renderView() {
   const view = derivePopupView({
     runState: lastRunState,
     tabState: lastTabState,
-    hasGroqKey
+    hasGroqKey,
+    experimentalFeaturesEnabled
   });
 
   nodes.appStatus.className = `panel status-panel ${view.status.tone}`;
@@ -84,6 +86,7 @@ function renderView() {
   nodes.autoApply.disabled = view.buttons.autoApplyDisabled;
   nodes.stop.disabled = view.buttons.stopDisabled;
   nodes.refreshResumes.disabled = view.buttons.refreshResumesDisabled;
+  nodes.chatAssist.hidden = !view.buttons.chatAssistVisible;
   nodes.chatAssist.disabled = view.buttons.chatAssistDisabled;
   nodes.autoApply.title = view.buttons.autoApplyTitle;
   nodes.stop.title = view.buttons.stopTitle;
@@ -274,10 +277,11 @@ async function readRuntimeState() {
 
 async function refreshPopup() {
   const [settings, runtimeError] = await Promise.all([
-    chrome.storage.local.get(['groqApiKey']),
+    chrome.storage.local.get(['groqApiKey', 'experimentalFeaturesEnabled']),
     readRuntimeState()
   ]);
   hasGroqKey = Boolean(settings.groqApiKey);
+  experimentalFeaturesEnabled = settings.experimentalFeaturesEnabled === true;
   lastTabState = runtimeError || await readTabState();
 
   const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });

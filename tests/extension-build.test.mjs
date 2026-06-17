@@ -41,6 +41,7 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.deepEqual(manifest.content_scripts[0].js, [
     'src/agent-log.js',
     'src/error-text.js',
+    'src/action-overlay.js',
     'src/defaults.js',
     'src/content-text.js',
     'src/content-dom.js',
@@ -285,7 +286,7 @@ test('background initializes defaults and registers required listeners', async (
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}`);
 
-  assert.equal(localData.groqModel, 'llama-3.3-70b-versatile');
+  assert.equal(localData.groqModel, 'openai/gpt-oss-120b');
   assert.equal(localData.expectedSalary, '');
   assert.equal(localData.resumeUrl, '');
   assert.equal(localData.resumeCacheTtlHours, 1);
@@ -379,7 +380,10 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     return {
       ok: true,
       async json() {
-        return { choices: [{ message: { content: 'Ответ' } }] };
+        return {
+          choices: [{ message: { content: 'Ответ' } }],
+          usage: { prompt_tokens: 1234, completion_tokens: 63, total_tokens: 1297 }
+        };
       }
     };
   };
@@ -436,6 +440,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
 
   assert.equal(response.ok, true);
   assert.equal(requestBody.model, 'test-model');
+  assert.equal(requestBody.max_tokens, 700);
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer, Spring Boot/);
   assert.match(userContent, /250 000 руб\. на руки/);
@@ -443,8 +448,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /Какую зарплату ожидаете\?/);
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
   assert.match(systemContent, /Avoid first-person pronouns/);
-  assert.match(systemContent, /делал/);
-  assert.match(systemContent, /not ultra-short fragments/);
+  assert.match(systemContent, /exact option label/);
+  assert.match(systemContent, /Do not invent facts/);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
@@ -453,9 +458,17 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     role: message.role,
     contentLength: message.content.length
   })));
+  assert.equal(groqPayloadLog.details.componentLengths.resumeBrief, 'Java developer, Spring Boot'.length);
+  assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: Java developer'.length);
+  assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test|Java developer|250 000|Вакансия|зарплату/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
   assert.equal(groqResponseLog.details.choiceCount, 1);
+  assert.deepEqual(groqResponseLog.details.usage, {
+    promptTokens: 1234,
+    completionTokens: 63,
+    totalTokens: 1297
+  });
   assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /Ответ|rawResponse|content/);
 });
 
@@ -530,7 +543,7 @@ test('chat reply prompt includes resume, vacancy, chat question, and expected sa
 
   assert.equal(response.ok, true);
   assert.equal(requestBody.model, 'test-model');
-  assert.equal(requestBody.max_tokens, 800);
+  assert.equal(requestBody.max_tokens, 250);
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer, Spring Boot/);
   assert.match(userContent, /250 000 руб\. на руки/);
@@ -902,6 +915,9 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer parsed from hh resume/);
   assert.equal(localData.resumeParsedText, 'Java developer parsed from hh resume');
+  assert.equal(localData.resumeGroqBriefText, 'Java developer parsed from hh resume');
+  assert.equal(localData.resumeGroqBriefVersion, 'resume-brief-v1');
+  assert.ok(localData.resumeGroqBriefSourceHash);
   assert.equal(removedTabId, 41);
 });
 
@@ -1007,9 +1023,269 @@ test('Groq resume cache TTL is configurable in hours', async () => {
   assert.equal(response.ok, true);
   assert.equal(createdTabs, 1);
   assert.equal(localData.resumeParsedText, 'fresh resume text from hh');
+  assert.equal(localData.resumeGroqBriefText, 'fresh resume text from hh');
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /fresh resume text from hh/);
   assert.doesNotMatch(userContent, /stale cached resume text/);
+});
+
+test('Groq prompt rebuilds stale resume brief and keeps original parsed resume unchanged', async () => {
+  let listener = null;
+  let requestBody = null;
+  const sourceResume = [
+    'Java Team Lead',
+    'Spring Boot, PostgreSQL, Kafka',
+    'Опыт руководства backend-командой',
+    'Лишняя длинная секция '.repeat(200)
+  ].join('\n');
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeUrl: 'https://hh.ru/resume/abc123',
+    resumeParsedText: sourceResume,
+    resumeParsedAt: new Date().toISOString(),
+    resumeCacheTtlHours: 1,
+    resumeGroqBriefText: 'stale cached brief that should be replaced',
+    resumeGroqBriefSourceHash: '',
+    resumeGroqBriefBuiltAt: '',
+    resumeGroqBriefVersion: 'resume-brief-v1',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt'
+  };
+
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: 'Письмо' } }] };
+      }
+    };
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_COVER_LETTER',
+        task: 'cover_letter',
+        vacancyText: 'Вакансия: Java developer'
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(localData.resumeParsedText, sourceResume);
+  assert.equal(localData.resumeGroqBriefVersion, 'resume-brief-v1');
+  assert.ok(localData.resumeGroqBriefText.length <= 1800);
+  const userContent = requestBody.messages.find((message) => message.role === 'user').content;
+  assert.match(userContent, /Java Team Lead/);
+  assert.doesNotMatch(userContent, /stale cached brief/);
+  assert.doesNotMatch(userContent, /Лишняя длинная секция .*Лишняя длинная секция/s);
+});
+
+test('Groq prompt caps large payload components', async () => {
+  let listener = null;
+  let requestBody = null;
+  const longResume = [
+    'Java Team Lead',
+    'Spring Boot PostgreSQL Kafka Kubernetes',
+    ...Array.from({ length: 300 }, (_, index) => `Проект ${index}: разработка backend систем и автоматизация процессов`)
+  ].join('\n');
+  const longVacancy = Array.from({ length: 200 }, (_, index) => `Вакансия строка ${index}: Java Spring SQL Kafka`).join('\n');
+  const longExtra = Array.from({ length: 200 }, (_, index) => `Text question ${index}: Расскажите про опыт`).join('\n');
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: longResume,
+    expectedSalary: '250000',
+    coverPrompt: 'cover prompt'
+  };
+
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    requestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: 'Ответ' } }] };
+      }
+    };
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_COVER_LETTER',
+        task: 'test_assist',
+        vacancyText: longVacancy,
+        extraText: longExtra
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(requestBody.max_tokens, 700);
+  const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
+  assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 1800);
+  assert.ok(groqPayloadLog.details.componentLengths.vacancy <= 2200);
+  assert.ok(groqPayloadLog.details.componentLengths.extra <= 2200);
+  assert.ok(requestBody.messages.reduce((sum, message) => sum + message.content.length, 0) < longResume.length + longVacancy.length + longExtra.length);
+});
+
+test('Groq 429 response stores cooldown from retry-after', async () => {
+  let listener = null;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Java developer',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt'
+  };
+
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 429,
+    headers: {
+      get(name) {
+        return String(name).toLowerCase() === 'retry-after' ? '2' : '';
+      }
+    },
+    async text() {
+      return 'rate limit';
+    }
+  });
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_COVER_LETTER',
+        task: 'cover_letter',
+        vacancyText: 'Вакансия: Java developer'
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, false);
+  assert.ok(Date.parse(localData.groqCooldownUntil) > Date.now());
+  assert.ok(localData.agentDebugLog.some((entry) => entry.event === 'groq_rate_limit_cooldown'));
 });
 
 test('content script registers one message listener', async () => {
@@ -1258,6 +1534,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /showCopyToast\(button\)/);
   assert.match(js, /setTimeout\([^,]+,\s*1000\)/s);
   assert.match(js, /Скопировано/);
+  assert.match(js, /experimentalFeaturesEnabled/);
+  assert.match(js, /nodes\.chatAssist\.hidden = !view\.buttons\.chatAssistVisible/);
   assert.doesNotMatch(html, /id="copyStatus"|Копировать статус/);
   assert.doesNotMatch(js, /copyStatus|lastStatusCopyText/);
   for (const removedId of ['dryRun', 'groqApiKey', 'saveGroqKey', 'testGroq', 'extensionStatus', 'tabStatus', 'agentDebugLog', 'clearAgentDebugLog', 'currentActionDetail']) {
@@ -1340,6 +1618,25 @@ test('popup view model reports exact readiness and blocker text', async () => {
   assert.equal(withoutGroq.status.detail, 'Вакансии с письмами/вопросами будут пропущены');
   assert.equal(withoutGroq.buttons.autoApplyDisabled, false);
   assert.equal(withoutGroq.buttons.chatAssistDisabled, true);
+  assert.equal(withoutGroq.buttons.chatAssistVisible, false);
+
+  const experimentalWithoutGroq = derivePopupView({
+    runState: { state: 'idle' },
+    tabState: { kind: 'ready', canStartAutoApply: true },
+    hasGroqKey: false,
+    experimentalFeaturesEnabled: true
+  });
+  assert.equal(experimentalWithoutGroq.buttons.chatAssistVisible, true);
+  assert.equal(experimentalWithoutGroq.buttons.chatAssistDisabled, true);
+
+  const experimentalReady = derivePopupView({
+    runState: { state: 'idle' },
+    tabState: { kind: 'ready', canStartAutoApply: true },
+    hasGroqKey: true,
+    experimentalFeaturesEnabled: true
+  });
+  assert.equal(experimentalReady.buttons.chatAssistVisible, true);
+  assert.equal(experimentalReady.buttons.chatAssistDisabled, false);
 
   const wrongHhPage = derivePopupView({
     runState: { state: 'idle' },
@@ -1452,6 +1749,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     dailyLimit: 100,
     delayMinMs: 1500,
     delayMaxMs: 3000,
+    experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',
     chatLimit: 10
@@ -1478,7 +1776,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     };
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'experimentalFeaturesEnabled', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
 
   globalThis.HHJA_DEFAULTS = {
@@ -1493,6 +1791,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     dailyLimit: 100,
     delayMinMs: 1500,
     delayMaxMs: 3000,
+    experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',
     chatLimit: 10,
@@ -1535,6 +1834,12 @@ test('options preserve masked Groq key unless user edits the key field', async (
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
+    assert.equal(storage.experimentalFeaturesEnabled, false);
+
+    elements.experimentalFeaturesEnabled.checked = true;
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.experimentalFeaturesEnabled, true);
 
     handlers.get('groqApiKey:focus')();
     elements.groqApiKey.value = 'gsk_new';
@@ -1566,6 +1871,9 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /id="chatUnreadOnly"/);
   assert.match(html, /id="chatReplyMode"/);
   assert.match(html, /id="chatLimit"/);
+  assert.match(html, /id="experimentalFeaturesEnabled"/);
+  assert.match(html, /Экспериментальные функции/);
+  assert.match(html, /<section id="chatAssistantSettings" hidden>/);
   assert.match(html, /id="delayMinMs" type="number" min="500" step="250"/);
   assert.match(html, /id="delayMaxMs" type="number" min="500" step="250"/);
   assert.match(js, /resumeUrl/);
@@ -1579,6 +1887,12 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(js, /chatUnreadOnly/);
   assert.match(js, /chatReplyMode/);
   assert.match(js, /chatLimit/);
+  assert.match(js, /experimentalFeaturesEnabled/);
+  assert.match(js, /fields\.experimentalFeaturesEnabled\.checked = values\.experimentalFeaturesEnabled === true/);
+  assert.match(js, /experimentalFeaturesEnabled: fields\.experimentalFeaturesEnabled\.checked/);
+  assert.match(js, /chatAssistantSettings: document\.getElementById\('chatAssistantSettings'\)/);
+  assert.match(js, /sections\.chatAssistantSettings\.hidden = !fields\.experimentalFeaturesEnabled\.checked/);
+  assert.match(js, /fields\.experimentalFeaturesEnabled\.addEventListener\('change', syncExperimentalSections\)/);
   assert.match(js, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
   assert.match(js, /Math\.max\(500/);
   assert.match(js, /auto_send/);

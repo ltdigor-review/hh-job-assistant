@@ -62,6 +62,9 @@ const CLICK_DELAY_MIN_MS = 500;
 const CLICK_DELAY_MAX_MS = 1200;
 const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
+const VACANCY_GROQ_MAX_CHARS = 2200;
+const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
+const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
 const {
   cleanText,
   sanitizeGeneratedText,
@@ -89,6 +92,7 @@ let activeRunId = null;
 let queuedResumeStarted = false;
 let queuedSearchStarted = false;
 let extensionContextInvalidated = false;
+let actionOverlay = null;
 
 function createProcessedVacancyIdSet(source = []) {
   return new Set((Array.isArray(source) ? source : []).map((value) => String(value || '').trim()).filter(Boolean));
@@ -412,7 +416,40 @@ function scanVacancies() {
 
 function getVacancyText(root = document) {
   const node = queryFirst(HH_SELECTORS.vacancyText, root) || root;
-  return textOf(node).slice(0, 12000);
+  return compactVacancyText(textOf(node));
+}
+
+function uniqueContextLines(text) {
+  const seen = new Set();
+  return cleanText(text)
+    .split('\n')
+    .map((line) => cleanText(line))
+    .filter((line) => {
+      if (!line || seen.has(line)) return false;
+      seen.add(line);
+      return true;
+    });
+}
+
+function joinCappedLines(lines, maxChars) {
+  const output = [];
+  let length = 0;
+  for (const line of lines) {
+    const nextLength = length + line.length + (output.length > 0 ? 1 : 0);
+    if (nextLength > maxChars) break;
+    output.push(line);
+    length = nextLength;
+  }
+  return output.join('\n').slice(0, maxChars);
+}
+
+function compactVacancyText(text, maxChars = VACANCY_GROQ_MAX_CHARS) {
+  const noisePattern = /^(?:откликнуться|показать контакты|в избранное|скрыть|пожаловаться|поделиться|назад|далее|похожие вакансии|вакансии компании|hh\.ru|headhunter)$/i;
+  const lines = uniqueContextLines(text)
+    .filter((line) => line.length <= 700)
+    .filter((line) => !noisePattern.test(line))
+    .filter((line) => !/^(?:откликнуться|показать|скрыть)\b/i.test(line));
+  return joinCappedLines(lines, maxChars);
 }
 
 function getDialogRoot() {
@@ -531,9 +568,12 @@ function extractVisibleQuestionLabels(text, { textOnly = false } = {}) {
 }
 
 function isContactQuestion(field) {
-  return /telegram|телеграм|телеграмм|мессендж|messenger|whatsapp|ватсап|контакт|contact|ник/i.test(
-    `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`
-  );
+  const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
+  const contactChannel = /telegram|телеграм|телеграмм|мессендж|messenger|whatsapp|ватсап|wa\.me|t\.me/i;
+  const contactTarget = /ник|username|user\s*name|handle|аккаунт|ссылк|контакт|contact|профил|номер|телефон/i;
+  const contactAction = /укажите|напишите|оставьте|сообщите|предоставьте|пришлите|дайте|куда|как\s+с\s+вами\s+связаться/i;
+  if (/как\s+с\s+вами\s+связаться|контакт(?:ы|ные)?\s+для\s+связи|contact\s+(?:details|info)/i.test(text)) return true;
+  return contactChannel.test(text) && contactTarget.test(text) && contactAction.test(text);
 }
 
 function isSalaryQuestion(field) {
@@ -560,11 +600,11 @@ function getQuestionAnswerInvalidReason(answer, field) {
 }
 
 async function normalizeQuestionAnswers(answers, questionFields) {
-  const { expectedSalary = '', resumeText = '', resumeCache = null } = await storageGet(
-    ['expectedSalary', 'resumeText', 'resumeCache'],
+  const { expectedSalary = '', resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
+    ['expectedSalary', 'resumeText', 'resumeParsedText', 'resumeCache'],
     { optional: true }
   );
-  const resumeSource = [resumeText, resumeCache?.text].filter(Boolean).join('\n');
+  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
   const contact = extractContactFromText(resumeSource);
   return answers.map((answer, index) => {
     const field = questionFields[index];
@@ -576,6 +616,26 @@ async function normalizeQuestionAnswers(answers, questionFields) {
     }
     return answer;
   });
+}
+
+async function buildDeterministicQuestionAssistance(questionFields) {
+  if (questionFields.length === 0) return '';
+  const { expectedSalary = '', resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
+    ['expectedSalary', 'resumeText', 'resumeParsedText', 'resumeCache'],
+    { optional: true }
+  );
+  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
+  const contact = extractContactFromText(resumeSource);
+  const answers = questionFields.map((field, index) => {
+    if (isSalaryQuestion(field) && String(expectedSalary || '').trim()) {
+      return `Text question ${index + 1}: ${String(expectedSalary || '').trim()}`;
+    }
+    if (isContactQuestion(field) && contact) {
+      return `Text question ${index + 1}: ${contact}`;
+    }
+    return '';
+  });
+  return answers.every(Boolean) ? answers.join('\n') : '';
 }
 
 function findCoverLetterTextarea(root = getDialogRoot()) {
@@ -664,11 +724,7 @@ function findQuestionControlGroups(root = getDialogRoot()) {
 function buildEmployerQuestionContext(root, questionFields, questionControlGroups) {
   const sections = [];
   const fullRootText = getRootText(root);
-  const pageText = cleanText(fullRootText).slice(0, 5000);
   const visibleQuestionLabels = extractVisibleQuestionLabels(fullRootText, { textOnly: true });
-  if (pageText) {
-    sections.push(['Visible HH response form text:', pageText].join('\n'));
-  }
 
   if (questionFields.length > 0) {
     sections.push(
@@ -681,6 +737,13 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
         })
       ].join('\n')
     );
+  }
+
+  if (sections.length === 0) {
+    const fallbackText = joinCappedLines(uniqueContextLines(fullRootText), QUESTION_VISIBLE_FALLBACK_MAX_CHARS);
+    if (fallbackText) {
+      sections.push(['Visible HH response form fallback:', fallbackText].join('\n'));
+    }
   }
 
   if (questionControlGroups.length > 0) {
@@ -699,7 +762,21 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
     );
   }
 
-  return sections.join('\n\n').slice(0, 8000);
+  return sections.join('\n\n').slice(0, QUESTION_CONTEXT_GROQ_MAX_CHARS);
+}
+
+function buildChoiceRetryContext(questionControlGroups) {
+  return [
+    'Choice questions. Return exact option labels for these groups:',
+    ...questionControlGroups.map((group, index) => {
+      const options = group.options.map((option, optionIndex) => `${optionIndex + 1}. ${option.label}`).join('\n');
+      return [
+        `Choice group ${index + 1} (${group.type}, ${group.type === 'radio' ? 'choose one' : 'choose all matching'}):`,
+        group.question ? `Question/context: ${group.question}` : 'Question/context: not found',
+        options
+      ].join('\n');
+    })
+  ].join('\n').slice(0, QUESTION_CONTEXT_GROQ_MAX_CHARS);
 }
 
 const SUBMIT_ACTION_PATTERN = /отправить|откликнуться|продолжить|сгенерировать\s+резюме/i;
@@ -751,7 +828,7 @@ async function clickFollowupConfirmButton(confirmButton, counters) {
     lastError: ''
   });
   await waitBeforeClick();
-  confirmButton.click();
+  clickWithActionCursor(confirmButton);
   await sleep(window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 1800);
 }
 
@@ -816,6 +893,26 @@ function setBusyCursor(active) {
   document.body.style.cursor = active ? 'progress' : '';
 }
 
+function getActionOverlay() {
+  if (!actionOverlay && globalThis.HHJobAssistantActionOverlay) {
+    actionOverlay = new globalThis.HHJobAssistantActionOverlay({
+      panelEnabled: false,
+      cursorId: 'hh-job-assistant-auto-apply-cursor',
+      highlightAttr: 'data-hh-job-assistant-auto-apply-highlight'
+    });
+  }
+  return actionOverlay;
+}
+
+function showActionCursorFor(node) {
+  getActionOverlay()?.highlight(node);
+}
+
+function clickWithActionCursor(node) {
+  showActionCursorFor(node);
+  node.click();
+}
+
 async function sendRuntimeMessage(message, options = {}) {
   const response = withExtensionContext(() => new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (result) => {
@@ -837,7 +934,7 @@ async function setRunState(patch) {
   const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
   const nextPatch = { ...(patch || {}) };
   if (terminalStates.has(nextPatch.state) && !Object.prototype.hasOwnProperty.call(nextPatch, 'currentAction')) {
-    nextPatch.currentAction = '';
+    nextPatch.currentAction = nextPatch.state === 'complete' ? 'Отклики завершены' : '';
   }
   if (
     nextPatch.state &&
@@ -928,7 +1025,8 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
   const followupConfirmButton = findFollowupConfirmButton(root);
   if (followupConfirmButton) {
     await clickFollowupConfirmButton(followupConfirmButton, counters);
-    return true;
+    await sleep(500);
+    return verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected });
   }
 
   const blockedReason = detectBlockedResponseReason(root);
@@ -955,7 +1053,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     return false;
   }
 
-  if (root !== document && hasSubmitControl(root)) {
+  if (hasSubmitControl(root) || hasSubmitControl(document)) {
     await clearPendingSubmit();
     await appendSkippedResponse(
       item,
@@ -1099,7 +1197,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
@@ -1132,20 +1230,25 @@ async function generateTestAssistance(vacancyText, extraText) {
 }
 
 async function generateChoiceRetryAssistance(vacancyText, questionContext, previousAnswer) {
-  return generateTestAssistance(
-    vacancyText,
-    [
+  const response = await sendRuntimeMessage({
+    type: 'GENERATE_COVER_LETTER',
+    task: 'choice_retry',
+    vacancyText: '',
+    extraText: [
       questionContext,
       '',
       'Previous answer did not match any available HH choice labels. Return only exact option labels from the listed Choice groups.',
-      'Format:',
-      'Choice group 1: <exact option label>',
-      'Choice group 2: <exact option label>',
-      '',
       'Previous answer:',
       previousAnswer
     ].join('\n')
-  );
+  }, {
+    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMessage: 'Запрос уточнения вариантов Groq не уложился во время.'
+  });
+  if (!response?.ok) {
+    throw new Error(localizeError(response?.error, 'Не удалось уточнить варианты ответов HH'));
+  }
+  return sanitizeGeneratedText(response.text);
 }
 
 async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
@@ -1730,7 +1833,7 @@ async function applyToVacancy(item, counters) {
     await setRunState({
       state: 'waiting_for_dialog',
       ...counters,
-      currentAction: `Открываю форму отклика: ${item.title || item.vacancyId || 'вакансия'}`
+      currentAction: `Откликаюсь на: ${item.title || item.vacancyId || 'вакансия'}`
     });
     const beforeText = textOf(document.body);
     const beforeUrl = location.href;
@@ -1743,7 +1846,7 @@ async function applyToVacancy(item, counters) {
       throw new Error('Перед нажатием отклика обнаружена страница входа или регистрации');
     }
     prepareResponseButtonForCurrentTab(item.responseButton);
-    item.responseButton.click();
+    clickWithActionCursor(item.responseButton);
 
     root = await waitForDialogOrChange(beforeText);
     if (item.navigationQueue && root === document && location.href === beforeUrl && !isResponseFormPage()) {
@@ -1789,6 +1892,7 @@ async function applyToVacancy(item, counters) {
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
+    const deterministicAssistance = await buildDeterministicQuestionAssistance(questionFields);
     let coverLetterUsed = false;
     if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
       const message = 'Пропущено: обнаружены вопросы работодателя, но заполняемые поля HH не найдены.';
@@ -1820,9 +1924,14 @@ async function applyToVacancy(item, counters) {
         vacancyId: item.vacancyId,
         textFields: questionFields.length,
         choiceGroups: questionControlGroups.length,
-        contextLength: questionContext.length
+        contextLength: questionContext.length,
+        deterministicTextFields: deterministicAssistance ? questionFields.length : 0
       });
-      assistance = await generateTestAssistance(getVacancyText(item.card), questionContext || textOf(root));
+      if (deterministicAssistance && questionControlGroups.length === 0) {
+        assistance = deterministicAssistance;
+      } else {
+        assistance = await generateTestAssistance(getVacancyText(item.card), questionContext || textOf(root));
+      }
     } catch (error) {
       if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
         throw error;
@@ -1830,9 +1939,9 @@ async function applyToVacancy(item, counters) {
 
       assistance = isRecoverableGroqError(error)
         ? await getFallbackQuestionAssistance(questionFields, questionControlGroups)
-        : questionFields.length > 0 && questionControlGroups.length === 0
+        : deterministicAssistance || (questionFields.length > 0 && questionControlGroups.length === 0
           ? await getExpectedSalary()
-          : '';
+          : '');
       if (assistance) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       } else {
@@ -1878,7 +1987,7 @@ async function applyToVacancy(item, counters) {
         });
         setBusyCursor(true);
         try {
-          assistance = await generateChoiceRetryAssistance(getVacancyText(item.card), questionContext, assistance);
+          assistance = await generateChoiceRetryAssistance('', buildChoiceRetryContext(questionControlGroups), assistance);
           selectedChoices = fillQuestionControls(questionControlGroups, assistance);
         } catch (error) {
           if (!isRecoverableGroqError(error)) {
@@ -2014,7 +2123,7 @@ async function applyToVacancy(item, counters) {
     if (await stopBeforeSubmitIfRequested(counters)) {
       return;
     }
-    submitButton.click();
+    clickWithActionCursor(submitButton);
     await sleep(1800);
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
@@ -2048,7 +2157,7 @@ async function applyToVacancy(item, counters) {
   let coverLetterUsed = false;
   const textarea = findTextarea(root);
 
-  if (root === document && !textarea) {
+  if (root === document && !isResponseFormPage() && !hasSubmitControl(document) && !textarea) {
     counters.applied += 1;
     await appendResult({
       index: item.index,
@@ -2142,7 +2251,7 @@ async function applyToVacancy(item, counters) {
   if (await stopBeforeSubmitIfRequested(counters)) {
     return;
   }
-  submitButton.click();
+  clickWithActionCursor(submitButton);
   await sleep(1800);
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
@@ -2174,6 +2283,8 @@ async function applyToVacancy(item, counters) {
 }
 
 function buildResponseFormItem(queueItem) {
+  const questionFields = findQuestionFields(document);
+  const questionControlGroups = findQuestionControlGroups(document);
   return {
     index: queueItem.index,
     vacancyId: queueItem.vacancyId || getVacancyId(location.href),
@@ -2184,7 +2295,7 @@ function buildResponseFormItem(queueItem) {
     responseButton: findSubmitButton(document),
     responseFormOpen: true,
     cardText: getVacancyText(),
-    testDetected: queueItem.testDetected || detectTest(document) || findQuestionFields(document).length > 0
+    testDetected: queueItem.testDetected || detectTest(document) || questionFields.length > 0 || questionControlGroups.length > 0
   };
 }
 
@@ -2402,7 +2513,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
 
   if (remaining <= 0 || processedRemaining <= 0) {
     await saveSearchQueue({ active: false });
-    await setRunState({ state: 'complete', ...counters, lastError: '' });
+    await setRunState({ state: 'complete', ...counters, currentAction: 'Квота исчерпана', lastError: '' });
     return { ok: true, ...counters };
   }
 
@@ -2424,7 +2535,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     }
 
     await saveSearchQueue({ active: false });
-    await setRunState({ state: 'complete', ...counters, lastError: '' });
+    await setRunState({ state: 'complete', ...counters, currentAction: 'Вакансии закончились', lastError: '' });
     return { ok: true, ...counters };
   }
 
@@ -2553,7 +2664,11 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
 
   await saveSearchQueue({ active: false });
   const finalState = stopRequested && stopReason === 'test_detected' ? 'paused' : stopRequested ? 'stopped' : 'complete';
-  await setRunState({ state: finalState, ...counters });
+  await setRunState({
+    state: finalState,
+    ...counters,
+    ...(finalState === 'complete' ? { currentAction: 'Отклики завершены' } : {})
+  });
   return { ok: true, ...counters };
 }
 
