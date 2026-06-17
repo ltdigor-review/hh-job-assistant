@@ -1473,7 +1473,7 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /agentDebugLogFile/);
 });
 
-test('README stays business-facing and technical guidance stays out of it', async () => {
+test('README describes purpose, features, and installation without config details', async () => {
   const readme = await readFile(new URL('README.md', root), 'utf8');
   const agents = await readFile(new URL('AGENTS.md', root), 'utf8');
   const checklist = await readFile(new URL('TEST_CHECKLIST_TEMPLATE.md', root), 'utf8');
@@ -1481,15 +1481,17 @@ test('README stays business-facing and technical guidance stays out of it', asyn
 
   for (const fragment of [
     '# HH Job Assistant',
-    '## Бизнес-функции',
-    'Запускает отклики прямо со страницы поиска вакансий hh.ru.',
-    'Готовит персональные сопроводительные письма',
-    'Отвечает на вопросы работодателя',
-    'Поднимает резюме на hh.ru',
-    'Обрабатывает чаты с работодателями',
-    'Выделяет просьбы перейти во внешние каналы связи',
-    '## Безопасное поведение',
-    '## Границы продукта'
+    '## Зачем нужно приложение',
+    'Быстрее обрабатывать длинные списки вакансий.',
+    '## Фичи',
+    'Запуск откликов со страницы поиска вакансий hh.ru.',
+    'Автоматическая подготовка сопроводительных писем.',
+    'Подготовка ответов на вопросы работодателей',
+    'Поднятие резюме на hh.ru.',
+    'Обработка чатов с работодателями.',
+    '## Как установить',
+    'Загрузить распакованное расширение',
+    'Войдите в hh.ru'
   ]) {
     assert.match(readme, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
@@ -1506,8 +1508,11 @@ test('README stays business-facing and technical guidance stays out of it', asyn
     'fallback',
     'API keys',
     'cookies',
-    '## Установка',
     '## Настройка',
+    '## Сценарий кандидата',
+    '## Безопасное поведение',
+    '## Бизнес-функции',
+    '## Границы продукта',
     '## Проверка и логи',
     'npm ',
     'agentDebugLog',
