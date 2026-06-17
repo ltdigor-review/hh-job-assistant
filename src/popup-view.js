@@ -142,7 +142,7 @@ export function derivePopupView({ runState = {}, tabState = {}, hasGroqKey = fal
       autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,
-      chatAssistDisabled: activeRun || !tabReady,
+      chatAssistDisabled: activeRun || !tabReady || !hasGroqKey,
       autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
       stopTitle: deriveStopTitle(activeRun)
     },

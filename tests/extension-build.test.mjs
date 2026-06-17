@@ -448,10 +448,15 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
-  assert.deepEqual(groqPayloadLog.details.requestBody, requestBody);
-  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
-  assert.equal(groqResponseLog.details.content, 'Ответ');
-  assert.equal(groqResponseLog.details.rawResponse.choices[0].message.content, 'Ответ');
+  assert.equal(groqPayloadLog.details.model, 'test-model');
+  assert.deepEqual(groqPayloadLog.details.messageLengths, requestBody.messages.map((message) => ({
+    role: message.role,
+    contentLength: message.content.length
+  })));
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test|Java developer|250 000|Вакансия|зарплату/);
+  assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
+  assert.equal(groqResponseLog.details.choiceCount, 1);
+  assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /Ответ|rawResponse|content/);
 });
 
 test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
@@ -658,6 +663,87 @@ test('background clears chat reports', async () => {
 
   assert.equal(clearReportsResponse.ok, true);
   assert.deepEqual(localData.chatReports, []);
+});
+
+test('background waits for content script when starting chat from non-hh tab', async () => {
+  let listener = null;
+  const sentMessages = [];
+  let getContentStatusCalls = 0;
+  const localData = {};
+  globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ = true;
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async query() {
+        return [{ id: 1, url: 'https://example.com/', status: 'complete' }];
+      },
+      async create({ url }) {
+        return { id: 22, url, status: 'complete' };
+      },
+      async get(id) {
+        return { id, url: 'https://hh.ru/chat', status: 'complete' };
+      },
+      async sendMessage(tabId, message) {
+        sentMessages.push({ tabId, message });
+        if (message.type === 'GET_CONTENT_STATUS') {
+          getContentStatusCalls += 1;
+          if (getContentStatusCalls === 1) {
+            throw new Error('Receiving end does not exist.');
+          }
+          return { ok: true, authenticated: true, unsafe: false };
+        }
+        return { ok: true, processed: 0 };
+      },
+      onUpdated: {
+        addListener() {},
+        removeListener() {}
+      }
+    },
+    scripting: {
+      async executeScript() {
+        return [{ result: 'complete' }];
+      }
+    }
+  };
+
+  try {
+    await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+    const response = await new Promise((resolve) => {
+      const stayedAsync = listener({ type: 'START_CHAT_ASSIST' }, {}, resolve);
+      assert.equal(stayedAsync, true);
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(sentMessages.map((item) => item.message.type), ['GET_CONTENT_STATUS', 'GET_CONTENT_STATUS', 'START_CHAT_ASSIST']);
+  } finally {
+    delete globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__;
+  }
 });
 
 test('background reloads extension on explicit reload message', async () => {
@@ -1125,6 +1211,11 @@ test('docs describe current setup, logs, and cleanup rules', async () => {
     '## Использование',
     '## Проверка и логи',
     'Дневной лимит откликов',
+    'Кэш резюме, часов',
+    'Промпт для сопроводительного письма',
+    'Кнопка `Проверить Groq`',
+    'Обработка чатов без ключа Groq API недоступна',
+    'Полный текст резюме, вакансии, чата, сопроводительного письма и ответа Groq в технический лог не пишется.',
     '`100`',
     '`1500`',
     '`3000`',
@@ -1136,7 +1227,7 @@ test('docs describe current setup, logs, and cleanup rules', async () => {
     assert.match(readme, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
-  for (const stale of ['[English]', 'Предпросмотр', 'Save key', 'Test Groq', 'Chat reports', 'default `20`']) {
+  for (const stale of ['[English]', 'Предпросмотр', 'Save key', 'Test Groq', 'Chat reports', 'default `20`', 'popup', 'Reload', 'fallback', 'API keys', 'cookies']) {
     assert.doesNotMatch(readme, new RegExp(stale.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
@@ -1203,7 +1294,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /refreshPopup/);
   assert.match(js, /isAutoApplyStartUrl/);
   assert.match(js, /url\?\.protocol === 'https:'/);
-  assert.match(js, /url\.hostname === 'hh\.ru'/);
+  assert.match(js, /url\.hostname === 'hh\.ru' \|\| url\.hostname\.endsWith\('\.hh\.ru'\)/);
   assert.match(js, /url\.pathname === '\/search\/vacancy'/);
   assert.match(js, /url\.search\.length > 0/);
 });
@@ -1248,6 +1339,7 @@ test('popup view model reports exact readiness and blocker text', async () => {
   assert.equal(withoutGroq.status.title, 'ГОТОВО, без автоответов');
   assert.equal(withoutGroq.status.detail, 'Вакансии с письмами/вопросами будут пропущены');
   assert.equal(withoutGroq.buttons.autoApplyDisabled, false);
+  assert.equal(withoutGroq.buttons.chatAssistDisabled, true);
 
   const wrongHhPage = derivePopupView({
     runState: { state: 'idle' },
@@ -1347,6 +1439,124 @@ test('hh page scroll helpers avoid forcing targets to viewport center', async ()
   assert.doesNotMatch(background, /scrollIntoView\?\.\(\{\s*block: 'center'/);
 });
 
+test('options preserve masked Groq key unless user edits the key field', async () => {
+  const source = await readFile(new URL('src/options.js', root), 'utf8');
+  const handlers = new Map();
+  const storage = {
+    groqApiKey: 'gsk_saved',
+    groqModel: 'llama-3.3-70b-versatile',
+    resumeUrl: '',
+    resumeCacheTtlHours: 1,
+    expectedSalary: '',
+    coverPrompt: '',
+    dailyLimit: 100,
+    delayMinMs: 1500,
+    delayMaxMs: 3000,
+    chatUnreadOnly: true,
+    chatReplyMode: 'draft',
+    chatLimit: 10
+  };
+
+  function makeElement(id) {
+    return {
+      id,
+      value: '',
+      checked: false,
+      dataset: {},
+      style: {},
+      textContent: '',
+      setCustomValidity(value) {
+        this.validationMessage = value;
+      },
+      reportValidity() {
+        this.reported = true;
+        return !this.validationMessage;
+      },
+      addEventListener(type, fn) {
+        handlers.set(`${id}:${type}`, fn);
+      }
+    };
+  }
+
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
+  const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
+
+  globalThis.HHJA_DEFAULTS = {
+    groqModel: 'llama-3.3-70b-versatile',
+    resumeText: '',
+    resumeUrl: '',
+    resumeParsedText: '',
+    resumeParsedAt: '',
+    resumeCacheTtlHours: 1,
+    expectedSalary: '',
+    coverPrompt: 'default prompt',
+    dailyLimit: 100,
+    delayMinMs: 1500,
+    delayMaxMs: 3000,
+    chatUnreadOnly: true,
+    chatReplyMode: 'draft',
+    chatLimit: 10,
+    runState: {},
+    runResults: [],
+    chatReports: []
+  };
+  globalThis.HHJA_LOCALIZE_ERROR = (error, fallback) => fallback || String(error);
+  globalThis.document = {
+    getElementById(id) {
+      return elements[id] || null;
+    }
+  };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, storage[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(storage, value);
+        }
+      }
+    },
+    runtime: {
+      async sendMessage() {
+        return { ok: true, sampleLength: 2 };
+      }
+    }
+  };
+
+  try {
+    await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#options-${crypto.randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    handlers.get('groqApiKey:focus')();
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.groqApiKey, 'gsk_saved');
+
+    handlers.get('groqApiKey:focus')();
+    elements.groqApiKey.value = 'gsk_new';
+    handlers.get('groqApiKey:input')();
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.groqApiKey, 'gsk_new');
+
+    handlers.get('groqApiKey:focus')();
+    elements.groqApiKey.value = '';
+    handlers.get('groqApiKey:input')();
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.groqApiKey, '');
+  } finally {
+    delete globalThis.HHJA_DEFAULTS;
+    delete globalThis.HHJA_LOCALIZE_ERROR;
+    delete globalThis.document;
+    delete globalThis.chrome;
+  }
+});
+
 test('options use hh resume URL instead of pasted resume text or daily refresh toggle', async () => {
   const html = await readFile(new URL('src/options.html', root), 'utf8');
   const js = await readFile(new URL('src/options.js', root), 'utf8');
@@ -1360,6 +1570,11 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /id="delayMaxMs" type="number" min="500" step="250"/);
   assert.match(js, /resumeUrl/);
   assert.match(js, /resumeCacheTtlHours/);
+  assert.match(js, /new URL\(normalizedResumeUrl\)/);
+  assert.match(js, /setCustomValidity\('Укажите ссылку на резюме hh\.ru вида https:\/\/hh\.ru\/resume\/\.\.\.'\)/);
+  assert.match(js, /savedGroqKeyMasked/);
+  assert.match(js, /groqKeyDirty/);
+  assert.match(js, /fields\.groqApiKey\.dataset\.masked !== 'true' && \(!savedGroqKeyMasked \|\| groqKeyDirty\)/);
   assert.match(js, /Math\.max\(0\.1/);
   assert.match(js, /chatUnreadOnly/);
   assert.match(js, /chatReplyMode/);

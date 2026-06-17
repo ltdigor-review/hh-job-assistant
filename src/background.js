@@ -417,7 +417,14 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   };
   await appendAgentLog('groq_request_payload', {
     task,
-    requestBody
+    model: requestBody.model,
+    messageCount: requestBody.messages.length,
+    messageLengths: requestBody.messages.map((message) => ({
+      role: message.role,
+      contentLength: String(message.content || '').length
+    })),
+    temperature: requestBody.temperature,
+    maxTokens: requestBody.max_tokens
   });
   let response;
   try {
@@ -463,8 +470,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   }
   await appendAgentLog('groq_response_payload', {
     task,
-    content,
-    rawResponse: data
+    responseLength: content.length,
+    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+    model: data?.model || ''
   });
   await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
   return content;
@@ -557,6 +565,24 @@ async function waitForTabReady(tabId, timeoutMs = 30000) {
       }
     });
   });
+}
+
+async function waitForContentStatus(tabId, timeoutMs = 10000) {
+  const started = Date.now();
+  let lastError = '';
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_CONTENT_STATUS' });
+      if (response?.ok) return response;
+      lastError = response?.error || 'Контент-скрипт еще не готов';
+    } catch (error) {
+      lastError = error?.message || String(error);
+    }
+    await sleep(250);
+  }
+
+  throw new Error(`Контент-скрипт hh.ru не загрузился вовремя: ${lastError || 'нет ответа'}`);
 }
 
 function resumeRefreshPageActionScript(kind, actionText = '', status = 'running') {
@@ -893,9 +919,11 @@ async function runChatAssistFromActiveTab() {
   });
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let tab = activeTab;
+  let shouldWaitForContentScript = false;
 
   if (!tab?.id || !isHhUrl(tab.url)) {
     tab = await chrome.tabs.create({ url: 'https://hh.ru/chat', active: true });
+    shouldWaitForContentScript = true;
   }
 
   let tabId = tab.id;
@@ -904,8 +932,12 @@ async function runChatAssistFromActiveTab() {
   if (tabUrl.pathname !== '/chat') {
     const updatedTab = await chrome.tabs.update(tabId, { url: 'https://hh.ru/chat' });
     tabId = updatedTab?.id || tabId;
+    shouldWaitForContentScript = true;
+  }
+
+  if (shouldWaitForContentScript) {
     await waitForTabReady(tabId, 30000);
-    await sleep(1000);
+    await waitForContentStatus(tabId, 10000);
   }
 
   return chrome.tabs.sendMessage(tabId, { type: 'START_CHAT_ASSIST' });

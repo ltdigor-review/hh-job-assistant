@@ -9,6 +9,7 @@ async function runContentChatAssist({
   chatReplyMode = 'draft',
   chatLimit = 10,
   groqText = 'Здравствуйте, готов ответить по вакансии.',
+  stopDuringGroq = false,
   authenticated = true,
   bodyText = 'Чаты'
 }) {
@@ -143,6 +144,9 @@ async function runContentChatAssist({
         }
         if (message.type === 'GENERATE_CHAT_REPLY') {
           groqCalls.push(message);
+          if (stopDuringGroq) {
+            Promise.resolve().then(() => listener({ type: 'STOP_RUN' }, {}, () => {}));
+          }
           return settle({ ok: true, text: groqText });
         }
         return settle({ ok: true });
@@ -349,4 +353,27 @@ test('chat assist auto-send mode clicks send button', async () => {
   assert.equal(result.sendClicks, 1);
   assert.equal(result.reports.at(-1).status, 'sent');
   assert.equal(result.reports.at(-1).sent, true);
+});
+
+test('chat assist auto-send does not send when stopped during Groq request', async () => {
+  const result = await runContentChatAssist({
+    chatReplyMode: 'auto_send',
+    stopDuringGroq: true,
+    chats: [
+      {
+        unread: true,
+        chatUrl: 'https://hh.ru/chat/stop',
+        employerName: 'ООО Stop',
+        vacancyTitle: 'Java Developer',
+        previewText: 'Вопрос',
+        chatText: 'ООО Stop\nКогда готовы начать?'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.sendClicks, 0);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.reports.at(-1).status, 'stopped');
+  assert.equal(result.reports.at(-1).sent, false);
 });

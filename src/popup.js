@@ -222,7 +222,7 @@ function isHhUrl(url) {
 
 function isAutoApplyStartUrl(url) {
   return url?.protocol === 'https:' &&
-    url.hostname === 'hh.ru' &&
+    (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
     url.pathname === '/search/vacancy' &&
     url.search.length > 0;
 }

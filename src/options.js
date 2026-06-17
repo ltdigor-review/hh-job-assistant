@@ -25,6 +25,8 @@ const fields = {
 };
 
 const statusNode = document.getElementById('status');
+let savedGroqKeyMasked = false;
+let groqKeyDirty = false;
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
@@ -40,6 +42,8 @@ async function loadOptions() {
 
   fields.groqApiKey.value = values.groqApiKey ? '********' : '';
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
+  savedGroqKeyMasked = Boolean(values.groqApiKey);
+  groqKeyDirty = false;
   fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
@@ -57,9 +61,24 @@ async function loadOptions() {
 
 async function saveOptions() {
   const current = await chrome.storage.local.get(['resumeUrl']);
+  const normalizedResumeUrl = fields.resumeUrl.value.trim();
+  if (normalizedResumeUrl) {
+    try {
+      const parsed = new URL(normalizedResumeUrl);
+      if (parsed.protocol !== 'https:' || (parsed.hostname !== 'hh.ru' && !parsed.hostname.endsWith('.hh.ru')) || !/^\/resume\/[^/?#]+/.test(parsed.pathname)) {
+        throw new Error('invalid_resume_url');
+      }
+    } catch {
+      fields.resumeUrl.setCustomValidity('Укажите ссылку на резюме hh.ru вида https://hh.ru/resume/...');
+      fields.resumeUrl.reportValidity();
+      throw new Error('Укажите ссылку на резюме hh.ru вида https://hh.ru/resume/...');
+    }
+  }
+  fields.resumeUrl.setCustomValidity('');
+
   const patch = {
     groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
-    resumeUrl: fields.resumeUrl.value.trim(),
+    resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
@@ -80,7 +99,7 @@ async function saveOptions() {
     patch.resumeParsedAt = '';
   }
 
-  if (fields.groqApiKey.dataset.masked !== 'true' || fields.groqApiKey.value !== '********') {
+  if (fields.groqApiKey.dataset.masked !== 'true' && (!savedGroqKeyMasked || groqKeyDirty)) {
     patch.groqApiKey = fields.groqApiKey.value.trim();
   }
 
@@ -104,6 +123,10 @@ fields.groqApiKey.addEventListener('focus', () => {
     fields.groqApiKey.value = '';
     fields.groqApiKey.dataset.masked = 'false';
   }
+});
+
+fields.groqApiKey.addEventListener('input', () => {
+  groqKeyDirty = true;
 });
 
 document.getElementById('save').addEventListener('click', () => {

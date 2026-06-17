@@ -1433,6 +1433,20 @@ async function processChatItem(item, config, counters) {
     vacancyText: '',
     chatText: meta.chatText
   });
+  if (stopRequested) {
+    await appendChatReport({
+      chatUrl: meta.chatUrl,
+      employerName: meta.employerName,
+      vacancyTitle: meta.vacancyTitle,
+      vacancyUrl: meta.vacancyUrl,
+      status: 'stopped',
+      reason: 'user_stop_before_chat_reply_fill',
+      questionText: meta.chatText,
+      draftAnswer,
+      sent: false
+    });
+    return;
+  }
   const invalidDraftReason = getGeneratedTextInvalidReason(draftAnswer, { minLength: 10 });
   if (invalidDraftReason) {
     counters.skipped += 1;
@@ -1451,6 +1465,20 @@ async function processChatItem(item, config, counters) {
   }
   fillChatInput(input, draftAnswer);
   await sleep(500);
+  if (stopRequested) {
+    await appendChatReport({
+      chatUrl: meta.chatUrl,
+      employerName: meta.employerName,
+      vacancyTitle: meta.vacancyTitle,
+      vacancyUrl: meta.vacancyUrl,
+      status: 'stopped',
+      reason: 'user_stop_after_chat_reply_fill',
+      questionText: meta.chatText,
+      draftAnswer,
+      sent: false
+    });
+    return;
+  }
 
   let sent = false;
   if (config.chatReplyMode === 'auto_send') {
@@ -1459,7 +1487,35 @@ async function processChatItem(item, config, counters) {
       throw new Error('Кнопка отправки сообщения в чате не найдена');
     }
     await setRunState({ state: 'sending_chat_reply', ...counters });
+    if (stopRequested) {
+      await appendChatReport({
+        chatUrl: meta.chatUrl,
+        employerName: meta.employerName,
+        vacancyTitle: meta.vacancyTitle,
+        vacancyUrl: meta.vacancyUrl,
+        status: 'stopped',
+        reason: 'user_stop_before_chat_reply_send',
+        questionText: meta.chatText,
+        draftAnswer,
+        sent: false
+      });
+      return;
+    }
     await waitBeforeClick();
+    if (stopRequested) {
+      await appendChatReport({
+        chatUrl: meta.chatUrl,
+        employerName: meta.employerName,
+        vacancyTitle: meta.vacancyTitle,
+        vacancyUrl: meta.vacancyUrl,
+        status: 'stopped',
+        reason: 'user_stop_before_chat_reply_send',
+        questionText: meta.chatText,
+        draftAnswer,
+        sent: false
+      });
+      return;
+    }
     sendButton.click();
     sent = true;
     await sleep(800);
