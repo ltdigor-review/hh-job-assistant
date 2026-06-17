@@ -1,6 +1,6 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.64",
+  "version": "0.1.74",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "sync:hh:auth": "node scripts/sync-hh-auth-to-chromium.mjs",
     "run:hh:chromium": "node scripts/chromium-run-action.mjs",
     "start:hh:chromium": "node scripts/chromium-start-auto-apply.mjs",
+    "inspect:logs": "node scripts/inspect-extension-log.mjs",
     "test:all": "npm test && npm run test:extension && npm run test:hh"
   }
 }

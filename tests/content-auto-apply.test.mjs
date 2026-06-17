@@ -27,6 +27,8 @@ async function runContentAutoApply({
   disabledSubmit = false,
   keepDialogOpenAfterSubmit = false,
   postSubmitDialogText = '',
+  submitNavigateHref = '',
+  submitBodyTextAfterClick = '',
   hideDialogReadsAfterSubmit = 0,
   nextPageUrl = '',
   dailyLimit = 1,
@@ -95,6 +97,15 @@ async function runContentAutoApply({
     disabled: disabledSubmit,
     click() {
       submitClicks += 1;
+      if (submitBodyTextAfterClick && bodyNode) {
+        bodyNode.innerText = submitBodyTextAfterClick;
+        bodyNode.textContent = submitBodyTextAfterClick;
+      }
+      if (submitNavigateHref) {
+        const parsed = new URL(submitNavigateHref);
+        globalThis.location.href = parsed.href;
+        globalThis.location.pathname = parsed.pathname;
+      }
       if (followupDialogText) {
         dialog = new FakeElement({
           text: followupDialogText,
@@ -1266,6 +1277,30 @@ test('auto apply processed cap stops after skipped navigation response form', as
   assert.equal(result.response.skipped, 1);
   assert.equal(result.response.navigated, undefined);
   assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.states.at(-1).state, 'complete');
+});
+
+test('auto apply returns to search after assisted question submit opens vacancy detail at processed cap', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nНа какой уровень дохода вы ориентируетесь?',
+    hasTextarea: true,
+    hasQuestionField: true,
+    responseHref: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+    responseAttrs: { href: 'https://hh.ru/applicant/vacancy_response?vacancyId=123' },
+    navigateOnResponseClick: true,
+    submitNavigateHref: 'https://hh.ru/vacancy/123',
+    submitBodyTextAfterClick: 'Вы откликнулись на вакансию',
+    expectedSalary: '250 000 руб. на руки',
+    dailyLimit: 1,
+    message: { type: 'START_AUTO_APPLY', limitOverride: 1, maxProcessed: 1 }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, '250 000 руб. на руки');
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java');
   assert.equal(result.localStore.autoApplySearchQueue.active, false);
   assert.equal(result.states.at(-1).state, 'complete');
 });

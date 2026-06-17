@@ -1,33 +1,8 @@
 import './agent-log.js';
+import './error-text.js';
+import './defaults.js';
 
-const DEFAULTS = {
-  groqModel: 'llama-3.3-70b-versatile',
-  resumeText: '',
-  resumeUrl: '',
-  resumeParsedText: '',
-  resumeParsedAt: '',
-  expectedSalary: '',
-  coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
-  dailyLimit: 20,
-  delayMinMs: 2500,
-  delayMaxMs: 5000,
-  chatUnreadOnly: true,
-  chatReplyMode: 'draft',
-  chatLimit: 10,
-  runState: {
-    state: 'idle',
-    found: 0,
-    processed: 0,
-    applied: 0,
-    skipped: 0,
-    errors: 0,
-    lastError: '',
-    currentAction: '',
-    updatedAt: null
-  },
-  runResults: [],
-  chatReports: []
-};
+const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
 const OLD_DEFAULT_DELAY_MIN_MS = 8000;
@@ -42,6 +17,10 @@ function nowIso() {
 function sleep(ms) {
   if (globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function localizeError(error, fallback) {
+  return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
 }
 
 function getGroqRequestTimeoutMs() {
@@ -799,6 +778,9 @@ async function runResumeRefresh() {
   let normalizedUrl = '';
 
   try {
+    await globalThis.HHJobAssistantLog?.reset?.('background', 'resume_refresh_started', {
+      action: 'refresh_resumes'
+    });
     const { resumeUrl = '' } = await storageGet(['resumeUrl']);
     normalizedUrl = normalizeResumeUrl(resumeUrl);
     if (!normalizedUrl) {
@@ -879,7 +861,7 @@ async function runResumeRefresh() {
     await executeResumeRefreshPageAction(tabId, 'complete', 'Готово', 'complete').catch(() => {});
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     await setRunState({ state: 'error', errors: 1, currentAction, lastError: message });
     if (tabId) {
       await executeResumeRefreshPageAction(tabId, 'error', `${currentAction}\n${message}`, 'error').catch(() => {});
@@ -889,6 +871,9 @@ async function runResumeRefresh() {
 }
 
 async function runChatAssistFromActiveTab() {
+  await globalThis.HHJobAssistantLog?.reset?.('background', 'chat_assist_started', {
+    action: 'chat_assist'
+  });
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   let tab = activeTab;
 
@@ -1025,7 +1010,7 @@ function scheduleResponseNavigationWatchdog(tabId, url) {
       appendAgentLog('response_navigation_watchdog_error', {
         tabId,
         url,
-        error: error instanceof Error ? error.message : String(error)
+        error: localizeError(error)
       }).catch(() => {});
     });
   }, getResponseNavigationWatchdogMs());
@@ -1058,7 +1043,7 @@ chrome.commands?.onCommand?.addListener((command) => {
   })().catch((error) => {
     appendAgentLog('command_error', {
       command,
-      error: error instanceof Error ? error.message : String(error)
+      error: localizeError(error)
     }).catch(() => {});
   });
 });
@@ -1085,16 +1070,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'CLEAR_CHAT_REPORTS': {
         await storageSet({ chatReports: [] });
-        sendResponse({ ok: true });
-        break;
-      }
-      case 'GET_AGENT_DEBUG_LOG': {
-        const { agentDebugLog = [] } = await storageGet(['agentDebugLog']);
-        sendResponse({ ok: true, agentDebugLog });
-        break;
-      }
-      case 'CLEAR_AGENT_DEBUG_LOG': {
-        await storageSet({ agentDebugLog: [] });
         sendResponse({ ok: true });
         break;
       }
@@ -1159,12 +1134,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: `Unknown message type: ${message?.type || 'empty'}` });
     }
   })().catch((error) => {
-    sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    sendResponse({ ok: false, error: localizeError(error) });
   });
 
   return true;
 });
 
 ensureDefaults().catch((error) => {
-  console.error('HH Job Assistant initialization failed:', error);
+  console.error('Ошибка запуска HH Job Assistant:', error);
 });

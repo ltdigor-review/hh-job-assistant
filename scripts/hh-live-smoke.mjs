@@ -149,6 +149,8 @@ function buildInjection(contentScriptSource) {
 
 async function readContentScriptSource() {
   const files = [
+    '../src/error-text.js',
+    '../src/defaults.js',
     '../src/content-text.js',
     '../src/content-dom.js',
     '../src/content-hh.js'

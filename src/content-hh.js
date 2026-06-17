@@ -108,6 +108,12 @@ function isExtensionContextInvalidatedError(error) {
   return /extension context invalidated|context invalidated/i.test(error instanceof Error ? error.message : String(error));
 }
 
+function localizeError(error, fallback) {
+  return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
+}
+
+const DEFAULTS = globalThis.HHJA_DEFAULTS;
+
 function markExtensionContextInvalidated() {
   extensionContextInvalidated = true;
   stopRequested = true;
@@ -668,7 +674,7 @@ async function sendRuntimeMessage(message, options = {}) {
     chrome.runtime.sendMessage(message, (result) => {
       const lastError = chrome.runtime.lastError;
       if (lastError) {
-        reject(new Error(lastError.message || String(lastError)));
+        reject(new Error(localizeError(lastError.message || String(lastError))));
         return;
       }
       resolve(result);
@@ -895,12 +901,12 @@ async function getConfig() {
     'chatLimit'
   ]);
   return {
-    dailyLimit: Number(values.dailyLimit) || 20,
-    delayMinMs: Number(values.delayMinMs) || 2500,
-    delayMaxMs: Number(values.delayMaxMs) || 5000,
+    dailyLimit: Number(values.dailyLimit) || DEFAULTS.dailyLimit,
+    delayMinMs: Number(values.delayMinMs) || DEFAULTS.delayMinMs,
+    delayMaxMs: Number(values.delayMaxMs) || DEFAULTS.delayMaxMs,
     chatUnreadOnly: values.chatUnreadOnly !== false,
-    chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : 'draft',
-    chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || 10, 100))
+    chatReplyMode: values.chatReplyMode === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
+    chatLimit: Math.max(1, Math.min(Number(values.chatLimit) || DEFAULTS.chatLimit, 100))
   };
 }
 
@@ -914,7 +920,7 @@ async function generateCoverLetter(vacancyText) {
     timeoutMessage: 'Запрос сопроводительного письма Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось сгенерировать сопроводительное письмо');
+    throw new Error(localizeError(response?.error, 'Не удалось сгенерировать сопроводительное письмо'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -924,7 +930,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
@@ -951,7 +957,7 @@ async function generateTestAssistance(vacancyText, extraText) {
     timeoutMessage: 'Запрос помощи с вопросами Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось подготовить ответы на вопросы работодателя');
+    throw new Error(localizeError(response?.error, 'Не удалось подготовить ответы на вопросы работодателя'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -984,7 +990,7 @@ async function generateChatReply({ vacancyUrl, vacancyText, chatText }) {
     timeoutMessage: 'Запрос ответа в чат Groq не уложился во время.'
   });
   if (!response?.ok) {
-    throw new Error(response?.error || 'Не удалось сгенерировать ответ в чат');
+    throw new Error(localizeError(response?.error, 'Не удалось сгенерировать ответ в чат'));
   }
   return sanitizeGeneratedText(response.text);
 }
@@ -1337,7 +1343,7 @@ async function handleChatAssist() {
     try {
       await processChatItem(item, config, counters);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = localizeError(error);
       counters.errors += 1;
       await appendChatReport({
         chatUrl: item.chatUrl,
@@ -2061,7 +2067,7 @@ async function continueQueuedAutoApply() {
   try {
     await applyToVacancy(item, counters);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     counters.errors += 1;
     await appendResult({
       index: item.index,
@@ -2213,6 +2219,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     }
 
     counters.processed += 1;
+    const appliedBeforeItem = counters.applied;
 
     try {
       await applyToVacancy(item, counters);
@@ -2220,7 +2227,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         await saveQueue({ active: false });
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = localizeError(error);
       counters.errors += 1;
       if (item.responseUrl) {
         await saveQueue({ active: false });
@@ -2245,18 +2252,28 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
 
     await setRunState({ state: stopRequested ? 'paused' : 'applying', ...counters });
     const processedCapReached = maxProcessed != null && counters.processed >= maxProcessed;
-    if (!stopRequested && !processedCapReached && sourceUrl && !isHhSearchPageUrl(location.href)) {
+    const appliedThisItem = counters.applied > appliedBeforeItem;
+    if (!stopRequested && sourceUrl && !isHhSearchPageUrl(location.href) && (!processedCapReached || appliedThisItem)) {
       await saveQueue({ active: false });
-      await saveSearchQueue({
-        active: true,
-        runId: activeRunId,
-        limit,
-        counters,
-        config,
-        maxProcessed,
-        processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+      if (processedCapReached) {
+        await saveSearchQueue({ active: false });
+      } else {
+        await saveSearchQueue({
+          active: true,
+          runId: activeRunId,
+          limit,
+          counters,
+          config,
+          maxProcessed,
+          processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
+        });
+      }
+      await setRunState({
+        state: processedCapReached ? 'complete' : 'applying',
+        ...counters,
+        currentAction: 'Возвращаюсь на страницу поиска HH',
+        lastError: ''
       });
-      await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
       closeDialog();
       navigateTo(sourceUrl);
       return { ok: true, ...counters, navigated: true, nextPageUrl: sourceUrl };
@@ -2323,7 +2340,7 @@ async function continueSearchAutoApply() {
       { maxProcessed: autoApplySearchQueue.maxProcessed || null }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = localizeError(error);
     await saveSearchQueue({ active: false });
     await setRunState({ state: 'error', ...(autoApplySearchQueue.counters || {}), lastError: message });
   }
@@ -2337,6 +2354,14 @@ async function startRun(mode, limitOverride = null, options = {}) {
   stopRequested = false;
   stopReason = '';
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  await globalThis.HHJobAssistantLog?.reset?.('content', 'auto_apply_started', {
+    mode,
+    limit,
+    limitOverride: limitOverride == null ? null : limit,
+    maxProcessed,
+    runId: activeRunId,
+    url: location.href
+  });
   await storageSet({
     runResults: [],
     autoApplyQueue: { active: false },
@@ -2426,7 +2451,7 @@ async function maybeStartFromUrlParam() {
     await appendAgentLog('url_trigger_start', { mode, limit, maxProcessed, groqModel, url: location.href });
     await startRun(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
@@ -2456,6 +2481,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         stopRequested = false;
         stopReason = '';
         activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        await globalThis.HHJobAssistantLog?.reset?.('content', 'chat_assist_content_started', {
+          runId: activeRunId,
+          url: location.href
+        });
         sendResponse(await handleChatAssist());
         break;
       case 'STOP_RUN':
@@ -2470,7 +2499,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: `Неизвестный тип сообщения контент-скрипта: ${message?.type || 'пусто'}` });
     }
   })().catch(async (error) => {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('content_message_error', { type: message?.type || '', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
     sendResponse({ ok: false, error: messageText });
@@ -2484,7 +2513,7 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
     await appendAgentLog('page_trigger_start_auto_apply', { url: location.href });
     await startRun('live');
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : String(error);
+    const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
@@ -2511,7 +2540,7 @@ async function initializeContentScript() {
 }
 
 initializeContentScript().catch(async (error) => {
-  const messageText = error instanceof Error ? error.message : String(error);
+  const messageText = localizeError(error);
   await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }, { optional: true });
   await setRunState({ state: 'error', lastError: messageText });
 });
