@@ -1473,7 +1473,7 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /agentDebugLogFile/);
 });
 
-test('docs describe current setup, logs, and cleanup rules', async () => {
+test('README stays business-facing and technical guidance stays out of it', async () => {
   const readme = await readFile(new URL('README.md', root), 'utf8');
   const agents = await readFile(new URL('AGENTS.md', root), 'utf8');
   const checklist = await readFile(new URL('TEST_CHECKLIST_TEMPLATE.md', root), 'utf8');
@@ -1481,29 +1481,44 @@ test('docs describe current setup, logs, and cleanup rules', async () => {
 
   for (const fragment of [
     '# HH Job Assistant',
-    '## Возможности',
-    '## Установка',
-    '## Настройка',
-    '## Использование',
-    '## Проверка и логи',
-    'Дневной лимит откликов',
-    'Кэш резюме, часов',
-    'Промпт для сопроводительного письма',
-    'Кнопка `Проверить Groq`',
-    'Обработка чатов без ключа Groq API недоступна',
-    'Полный текст резюме, вакансии, чата, сопроводительного письма и ответа Groq в технический лог не пишется.',
-    '`100`',
-    '`1500`',
-    '`3000`',
-    'agentDebugLogFile',
-    'agentDebugLogText',
-    'scripts/inspect-extension-log.mjs',
-    'авторизованный профиль'
+    '## Бизнес-функции',
+    'Запускает отклики прямо со страницы поиска вакансий hh.ru.',
+    'Готовит персональные сопроводительные письма',
+    'Отвечает на вопросы работодателя',
+    'Поднимает резюме на hh.ru',
+    'Обрабатывает чаты с работодателями',
+    'Выделяет просьбы перейти во внешние каналы связи',
+    '## Безопасное поведение',
+    '## Границы продукта'
   ]) {
     assert.match(readme, new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
-  for (const stale of ['[English]', 'Предпросмотр', 'Save key', 'Test Groq', 'Chat reports', 'default `20`', 'popup', 'Reload', 'fallback', 'API keys', 'cookies']) {
+  for (const stale of [
+    '[English]',
+    'Предпросмотр',
+    'Save key',
+    'Test Groq',
+    'Chat reports',
+    'default `20`',
+    'popup',
+    'Reload',
+    'fallback',
+    'API keys',
+    'cookies',
+    '## Установка',
+    '## Настройка',
+    '## Проверка и логи',
+    'npm ',
+    'agentDebugLog',
+    'scripts/',
+    'Модель Groq',
+    'Дневной лимит',
+    'Кэш резюме',
+    'Промпт',
+    '1500',
+    '3000'
+  ]) {
     assert.doesNotMatch(readme, new RegExp(stale.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
