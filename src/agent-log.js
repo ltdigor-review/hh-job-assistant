@@ -2,10 +2,10 @@
   const LOG_KEY = 'agentDebugLog';
   const LOG_FILE_KEY = 'agentDebugLogFile';
   const MAX_ENTRIES = 500;
-  const SECRET_KEY_PATTERN = /api[_-]?key|token|authorization|password|secret/i;
+  const SECRET_KEY_PATTERN = /api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|bearer/i;
 
   function sanitize(value, depth = 0) {
-    if (depth > 4) return '[max-depth]';
+    if (depth > 8) return '[max-depth]';
     if (value == null || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitize(item, depth + 1));
 

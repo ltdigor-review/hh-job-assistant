@@ -4,6 +4,7 @@
 - At the start of non-trivial work in this repository, read this file from disk before acting.
 - Always use English for visible reasoning summaries and final answers unless the user explicitly asks for another language in the current turn.
 - Use terse `caveman` style by default while preserving exact commands, code, errors, and safety warnings.
+- Do not use `superpowers` skills for this repository unless the current user turn explicitly asks for them.
 - Use relative paths for repository files.
 - Develop new features in a new Git branch, then merge deliberately.
 - Increment the project version for code or behavior changes before final verification. Use the repository version sync tooling when available.

@@ -340,15 +340,17 @@ async function getResumeContext() {
     resumeUrl = '',
     resumeParsedText = '',
     resumeParsedAt = '',
+    resumeCacheTtlHours = DEFAULTS.resumeCacheTtlHours,
     resumeText = ''
-  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeText']);
+  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeCacheTtlHours', 'resumeText']);
   const normalizedUrl = normalizeResumeUrl(resumeUrl);
   if (!normalizedUrl) {
     return String(resumeText || '').slice(0, 12000);
   }
 
+  const ttlHours = Math.max(0.1, Math.min(Number(resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
   const cacheAgeMs = Date.now() - Date.parse(resumeParsedAt || 0);
-  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < 24 * 60 * 60 * 1000) {
+  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < ttlHours * 60 * 60 * 1000) {
     return String(resumeParsedText).slice(0, 12000);
   }
 
@@ -400,6 +402,23 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   const timeoutMs = getGroqRequestTimeoutMs();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const requestBody = {
+    model: groqModel || DEFAULTS.groqModel,
+    messages: buildGroqMessages({
+      task,
+      resumeText: String(resumeText).slice(0, 12000),
+      expectedSalary: String(expectedSalary).slice(0, 1000),
+      coverPrompt: String(coverPrompt).slice(0, 4000),
+      vacancyText: String(vacancyText).slice(0, 12000),
+      extraText: String(extraText).slice(0, 8000)
+    }),
+    temperature: task === 'test_assist' ? 0.2 : 0.35,
+    max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
+  };
+  await appendAgentLog('groq_request_payload', {
+    task,
+    requestBody
+  });
   let response;
   try {
     response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -409,19 +428,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         'Content-Type': 'application/json'
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        model: groqModel || DEFAULTS.groqModel,
-        messages: buildGroqMessages({
-          task,
-          resumeText: String(resumeText).slice(0, 12000),
-          expectedSalary: String(expectedSalary).slice(0, 1000),
-          coverPrompt: String(coverPrompt).slice(0, 4000),
-          vacancyText: String(vacancyText).slice(0, 12000),
-          extraText: String(extraText).slice(0, 8000)
-        }),
-        temperature: task === 'test_assist' ? 0.2 : 0.35,
-        max_tokens: task === 'test_assist' ? 1200 : task === 'chat_reply' ? 800 : 900
-      })
+      body: JSON.stringify(requestBody)
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -440,6 +447,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       status: response.status,
       responseText: text.slice(0, 200)
     });
+    await appendAgentLog('groq_error_payload', {
+      task,
+      status: response.status,
+      responseText: text
+    });
     throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
   }
 
@@ -449,6 +461,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     await appendAgentLog('groq_request_error', { task, status: response.status, error: 'empty_response' });
     throw new Error('Groq вернул пустой ответ');
   }
+  await appendAgentLog('groq_response_payload', {
+    task,
+    content,
+    rawResponse: data
+  });
   await appendAgentLog('groq_request_complete', { task, responseLength: content.length });
   return content;
 }
@@ -649,7 +666,7 @@ function resumeRefreshPageActionScript(kind, actionText = '', status = 'running'
     node.setAttribute?.(HIGHLIGHT_ATTR, 'true');
     node.style.outline = '3px solid #2563eb';
     node.style.boxShadow = '0 0 0 6px rgba(37,99,235,.18)';
-    node.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+    node.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     showCursorFor(node);
   };
 

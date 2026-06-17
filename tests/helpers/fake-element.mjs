@@ -1,5 +1,5 @@
 export class FakeElement {
-  constructor({ text = '', href = '', selectorMap = {}, click = null, attrs = {}, disabled = false, type = '', value = '' } = {}) {
+  constructor({ text = '', href = '', selectorMap = {}, click = null, dispatch = null, attrs = {}, disabled = false, type = '', value = '' } = {}) {
     this.innerText = text;
     this.textContent = text;
     this.href = href;
@@ -7,6 +7,7 @@ export class FakeElement {
     this.type = type || attrs.type || '';
     this.selectorMap = selectorMap;
     this.clickHandler = click;
+    this.dispatchHandler = dispatch;
     this.value = value;
     this.checked = false;
     this.children = [];
@@ -45,7 +46,9 @@ export class FakeElement {
     delete this.attrs[name];
   }
 
-  dispatchEvent() {}
+  dispatchEvent(event) {
+    this.dispatchHandler?.(event);
+  }
 
   scrollIntoView() {}
 

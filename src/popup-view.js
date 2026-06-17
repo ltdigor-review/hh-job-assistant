@@ -90,6 +90,14 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
     };
   }
 
+  if (tabState.kind === 'ready' && !tabState.canStartAutoApply) {
+    return {
+      tone: 'warn',
+      title: 'Откройте поиск вакансий',
+      detail: 'Запуск откликов доступен со страницы https://hh.ru/search/vacancy?...'
+    };
+  }
+
   if (!hasGroqKey) {
     return {
       tone: 'warn',
@@ -113,6 +121,17 @@ function deriveCurrentAction(runState = {}) {
   return { title };
 }
 
+function deriveAutoApplyTitle({ activeRun, tabReady, tabState }) {
+  if (activeRun) return 'Дождитесь завершения текущего запуска';
+  if (!tabReady) return 'Откройте вкладку hh.ru';
+  if (!tabState.canStartAutoApply) return 'Откройте страницу https://hh.ru/search/vacancy?...';
+  return 'Запустить отклики с текущей страницы поиска';
+}
+
+function deriveStopTitle(activeRun) {
+  return activeRun ? 'Остановить текущий запуск' : 'Нет активного запуска';
+}
+
 export function derivePopupView({ runState = {}, tabState = {}, hasGroqKey = false } = {}) {
   const activeRun = isActiveRun(runState);
   const tabReady = tabState.kind === 'ready';
@@ -123,7 +142,9 @@ export function derivePopupView({ runState = {}, tabState = {}, hasGroqKey = fal
       autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,
-      chatAssistDisabled: activeRun || !tabReady
+      chatAssistDisabled: activeRun || !tabReady,
+      autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
+      stopTitle: deriveStopTitle(activeRun)
     },
     counters: {
       found: runState.found ?? 0,

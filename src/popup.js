@@ -9,7 +9,6 @@ const nodes = {
   appStatusTitle: document.getElementById('appStatusTitle'),
   appStatusDetail: document.getElementById('appStatusDetail'),
   currentAction: document.getElementById('currentAction'),
-  found: document.getElementById('found'),
   applied: document.getElementById('applied'),
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
@@ -27,6 +26,43 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
 let hasGroqKey = false;
+let copyToastTimeout = null;
+
+async function copyText(text) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function showCopyToast() {
+  document.querySelector('.copy-toast')?.remove();
+  if (copyToastTimeout) {
+    clearTimeout(copyToastTimeout);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = 'copy-toast';
+  toast.setAttribute('role', 'status');
+  toast.textContent = 'Скопировано';
+  document.body.append(toast);
+  copyToastTimeout = setTimeout(() => {
+    toast.remove();
+    copyToastTimeout = null;
+  }, 1000);
+}
 
 function renderView() {
   const view = derivePopupView({
@@ -41,7 +77,6 @@ function renderView() {
 
   nodes.currentAction.textContent = view.currentAction.title;
 
-  nodes.found.textContent = view.counters.found;
   nodes.applied.textContent = view.counters.applied;
   nodes.skipped.textContent = view.counters.skipped;
   nodes.errors.textContent = view.counters.errors;
@@ -50,6 +85,8 @@ function renderView() {
   nodes.stop.disabled = view.buttons.stopDisabled;
   nodes.refreshResumes.disabled = view.buttons.refreshResumesDisabled;
   nodes.chatAssist.disabled = view.buttons.chatAssistDisabled;
+  nodes.autoApply.title = view.buttons.autoApplyTitle;
+  nodes.stop.title = view.buttons.stopTitle;
 }
 
 function resultMessage(item) {
@@ -91,7 +128,23 @@ function renderResults(runResults = []) {
     ...items.map((item) => {
       const node = document.createElement('div');
       node.className = resultClass(item);
-      node.textContent = resultMessage(item);
+      const message = resultMessage(item);
+      const text = document.createElement('div');
+      text.className = 'result-text';
+      text.textContent = message;
+      if (node.classList.contains('warn') || node.classList.contains('error')) {
+        node.classList.add('copyable');
+        const copy = document.createElement('button');
+        copy.className = 'copy-button';
+        copy.type = 'button';
+        copy.title = 'Копировать ошибку';
+        copy.setAttribute('aria-label', 'Копировать ошибку');
+        copy.dataset.copyText = message;
+        copy.textContent = '⧉';
+        node.append(copy, text);
+      } else {
+        node.append(text);
+      }
       return node;
     })
   );
@@ -293,6 +346,17 @@ nodes.refreshResumes.addEventListener('click', () => {
 nodes.chatAssist.addEventListener('click', () => {
   runRuntimeAction('START_CHAT_ASSIST', 'Обрабатываем чаты...', 'processing_chat').catch((error) => {
     lastRunState = { state: 'error', lastError: localizeError(error) };
+    renderView();
+  });
+});
+
+nodes.recentResults.addEventListener('click', (event) => {
+  const button = event.target.closest?.('button[data-copy-text]');
+  if (!button) return;
+  copyText(button.dataset.copyText).then(() => {
+    showCopyToast(button);
+  }).catch((error) => {
+    lastRunState = { state: 'error', lastError: localizeError(error, 'Не удалось скопировать ошибку') };
     renderView();
   });
 });

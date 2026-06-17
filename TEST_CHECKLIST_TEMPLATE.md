@@ -95,15 +95,19 @@ npm run test:hh:chromium
 - [ ] Popup controls are present and wired.
 - [ ] Popup current action has no secondary detail block and does not show `Расширение выполняет задачу`.
 - [ ] Popup current action text renders compactly without overflow.
+- [ ] Popup exposes copy buttons for status errors and error/warning result text.
 - [ ] Options page exposes current settings.
 - [ ] Groq prompts include resume, vacancy, question/chat context, expected salary, and configured model.
 - [ ] Auto-apply DOM tests pass for dry run, live apply, questions, skip/error handling, pagination, queue resume, stop, and Groq fallback paths.
 - [ ] Auto-apply regression passes for employer-question submit that opens a vacancy detail page and must return to the original search page.
+- [ ] Auto-apply regression passes for HH `Сгенерировать резюме` response dialogs.
+- [ ] Auto-apply status is updated before configured delay, then updated again before the next action.
 - [ ] Chat assistant tests pass for unread-only, draft-only, auto-send, external-contact reports, generated text cleanup, and bad output skip.
 - [ ] Resume refresh tests pass for configured URL, edit/save/raise, captcha/login failures, and missing buttons.
 - [ ] Browser UI regression test passes for blocked hh response modal continuation.
 - [ ] Extension smoke loads the current extension version in Chromium.
 - [ ] Authorized hh.ru Chromium smoke confirms `authenticated: true`.
+- [ ] Chromium hh.ru smoke harness closes stale tabs before and after each run.
 
 Optional live smoke test, only after explicit permission:
 
@@ -155,6 +159,7 @@ Result:
 - [ ] Current action text is compact and does not overflow popup width.
 - [ ] Popup does not show `Расширение выполняет задачу`.
 - [ ] Popup does not contain a secondary current-action detail line.
+- [ ] Status and recent error/warning rows can be copied from popup using `Копировать`.
 - [ ] Click `Запуск откликов`, `Поднятие резюме`, `Обработка чатов`, or `Стоп` on non-hh tab.
 
 Expected result:
@@ -378,6 +383,8 @@ Result:
 - [ ] Already applied response form without submit button.
 - [ ] Submit button missing for another reason.
 - [ ] hh.ru country warning or follow-up modal appears.
+- [ ] hh.ru warning says the response may be rejected and shows `Все равно откликнуться`.
+- [ ] hh.ru response dialog shows `Сгенерировать резюме`.
 - [ ] hh.ru keeps response dialog open after submit.
 - [ ] Response page navigation times out.
 
@@ -387,6 +394,8 @@ Expected result:
 - [ ] Already confirmed responses count as applied only when confirmation is detected.
 - [ ] Missing submit is skipped with clear reason.
 - [ ] Country warning is confirmed when needed.
+- [ ] Current action/status shows `HH предупреждает: отклик может получить отказ — подтверждаю отклик` before the confirm click.
+- [ ] `Сгенерировать резюме` is treated as a valid submit/generate action, not skipped as missing submit button.
 - [ ] Open dialog after submit is not counted as sent until confirmation.
 - [ ] Stalled response page is recovered, skipped, and search flow resumes.
 
@@ -651,10 +660,11 @@ Result:
 | --- | --- | --- | --- |
 | Install/load extension | Chrome Load unpacked | Manifest, permissions, popup/options/content scripts | `extension-build.test.mjs` |
 | Popup health | Open popup on hh.ru and non-hh page | Extension ready, tab status, version | `extension-build.test.mjs` |
-| Popup current action | Open popup during active run | Compact current action, no secondary detail text | `extension-build.test.mjs` |
+| Popup current action/copy | Open popup during active run or error | Compact current action, no secondary detail text, copyable status/errors | `extension-build.test.mjs` |
 | Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, chat settings | `extension-build.test.mjs` |
-| Auto-apply | `Запуск откликов` | Limit, delays, submit confirmation, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
+| Auto-apply | `Запуск откликов` | Limit, delays, submit confirmation, status-before-delay, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
 | Employer questions | Auto-apply on test forms | Text/radio/checkbox, salary fallback, bad output skip, return to search after HH opens vacancy detail | `content-auto-apply.test.mjs` |
+| HH generated resume response | Auto-apply on HH response modal | `Сгенерировать резюме` button is clicked and confirmed | `content-auto-apply.test.mjs` |
 | Stop | `Стоп` | Queue cleared, stopped state, local log event | `content-auto-apply.test.mjs` |
 | Keyboard command | `Alt+Shift+A` | Valid URL guard, start auto-apply | `extension-build.test.mjs` |
 | Resume refresh | `Обновить резюме` | Configured URL, edit/save/raise, error states | `resume-refresh.test.mjs` |

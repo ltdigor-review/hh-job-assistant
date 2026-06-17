@@ -13,6 +13,7 @@ const fields = {
   groqApiKey: document.getElementById('groqApiKey'),
   groqModel: document.getElementById('groqModel'),
   resumeUrl: document.getElementById('resumeUrl'),
+  resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   expectedSalary: document.getElementById('expectedSalary'),
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
@@ -41,6 +42,7 @@ async function loadOptions() {
   fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
   fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
+  fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
     ? DEFAULTS.coverPrompt
@@ -58,6 +60,7 @@ async function saveOptions() {
   const patch = {
     groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
     resumeUrl: fields.resumeUrl.value.trim(),
+    resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),

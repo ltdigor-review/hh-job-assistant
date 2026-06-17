@@ -5,6 +5,7 @@
     resumeUrl: '',
     resumeParsedText: '',
     resumeParsedAt: '',
+    resumeCacheTtlHours: 1,
     expectedSalary: '',
     coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
     dailyLimit: 100,
