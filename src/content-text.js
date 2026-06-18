@@ -132,6 +132,28 @@
       .filter((token) => (token.length >= 2 || /^\d+$/.test(token)) && !stopWords.has(token));
   }
 
+  function choiceAnswerValues(answerText) {
+    return cleanText(answerText)
+      .split(/\n+/)
+      .map((line) => line.replace(/^\s*(?:choice\s+group|group|вариант(?:ы)?|вопрос)\s*\d+\s*[:.)-]\s*/i, ''))
+      .map(normalizeChoiceText)
+      .filter(Boolean);
+  }
+
+  function exactChoiceTokenScore(label, answerText) {
+    const labelTokens = choiceTokens(label);
+    if (labelTokens.length === 0) return 0;
+    const answerValues = choiceAnswerValues(answerText);
+    const exactMatches = labelTokens.filter((token) => answerValues.includes(token));
+    if (exactMatches.length !== 1) return 0;
+
+    const exactToken = exactMatches[0];
+    const isDistinctShortCode = /^[a-z0-9]{2,24}$/i.test(exactToken);
+    const appearsOnceInLabel = labelTokens.filter((token) => token === exactToken).length === 1;
+    const appearsOnceInAnswer = answerValues.filter((token) => token === exactToken).length === 1;
+    return isDistinctShortCode && appearsOnceInLabel && appearsOnceInAnswer ? 95 : 0;
+  }
+
   function scoreChoice(label, answerText) {
     const normalizedLabel = normalizeChoiceText(label);
     const normalizedAnswer = normalizeChoiceText(answerText);
@@ -146,7 +168,8 @@
 
     const answerTokens = new Set(choiceTokens(answerText));
     const matches = labelTokens.filter((token) => answerTokens.has(token)).length;
-    return matches / labelTokens.length;
+    const tokenScore = matches / labelTokens.length;
+    return Math.max(tokenScore, exactChoiceTokenScore(label, answerText));
   }
 
   global.HHJobAssistantText = {

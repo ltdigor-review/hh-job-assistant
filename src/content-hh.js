@@ -521,6 +521,10 @@ function detectTest(root = getDialogRoot()) {
   return /тест|задани[ея]|контрольн|ответьте на вопросы|вопрос \d|пройти тест/i.test(text);
 }
 
+function isResponseFormRoot(root) {
+  return root !== document || isResponseFormPage();
+}
+
 function isAlreadyAppliedPage(root = document) {
   return /вы откликнулись|отклик отправлен|отклик успешно|отклик на вакансию отправлен/i.test(
     textOf(root) || textOf(root.body)
@@ -743,12 +747,49 @@ function getControlType(control) {
   return String(control?.type || control?.getAttribute?.('type') || '').toLowerCase();
 }
 
+function isQuestionLikeChoiceLine(line) {
+  const text = cleanText(line);
+  if (!text) return false;
+  return (
+    /[?]$/.test(text) ||
+    /^(?:где|какой|какая|какое|какие|сколько|готовы|есть ли|имеется ли|вакансия открыта|на какой|почему|были ли|был ли)\b/i.test(text)
+  );
+}
+
+function isUsableChoiceValue(value) {
+  const text = cleanText(value);
+  if (!text || text.length > 120) return false;
+  if (/^\d+$/.test(text)) return false;
+  if (/^task[_-]?\d+/i.test(text)) return false;
+  return /[а-яa-z]/i.test(text);
+}
+
+function extractOptionMarker(marker) {
+  let hasQuestionLikeLine = false;
+  const lines = cleanText(marker)
+    .split('\n')
+    .map((line) => cleanText(line))
+    .filter(Boolean)
+    .filter((line) => {
+      if (!isQuestionLikeChoiceLine(line)) return true;
+      hasQuestionLikeLine = true;
+      return false;
+    })
+    .filter((line) => !/^(?:писать тут|ответить|отправить|откликнуться|\d+\s+из\s+\d+)$/i.test(line));
+  return {
+    text: lines.join('\n'),
+    hasQuestionLikeLine
+  };
+}
+
 function getOptionLabel(control) {
   const label = typeof control.closest === 'function' ? control.closest('label') : null;
   const ariaLabel = control.getAttribute?.('aria-label') || '';
   const marker = textOf(label || control.parentElement || control);
   const value = control.value || control.getAttribute?.('value') || '';
-  return cleanText([...new Set([ariaLabel, marker, marker ? '' : value].map(cleanText).filter(Boolean))].join('\n'));
+  const markerOption = extractOptionMarker(marker);
+  const fallbackValue = !markerOption.text && !markerOption.hasQuestionLikeLine && isUsableChoiceValue(value) ? value : '';
+  return cleanText([...new Set([ariaLabel, markerOption.text, fallbackValue].map(cleanText).filter(Boolean))].join('\n'));
 }
 
 function getControlGroupKey(control, index) {
@@ -1350,7 +1391,12 @@ async function generateCoverLetter(vacancyText) {
   if (!response?.ok) {
     throw new Error(localizeError(response?.error, 'Не удалось сгенерировать сопроводительное письмо'));
   }
-  return sanitizeGeneratedText(response.text);
+  const text = sanitizeGeneratedText(response.text);
+  const invalidReason = getCoverLetterInvalidReason(text);
+  if (invalidReason) {
+    throw new Error(`Groq вернул неподходящее сопроводительное письмо: ${invalidReason}`);
+  }
+  return text;
 }
 
 function isMissingGroqKeyError(error) {
@@ -1358,7 +1404,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|groq вернул неподходящее сопроводительное письмо/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isEmptyGroqResponseError(error) {
@@ -1439,6 +1485,19 @@ async function getExpectedSalary() {
 
 async function getFallbackCoverLetter() {
   return 'Здравствуйте! Заинтересовала ваша вакансия. Имею релевантный опыт в разработке и управлении IT-продуктами, готов обсудить задачи и пользу для команды.';
+}
+
+function getCoverLetterInvalidReason(value) {
+  const text = cleanText(value);
+  const genericReason = getGeneratedTextInvalidReason(text, { minLength: 20 });
+  if (genericReason) return genericReason;
+  if (text.length > 900) return 'Сопроводительное письмо слишком длинное.';
+  if (text.split(/\n+/).filter(Boolean).length > 4) return 'Сопроводительное письмо похоже на список или развернутый отчет.';
+  if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'Сопроводительное письмо содержит список вместо готового текста.';
+  if (/(?:резюме кандидата|текст вакансии|структурированные вопросы|choice group|text question|ответы на вопросы работодателя)/i.test(text)) {
+    return 'Сопроводительное письмо содержит служебный контекст промпта.';
+  }
+  return '';
 }
 
 async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
@@ -1908,13 +1967,14 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
     const currentText = getRootText(root);
     if (root !== document && currentText) return root;
     if (
+      root !== document &&
       currentText &&
       currentText !== previousText &&
       /отправить|сопровод|тест|отклик|ответить|ответьте|вопрос|работодател/i.test(currentText)
     ) {
       return root;
     }
-    if (isResponseFormPage() || findQuestionFields(document).length > 0 || findQuestionControlGroups(document).length > 0) {
+    if (isResponseFormPage()) {
       return document;
     }
     await sleep(250);
@@ -2095,6 +2155,11 @@ async function applyToVacancy(item, counters) {
   const blockedReason = detectBlockedResponseReason(root);
   if (blockedReason) {
     await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
+    return;
+  }
+
+  if (!isResponseFormRoot(root)) {
+    await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: форма отклика HH не открылась.');
     return;
   }
 

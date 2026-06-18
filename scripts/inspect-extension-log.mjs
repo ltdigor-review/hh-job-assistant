@@ -101,6 +101,23 @@ function dedupeResults(items, since) {
   return [...byKey.values()].sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
 }
 
+function truncate(value, maxLength = 180) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function formatResultLine(item) {
+  const parts = [
+    item.timestamp || '',
+    item.status || '',
+    item.vacancyId || '',
+    truncate(item.title || '', 80)
+  ].filter(Boolean);
+  const error = truncate(item.error || '', 220);
+  return error ? `${parts.join(' ')} - ${error}` : parts.join(' ');
+}
+
 function extractField(fragment, field) {
   const match = fragment.match(new RegExp(`"${field}":(?:"([^"]*)"|(true|false|null|-?\\d+(?:\\.\\d+)?))`));
   if (!match) return '';
@@ -253,7 +270,8 @@ async function main() {
     latestState,
     latestDebugFile,
     hasLocalDebugText,
-    applied
+    applied,
+    skipped
   };
 
   if (args.output) {
@@ -279,7 +297,10 @@ async function main() {
     console.log('Debug file: local agentDebugLogText found');
   }
   for (const item of applied.slice(-10)) {
-    console.log(`${item.timestamp || ''} ${item.status || ''} ${item.vacancyId || ''} ${item.title || ''}`.trim());
+    console.log(formatResultLine(item));
+  }
+  for (const item of skipped.slice(-10)) {
+    console.log(formatResultLine(item));
   }
 }
 

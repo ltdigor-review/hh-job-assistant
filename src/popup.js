@@ -13,6 +13,7 @@ const nodes = {
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
   recentResults: document.getElementById('recentResults'),
+  chatReportsSection: document.getElementById('chatReportsSection'),
   chatReports: document.getElementById('chatReports'),
   version: document.getElementById('version'),
   autoApply: document.getElementById('autoApply'),
@@ -91,6 +92,7 @@ function renderView() {
   nodes.refreshResumes.disabled = view.buttons.refreshResumesDisabled;
   nodes.chatAssist.hidden = !view.buttons.chatAssistVisible;
   nodes.chatAssist.disabled = view.buttons.chatAssistDisabled;
+  nodes.chatReportsSection.hidden = !view.buttons.chatAssistVisible;
   nodes.autoApply.title = view.buttons.autoApplyTitle;
   nodes.continueApply.title = view.buttons.continueTitle;
   nodes.stop.title = view.buttons.stopTitle;
@@ -289,9 +291,11 @@ async function refreshPopup() {
   experimentalFeaturesEnabled = settings.experimentalFeaturesEnabled === true;
   lastTabState = runtimeError || await readTabState();
 
-  const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });
-  if (reportsResponse?.ok) {
-    renderChatReports(reportsResponse.chatReports || []);
+  if (experimentalFeaturesEnabled) {
+    const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });
+    if (reportsResponse?.ok) {
+      renderChatReports(reportsResponse.chatReports || []);
+    }
   }
 
   renderView();

@@ -4,7 +4,10 @@ import './defaults.js';
 
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
-const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
+const OLD_DEFAULT_COVER_PROMPTS = new Set([
+  'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
+  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.'
+]);
 const LEGACY_DEFAULT_DELAYS = [
   [8000, 15000],
   [1500, 3000]
@@ -17,6 +20,11 @@ const RESUME_GROQ_RETRY_BRIEF_MAX_CHARS = 800;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
+const GROQ_COVER_LETTER_MAX_TOKENS = 500;
+const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 800;
+const GROQ_CHAT_REPLY_MAX_TOKENS = 500;
+const GROQ_CHOICE_RETRY_MAX_TOKENS = 300;
+const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_EMPTY_RESPONSE_RETRIES = 1;
 const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
@@ -169,7 +177,7 @@ async function ensureDefaults() {
     patch.dailyLimit = DEFAULTS.dailyLimit;
   }
 
-  if (current.coverPrompt === OLD_DEFAULT_COVER_PROMPT) {
+  if (OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)) {
     patch.coverPrompt = DEFAULTS.coverPrompt;
   }
 
@@ -338,7 +346,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
     {
       role: 'system',
       content:
-        'Write a short honest hh.ru cover letter in Russian, 3-4 sentences. No invented facts, placeholders, labels, or unknown names. Return final text only.'
+        'Write one final hh.ru cover letter in Russian. Strict format: 3-4 short sentences, 450 characters max. No bullets, headings, labels, analysis, markdown, placeholders, unknown names, or invented facts. Do not list resume/vacancy facts. Return only the letter text.'
     },
     {
       role: 'user',
@@ -569,9 +577,17 @@ async function getResumeGroqContext(sourceText, maxChars = RESUME_GROQ_BRIEF_MAX
 }
 
 function getMaxTokensForTask(task) {
-  if (task === 'test_assist') return 700;
-  if (task === 'choice_retry') return 300;
-  return 250;
+  if (task === 'test_assist') return GROQ_TEST_ASSIST_MAX_TOKENS;
+  if (task === 'choice_retry') return GROQ_CHOICE_RETRY_MAX_TOKENS;
+  if (task === 'chat_reply') return GROQ_CHAT_REPLY_MAX_TOKENS;
+  return GROQ_COVER_LETTER_MAX_TOKENS;
+}
+
+function getLengthRetryMaxTokensForTask(task, currentMaxTokens) {
+  if (task === 'cover_letter') {
+    return Math.max(currentMaxTokens, GROQ_COVER_LETTER_RETRY_MAX_TOKENS);
+  }
+  return currentMaxTokens;
 }
 
 function getGroqTaskLabel(task) {
@@ -753,6 +769,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         usage: normalizeUsage(data?.usage)
       });
       if (attempt < maxAttempts) {
+        if (finishReason === 'length') {
+          requestBody.max_tokens = getLengthRetryMaxTokensForTask(task, requestBody.max_tokens);
+        }
         await sleep(GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS);
         continue;
       }
@@ -766,9 +785,12 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         usage: data?.usage
       }));
     }
+    const finishReason = data?.choices?.[0]?.finish_reason || '';
     await appendAgentLog('groq_response_payload', {
       task,
       responseLength: content.length,
+      responseHash: hashText(content),
+      finishReason,
       choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
       model: data?.model || '',
       usage: normalizeUsage(data?.usage),

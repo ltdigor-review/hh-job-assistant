@@ -1145,7 +1145,57 @@ test('auto apply fills required contenteditable cover letter before submit', asy
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
+test('auto apply treats hh attach-cover-letter modal as cover letter, not questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Сопроводительное письмо',
+      'Почему именно ваша кандидатура должна заинтересовать работодателя',
+      'Сгенерировать · 1 раз бесплатно',
+      'Закрыть',
+      'Отправить'
+    ].join('\n'),
+    hasTextarea: true,
+    groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.groqRequests.at(-1).task, 'cover_letter');
+  assert.equal(result.textareaValue, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
+test('auto apply falls back when Groq cover letter looks like prompt leakage', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nСопроводительное письмо',
+    hasTextarea: true,
+    groqResponse: {
+      ok: true,
+      text: [
+        'Резюме кандидата:',
+        '- Java',
+        '- Kotlin',
+        '- Spring Boot',
+        '- Kafka',
+        'Текст вакансии:',
+        'Нужно написать письмо.'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.match(result.textareaValue, /^Здравствуйте! Заинтересовала ваша вакансия/);
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
 test('auto apply counts already-applied cover form update before submit lookup', async () => {
+  const coverLetter = 'Здравствуйте! Заинтересовала вакансия, готов обсудить релевантный опыт и задачи команды.';
   const result = await runContentAutoApply({
     dialogText: [
       'Отклик на вакансию',
@@ -1156,14 +1206,14 @@ test('auto apply counts already-applied cover form update before submit lookup',
     hasCoverLetterField: true,
     submitButtonText: 'Закрыть',
     dialogTextAfterCoverInput: 'Отклик на вакансию Вы откликнулись Чат',
-    groqResponse: { ok: true, text: 'Здравствуйте!' }
+    groqResponse: { ok: true, text: coverLetter }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
-  assert.equal(result.coverTextareaValue, 'Здравствуйте!');
+  assert.equal(result.coverTextareaValue, coverLetter);
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
   assert.equal(result.appended.at(-1).error, '');
 });
@@ -1570,6 +1620,57 @@ test('auto apply retries Groq when choice answer does not match options', async 
   assert.equal(result.groqRequests.at(-1).vacancyText, '');
   assert.match(result.groqRequests.at(-1).extraText, /Previous answer did not match any available HH choice labels/);
   assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Вакансия/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply does not send question text as fake HH choice options', async () => {
+  const formText = [
+    'Отклик на вакансию',
+    'Ответьте на вопросы работодателя',
+    'Где располагается место работы?',
+    'Какой график работы?',
+    'Вакансия открыта?'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: formText,
+    bodyText: formText,
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'workplace', label: 'Где располагается место работы?', value: 'on' },
+      { type: 'radio', name: 'schedule', label: 'Какой график работы?', value: 'short' },
+      { type: 'radio', name: 'open', label: 'Вакансия открыта?', value: 'true' }
+    ],
+    groqResponse: { ok: true, text: 'Choice group 1: Где располагается место работы?' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_question_fields_not_found');
+});
+
+test('auto apply accepts exact short code from multiline hh choice label', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nВыберите формат описания вакансии',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'description', label: 'краткое описания вакансий\nshort', value: 'short' },
+      { type: 'radio', name: 'description', label: 'полное описание вакансий\nfull', value: 'full' }
+    ],
+    groqResponse: { ok: true, text: 'Choice group 1: full' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['полное описание вакансий\nfull']);
+  assert.equal(result.groqRequests.length, 1);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 

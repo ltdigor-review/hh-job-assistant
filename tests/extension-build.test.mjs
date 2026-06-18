@@ -293,6 +293,8 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
+  assert.match(localData.coverPrompt, /до 450 символов/);
+  assert.match(localData.coverPrompt, /Не пересказывай резюме или вакансию/);
   assert.equal(localData.chatUnreadOnly, true);
   assert.equal(localData.chatReplyMode, 'draft');
   assert.equal(localData.chatLimit, 10);
@@ -381,7 +383,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
       ok: true,
       async json() {
         return {
-          choices: [{ message: { content: 'Ответ' } }],
+          choices: [{ finish_reason: 'stop', message: { content: 'Ответ' } }],
           usage: { prompt_tokens: 1234, completion_tokens: 63, total_tokens: 1297 }
         };
       }
@@ -468,6 +470,9 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test|Java developer|250 000|Вакансия|зарплату/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
+  assert.equal(groqResponseLog.details.responsePreview, undefined);
+  assert.match(groqResponseLog.details.responseHash, /^[0-9a-f]{8}$/);
+  assert.equal(groqResponseLog.details.finishReason, 'stop');
   assert.equal(groqResponseLog.details.choiceCount, 1);
   assert.equal(groqResponseLog.details.attempt, 1);
   assert.deepEqual(groqResponseLog.details.usage, {
@@ -475,7 +480,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     completionTokens: 63,
     totalTokens: 1297
   });
-  assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /Ответ|rawResponse|content/);
+  assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|Ответ|Java developer|250 000|Вакансия|зарплату|rawResponse|responsePreview/);
 });
 
 test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
@@ -549,7 +554,7 @@ test('chat reply prompt includes resume, vacancy, chat question, and expected sa
 
   assert.equal(response.ok, true);
   assert.equal(requestBody.model, 'test-model');
-  assert.equal(requestBody.max_tokens, 250);
+  assert.equal(requestBody.max_tokens, 500);
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer, Spring Boot/);
   assert.match(userContent, /250 000 руб\. на руки/);
@@ -634,6 +639,7 @@ test('chat reply uses provided vacancy text without opening the vacancy page', a
 test('Groq empty 200 response is retried once before returning text', async () => {
   let listener = null;
   let calls = 0;
+  const maxTokensByCall = [];
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
@@ -643,14 +649,15 @@ test('Groq empty 200 response is retried once before returning text', async () =
     agentDebugLog: []
   };
 
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (url, options) => {
     calls += 1;
+    maxTokensByCall.push(JSON.parse(options.body).max_tokens);
     return {
       ok: true,
       status: 200,
       async json() {
         return {
-          choices: [{ message: { content: calls === 1 ? '' : 'Ответ после повтора' }, finish_reason: 'stop' }]
+          choices: [{ message: { content: calls === 1 ? '' : 'Ответ после повтора' }, finish_reason: calls === 1 ? 'length' : 'stop' }]
         };
       }
     };
@@ -693,10 +700,13 @@ test('Groq empty 200 response is retried once before returning text', async () =
   assert.equal(response.ok, true);
   assert.equal(response.text, 'Ответ после повтора');
   assert.equal(calls, 2);
+  assert.deepEqual(maxTokensByCall, [500, 800]);
   const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
   const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(emptyErrorLog.details.attempt, 1);
+  assert.equal(emptyErrorLog.details.maxTokens, 500);
   assert.equal(emptyErrorLog.details.maxAttempts, 2);
+  assert.equal(responseLog.details.finishReason, 'stop');
   assert.equal(responseLog.details.attempt, 2);
 });
 
@@ -1845,7 +1855,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults', 'chatReports', 'clearReports']) {
+  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults', 'chatReportsSection', 'chatReports', 'clearReports']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /\.copy-button/);
@@ -1861,6 +1871,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /Скопировано/);
   assert.match(js, /experimentalFeaturesEnabled/);
   assert.match(js, /nodes\.chatAssist\.hidden = !view\.buttons\.chatAssistVisible/);
+  assert.match(js, /nodes\.chatReportsSection\.hidden = !view\.buttons\.chatAssistVisible/);
+  assert.match(js, /if \(experimentalFeaturesEnabled\) \{/);
   assert.match(js, /nodes\.autoApply\.textContent = view\.buttons\.autoApplyLabel/);
   assert.match(js, /nodes\.continueApply\.disabled = view\.buttons\.continueDisabled/);
   assert.doesNotMatch(html, /id="copyStatus"|Копировать статус/);
