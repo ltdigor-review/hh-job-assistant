@@ -131,7 +131,7 @@ async function testGroq() {
     setStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);
     return;
   }
-  setStatus(`Groq работает. Длина примера: ${response.sampleLength}`);
+  setStatus('Groq работает.');
 }
 
 fields.groqApiKey.addEventListener('focus', () => {

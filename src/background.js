@@ -16,6 +16,8 @@ const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
+const GROQ_EMPTY_RESPONSE_RETRIES = 1;
+const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
 
 function nowIso() {
   return new Date().toISOString();
@@ -366,8 +368,17 @@ function normalizeResumeUrl(value) {
 
 function isHhUrl(value) {
   try {
-    const hostname = new URL(String(value || '')).hostname;
-    return hostname === 'hh.ru' || hostname.endsWith('.hh.ru');
+    const url = new URL(String(value || ''));
+    return url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru');
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedTabNavigationUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' && (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru'));
   } catch {
     return false;
   }
@@ -614,9 +625,6 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     resumeBriefVersion: resumeContext.version
   });
 
-  const timeoutMs = getGroqRequestTimeoutMs();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const requestBody = {
     model: groqModel || DEFAULTS.groqModel,
     messages: buildGroqMessages({
@@ -653,63 +661,87 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     resumeBriefVersion: resumeContext.version,
     resumeBriefCached: resumeContext.cached
   });
-  let response;
-  try {
-    response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${groqApiKey}`,
-        'Content-Type': 'application/json'
-      },
-      signal: controller.signal,
-      body: JSON.stringify(requestBody)
-    });
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      await appendAgentLog('groq_request_error', { task, error: 'timeout', timeoutMs });
-      throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
+  const timeoutMs = getGroqRequestTimeoutMs();
+  const maxAttempts = GROQ_EMPTY_RESPONSE_RETRIES + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${groqApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify(requestBody)
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        await appendAgentLog('groq_request_error', { task, error: 'timeout', timeoutMs, attempt, maxAttempts });
+        throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    if (response.status === 429) {
-      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
-      const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
-      await storageSet({ groqCooldownUntil: cooldownUntil });
-      await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      if (response.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+        const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
+        await storageSet({ groqCooldownUntil: cooldownUntil });
+        await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
+      }
+      await appendAgentLog('groq_request_error', {
+        task,
+        status: response.status,
+        responseText: text.slice(0, 200),
+        attempt,
+        maxAttempts
+      });
+      await appendAgentLog('groq_error_payload', {
+        task,
+        status: response.status,
+        responseText: text.slice(0, 500),
+        attempt,
+        maxAttempts
+      });
+      throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
     }
-    await appendAgentLog('groq_request_error', {
-      task,
-      status: response.status,
-      responseText: text.slice(0, 200)
-    });
-    await appendAgentLog('groq_error_payload', {
-      task,
-      status: response.status,
-      responseText: text.slice(0, 500)
-    });
-    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
-  }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    await appendAgentLog('groq_request_error', { task, status: response.status, error: 'empty_response' });
-    throw new Error('Groq вернул пустой ответ');
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      await appendAgentLog('groq_request_error', {
+        task,
+        status: response.status,
+        error: 'empty_response',
+        attempt,
+        maxAttempts,
+        choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+        finishReason: data?.choices?.[0]?.finish_reason || ''
+      });
+      if (attempt < maxAttempts) {
+        await sleep(GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS);
+        continue;
+      }
+      throw new Error('Groq вернул пустой ответ');
+    }
+    await appendAgentLog('groq_response_payload', {
+      task,
+      responseLength: content.length,
+      choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+      model: data?.model || '',
+      usage: normalizeUsage(data?.usage),
+      attempt
+    });
+    await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage: normalizeUsage(data?.usage), attempt });
+    return content;
   }
-  await appendAgentLog('groq_response_payload', {
-    task,
-    responseLength: content.length,
-    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-    model: data?.model || '',
-    usage: normalizeUsage(data?.usage)
-  });
-  await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage: normalizeUsage(data?.usage) });
-  return content;
+  throw new Error('Groq вернул пустой ответ');
 }
 
 async function generateChatReply({ vacancyUrl = '', vacancyText = '', chatText = '' }) {
@@ -1304,6 +1336,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'APPEND_RUN_RESULT': {
         await appendRunResult(message.item || {});
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'NAVIGATE_TAB': {
+        const tabId = sender?.tab?.id;
+        const url = String(message.url || '');
+        if (!tabId || !isAllowedTabNavigationUrl(url)) {
+          sendResponse({ ok: false, error: 'Navigation target is not allowed.' });
+          break;
+        }
+        await chrome.tabs.update(tabId, { url });
         sendResponse({ ok: true });
         break;
       }

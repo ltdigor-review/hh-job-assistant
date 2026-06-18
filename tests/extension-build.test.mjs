@@ -464,6 +464,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test|Java developer|250 000|Вакансия|зарплату/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
   assert.equal(groqResponseLog.details.choiceCount, 1);
+  assert.equal(groqResponseLog.details.attempt, 1);
   assert.deepEqual(groqResponseLog.details.usage, {
     promptTokens: 1234,
     completionTokens: 63,
@@ -549,6 +550,75 @@ test('chat reply prompt includes resume, vacancy, chat question, and expected sa
   assert.match(userContent, /250 000 руб\. на руки/);
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /какие ожидания по зарплате/);
+});
+
+test('Groq empty 200 response is retried once before returning text', async () => {
+  let listener = null;
+  let calls = 0;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Java developer, Spring Boot',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt',
+    agentDebugLog: []
+  };
+
+  globalThis.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          choices: [{ message: { content: calls === 1 ? '' : 'Ответ после повтора' }, finish_reason: 'stop' }]
+        };
+      }
+    };
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(callback) { listener = callback; } }
+    },
+    tabs: { onUpdated: { addListener() {} } },
+    alarms: { create() {}, onAlarm: { addListener() {} } },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'GENERATE_COVER_LETTER', vacancyText: 'Вакансия: Java developer' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.text, 'Ответ после повтора');
+  assert.equal(calls, 2);
+  const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
+  const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
+  assert.equal(emptyErrorLog.details.attempt, 1);
+  assert.equal(emptyErrorLog.details.maxAttempts, 2);
+  assert.equal(responseLog.details.attempt, 2);
 });
 
 test('background stores capped chat reports with direct chat links', async () => {
@@ -811,6 +881,88 @@ test('background reloads extension on explicit reload message', async () => {
   assert.equal(response.ok, true);
   assert.equal(response.reloading, true);
   assert.equal(reloads, 1);
+});
+
+test('background navigates sender tab only to hh.ru URLs', async () => {
+  let listener = null;
+  const updatedTabs = [];
+  const localData = {};
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      },
+      async update(tabId, patch) {
+        updatedTabs.push({ tabId, patch });
+        return { id: tabId, ...patch };
+      },
+      onUpdated: {
+        addListener() {},
+        removeListener() {}
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const okResponse = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      { type: 'NAVIGATE_TAB', url: 'https://hh.ru/search/vacancy?text=Java' },
+      { tab: { id: 42 } },
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  const rejectedResponse = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      { type: 'NAVIGATE_TAB', url: 'https://example.com/' },
+      { tab: { id: 42 } },
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(okResponse.ok, true);
+  assert.equal(rejectedResponse.ok, false);
+  assert.deepEqual(updatedTabs, [
+    { tabId: 42, patch: { url: 'https://hh.ru/search/vacancy?text=Java' } }
+  ]);
+});
+
+test('content navigation delegates to background tab update', async () => {
+  const js = await readFile(new URL('src/content-hh.js', root), 'utf8');
+
+  assert.match(js, /type: 'NAVIGATE_TAB'/);
+  assert.match(js, /chrome\.runtime\.sendMessage\(\{ type: 'NAVIGATE_TAB', url: targetUrl \}\)/);
+  assert.match(js, /location\.assign\(targetUrl\)/);
 });
 
 test('Groq prompt parses configured hh resume URL for resume context', async () => {

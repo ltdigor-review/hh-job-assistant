@@ -205,7 +205,30 @@ function navigateTo(url) {
     window.__HH_JOB_ASSISTANT_TEST_NAVIGATE__(url);
     return;
   }
-  location.href = url;
+  const targetUrl = String(url || '');
+  let settled = false;
+  const fallback = () => {
+    if (settled) return;
+    settled = true;
+    if (typeof location.assign === 'function') {
+      location.assign(targetUrl);
+      return;
+    }
+    location.href = targetUrl;
+  };
+
+  const fallbackTimer = setTimeout(fallback, 500);
+  chrome.runtime.sendMessage({ type: 'NAVIGATE_TAB', url: targetUrl }).then((response) => {
+    clearTimeout(fallbackTimer);
+    if (response?.ok) {
+      settled = true;
+      return;
+    }
+    fallback();
+  }).catch(() => {
+    clearTimeout(fallbackTimer);
+    fallback();
+  });
 }
 
 function isUnsafePage() {
