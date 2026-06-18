@@ -313,7 +313,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
       {
         role: 'system',
         content:
-          'Answer hh.ru screening questions in Russian. Use resume brief, vacancy, salary, exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Avoid first-person pronouns. Do not invent facts.'
+          'Answer hh.ru screening questions in Russian. Optimize each answer for getting an interview invitation: give what the employer wants to hear while staying consistent with resume and vacancy. Use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must be concise, natural, confident, and directly answer the question; avoid generic lists of learning methods/tools unless the question explicitly asks for them. Avoid first-person pronouns. Do not invent facts. Do not end text drafts with a period.'
       },
       {
         role: 'user',

@@ -447,9 +447,14 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
+  assert.match(systemContent, /getting an interview invitation/);
+  assert.match(systemContent, /what the employer wants to hear/);
+  assert.match(systemContent, /concise, natural, confident/);
+  assert.match(systemContent, /avoid generic lists of learning methods\/tools/);
   assert.match(systemContent, /Avoid first-person pronouns/);
   assert.match(systemContent, /exact option label/);
   assert.match(systemContent, /Do not invent facts/);
+  assert.match(systemContent, /Do not end text drafts with a period/);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
