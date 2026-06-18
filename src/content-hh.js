@@ -58,8 +58,11 @@ const HH_SELECTORS = {
   ]
 };
 
-const CLICK_DELAY_MIN_MS = 500;
-const CLICK_DELAY_MAX_MS = 1200;
+const CLICK_DELAY_MIN_MS = 900;
+const CLICK_DELAY_MAX_MS = 1800;
+const POST_FILL_SETTLE_MS = 1000;
+const POST_SUBMIT_SETTLE_MS = 5000;
+const SUBMIT_CONFIRM_TIMEOUT_MS = 15000;
 const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
 const VACANCY_GROQ_MAX_CHARS = 2200;
@@ -603,6 +606,12 @@ function isSalaryQuestion(field) {
   return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
 }
 
+function allowsShortNumericQuestionAnswer(field) {
+  return /сколько|количеств|число|лет|год|разработчик|команд|зарплат|доход|компенсац|оклад|gross|salary|income/i.test(
+    `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`
+  );
+}
+
 function extractContactFromText(text) {
   return (
     cleanText(text).match(/(?:https?:\/\/)?t\.me\/[a-z0-9_]+|@[a-z0-9_]{4,}|(?:https?:\/\/)?wa\.me\/\S+/i)?.[0] || ''
@@ -611,6 +620,9 @@ function extractContactFromText(text) {
 
 function getQuestionAnswerInvalidReason(answer, field) {
   const text = cleanText(answer);
+  if (text.length < 2 && allowsShortNumericQuestionAnswer(field) && /\d/.test(text)) {
+    return '';
+  }
   const genericReason = getGeneratedTextInvalidReason(text, { minLength: 2 });
   if (genericReason) return genericReason;
   if (isContactQuestion(field) && !/(?:^|\s)(?:@[a-z0-9_]{4,}|t\.me\/[a-z0-9_]+|https?:\/\/\S+|телеграм|telegram|whatsapp|wa\.me\/\S+)/i.test(text)) {
@@ -1044,11 +1056,27 @@ async function stopBeforeSubmitIfRequested(counters) {
 }
 
 async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected }) {
+  const started = Date.now();
+  const timeoutMs = window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : SUBMIT_CONFIRM_TIMEOUT_MS;
+  while (Date.now() - started <= timeoutMs) {
+    const root = getDialogRoot();
+    if (
+      isAlreadyAppliedPage(root) ||
+      isAlreadyAppliedPage(document) ||
+      detectBlockedResponseReason(root) ||
+      findFollowupConfirmButton(root) ||
+      (!hasSubmitControl(root) && !hasSubmitControl(document))
+    ) {
+      break;
+    }
+    await sleep(500);
+  }
+
   const root = getDialogRoot();
   const followupConfirmButton = findFollowupConfirmButton(root);
   if (followupConfirmButton) {
     await clickFollowupConfirmButton(followupConfirmButton, counters);
-    await sleep(500);
+    await sleep(POST_FILL_SETTLE_MS);
     return verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected });
   }
 
@@ -1077,17 +1105,73 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
   }
 
   if (hasSubmitControl(root) || hasSubmitControl(document)) {
+    const fields = findQuestionFields(root);
+    const validationText = collectResponseValidationText(root);
+    await appendAgentLog('submit_not_confirmed_diagnostics', {
+      vacancyId: item.vacancyId,
+      status,
+      url: location.href,
+      hasSubmitInDialog: hasSubmitControl(root),
+      hasSubmitInDocument: hasSubmitControl(document),
+      textFields: fields.length,
+      textFieldLengths: fields.map((field) => cleanText(getFieldValue(field)).length),
+      validationText
+    });
     await clearPendingSubmit();
     await appendSkippedResponse(
       item,
       counters,
       'skipped_submit_not_confirmed',
-      'HH response dialog stayed open after submit; response was not confirmed.'
+      validationText || 'HH response dialog stayed open after submit; response was not confirmed.'
     );
     return false;
   }
 
   return true;
+}
+
+function getFieldValue(field) {
+  if (!field) return '';
+  if (field.isContentEditable || String(field.getAttribute?.('contenteditable') || '').toLowerCase() === 'true') {
+    return field.textContent || '';
+  }
+  return field.value || '';
+}
+
+function collectResponseValidationText(root = getDialogRoot()) {
+  const text = cleanText(textOf(root) || textOf(document.body));
+  const lines = text.split('\n').map(cleanText).filter(Boolean);
+  const validationLines = lines.filter((line) => (
+    /обязатель|заполн|укажите|выберите|некоррект|ошиб|слишком\s+корот|минимум|не\s+менее|проверьте/i.test(line) &&
+    !SUBMIT_ACTION_PATTERN.test(line)
+  ));
+  return [...new Set(validationLines)].slice(0, 4).join(' ');
+}
+
+function validateFilledQuestionFields(questionFields, answers) {
+  const missing = [];
+  for (const [index, field] of questionFields.entries()) {
+    const expected = cleanText(answers[index] || '');
+    const actual = cleanText(getFieldValue(field));
+    if (!expected || !actual) {
+      missing.push(index + 1);
+      continue;
+    }
+    if (actual !== expected && !actual.includes(expected) && !expected.includes(actual)) {
+      missing.push(index + 1);
+    }
+  }
+  return missing;
+}
+
+function validateSelectedQuestionControls(groups) {
+  return groups
+    .map((group, index) => ({
+      index: index + 1,
+      selected: group.options.filter((option) => Boolean(option.control?.checked)).length
+    }))
+    .filter((group) => group.selected === 0)
+    .map((group) => group.index);
 }
 
 async function finalizePendingSubmit() {
@@ -2028,6 +2112,7 @@ async function applyToVacancy(item, counters) {
         selected: selectedChoices.selected,
         labels: selectedChoices.labels.slice(0, 20)
       });
+      const missingChoiceGroups = validateSelectedQuestionControls(questionControlGroups);
       if (selectedChoices.selected === 0) {
         const message = 'Пропущено: Groq не вернул подходящие варианты ответов HH.';
         counters.skipped += 1;
@@ -2045,7 +2130,24 @@ async function applyToVacancy(item, counters) {
         closeDialog();
         return;
       }
-      await sleep(500);
+      if (missingChoiceGroups.length > 0) {
+        const message = `Пропущено: ответы на варианты HH не были выбраны (${missingChoiceGroups.join(', ')}).`;
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_choice_fill_not_verified',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
+      }
+      await sleep(POST_FILL_SETTLE_MS);
     }
 
     if (questionFields.length > 0) {
@@ -2085,7 +2187,31 @@ async function applyToVacancy(item, counters) {
         fields: questionFields.length,
         answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
       });
-      await sleep(500);
+      await sleep(POST_FILL_SETTLE_MS);
+      const missingTextFields = validateFilledQuestionFields(questionFields, answers);
+      if (missingTextFields.length > 0) {
+        const message = `Пропущено: ответы HH не записались в поля (${missingTextFields.join(', ')}).`;
+        await appendAgentLog('question_text_fields_not_verified', {
+          vacancyId: item.vacancyId,
+          fields: questionFields.length,
+          missing: missingTextFields,
+          actualLengths: questionFields.map((field) => cleanText(getFieldValue(field)).length)
+        });
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_text_fill_not_verified',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: message
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: message });
+        closeDialog();
+        return;
+      }
     }
 
     if (coverLetterTextarea && !coverLetterTextarea.value) {
@@ -2112,7 +2238,7 @@ async function applyToVacancy(item, counters) {
       setNativeValue(coverLetterTextarea, letter);
       setBusyCursor(false);
       coverLetterUsed = true;
-      await sleep(500);
+      await sleep(POST_FILL_SETTLE_MS);
     }
 
     const submitButton = findSubmitButton(root);
@@ -2146,8 +2272,8 @@ async function applyToVacancy(item, counters) {
     if (await stopBeforeSubmitIfRequested(counters)) {
       return;
     }
-    clickWithActionCursor(submitButton);
-    await sleep(1800);
+  clickWithActionCursor(submitButton);
+    await sleep(POST_SUBMIT_SETTLE_MS);
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
     const confirmed = await verifySubmitConfirmed({
@@ -2274,8 +2400,8 @@ async function applyToVacancy(item, counters) {
   if (await stopBeforeSubmitIfRequested(counters)) {
     return;
   }
-  clickWithActionCursor(submitButton);
-  await sleep(1800);
+    clickWithActionCursor(submitButton);
+  await sleep(POST_SUBMIT_SETTLE_MS);
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
 
   const confirmed = await verifySubmitConfirmed({

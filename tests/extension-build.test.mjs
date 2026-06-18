@@ -219,8 +219,8 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   const contentSource = await readFile(new URL('src/content-hh.js', root), 'utf8');
 
   assert.match(defaultsSource, /dailyLimit:\s*100/);
-  assert.match(defaultsSource, /delayMinMs:\s*1500/);
-  assert.match(defaultsSource, /delayMaxMs:\s*3000/);
+  assert.match(defaultsSource, /delayMinMs:\s*4000/);
+  assert.match(defaultsSource, /delayMaxMs:\s*8000/);
   assert.match(defaultsSource, /globalThis\.HHJA_DEFAULTS/);
 
   assert.match(backgroundSource, /import '\.\/defaults\.js'/);
@@ -235,7 +235,7 @@ test('extension defaults are defined once and shared by runtime surfaces', async
     ['src/options.js', optionsSource],
     ['src/content-hh.js', contentSource]
   ]) {
-    assert.doesNotMatch(source, /dailyLimit:\s*100|delayMinMs:\s*1500|delayMaxMs:\s*3000/, file);
+    assert.doesNotMatch(source, /dailyLimit:\s*100|delayMinMs:\s*4000|delayMaxMs:\s*8000/, file);
   }
 });
 
@@ -291,8 +291,8 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.resumeUrl, '');
   assert.equal(localData.resumeCacheTtlHours, 1);
   assert.equal(localData.dailyLimit, 100);
-  assert.equal(localData.delayMinMs, 1500);
-  assert.equal(localData.delayMaxMs, 3000);
+  assert.equal(localData.delayMinMs, 4000);
+  assert.equal(localData.delayMaxMs, 8000);
   assert.equal(localData.chatUnreadOnly, true);
   assert.equal(localData.chatReplyMode, 'draft');
   assert.equal(localData.chatLimit, 10);
@@ -1734,6 +1734,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /skipped_missing_groq_key/);
   assert.match(js, /\^skipped/);
   assert.match(js, /item\.error/);
+  assert.doesNotMatch(js, /Уже был отклик/);
   assert.match(js, /currentAction/);
   assert.match(js, /START_AUTO_APPLY/);
   assert.match(js, /START_CHAT_ASSIST/);
@@ -1919,8 +1920,8 @@ test('options preserve masked Groq key unless user edits the key field', async (
     expectedSalary: '',
     coverPrompt: '',
     dailyLimit: 100,
-    delayMinMs: 1500,
-    delayMaxMs: 3000,
+    delayMinMs: 4000,
+    delayMaxMs: 8000,
     experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',
@@ -1961,8 +1962,8 @@ test('options preserve masked Groq key unless user edits the key field', async (
     expectedSalary: '',
     coverPrompt: 'default prompt',
     dailyLimit: 100,
-    delayMinMs: 1500,
-    delayMaxMs: 3000,
+    delayMinMs: 4000,
+    delayMaxMs: 8000,
     experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',

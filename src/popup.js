@@ -105,9 +105,6 @@ function resultMessage(item) {
   if (item.status === 'error') {
     return `Ошибка: ${item.title || item.vacancyId || 'вакансия'} — ${localizeError(item.error, 'неизвестная ошибка')}`;
   }
-  if (item.status === 'applied_already_confirmed') {
-    return `Уже был отклик: ${item.title || item.vacancyId || 'вакансия'}`;
-  }
   if (/^applied/.test(item.status || '')) {
     return `Отправлено: ${item.title || item.vacancyId || 'вакансия'}`;
   }

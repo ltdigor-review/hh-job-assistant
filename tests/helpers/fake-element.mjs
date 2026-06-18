@@ -47,7 +47,7 @@ export class FakeElement {
   }
 
   dispatchEvent(event) {
-    this.dispatchHandler?.(event);
+    this.dispatchHandler?.call(this, event);
   }
 
   scrollIntoView() {}

@@ -17,6 +17,7 @@ async function runContentAutoApply({
   hasCoverLetterField = false,
   questionFieldLabel = '',
   questionFieldLabels = [],
+  rejectQuestionFieldWrites = false,
   bodyText = 'HH вакансии',
   responseHref = '',
   responseAttrs = {},
@@ -79,6 +80,9 @@ async function runContentAutoApply({
     text: hasQuestionField ? 'Писать тут' : 'Сопроводительное письмо',
     attrs: hasQuestionField ? { name: `task_${235076159 + index}_text` } : { placeholder: 'Сопроводительное письмо' },
     dispatch(event) {
+      if (hasQuestionField && rejectQuestionFieldWrites && event?.type === 'input') {
+        this.value = '';
+      }
       if (!hasQuestionField && event?.type === 'input') {
         setDialogAndBodyText(dialogTextAfterCoverInput);
       }
@@ -1032,6 +1036,41 @@ test('auto apply does not count open response form submit without hh confirmatio
   assert.equal(result.localStore.autoApplyPendingSubmit, null);
 });
 
+test('auto apply keeps hh validation text when submit remains unconfirmed', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    groqResponse: { ok: true, text: '250 000 руб. на руки' },
+    submitBodyTextAfterClick: 'Заполните обязательное поле\nОткликнуться',
+    keepDialogOpenAfterSubmit: true
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_confirmed');
+  assert.match(result.appended.at(-1).error, /Заполните обязательное поле/);
+});
+
+test('auto apply validates question textarea value before submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    rejectQuestionFieldWrites: true,
+    groqResponse: { ok: true, text: '250 000 руб. на руки' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_text_fill_not_verified');
+});
+
 test('auto apply fills required contenteditable cover letter before submit', async () => {
   const result = await runContentAutoApply({
     dialogText: [
@@ -1397,6 +1436,63 @@ test('auto apply fills mixed checkbox radio and open employer questions', async 
   assert.match(result.groqRequests.at(-1).extraText, /Text question 1/);
   assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Visible HH response form text/);
   assert.ok(result.groqRequests.at(-1).extraText.length <= 2200);
+});
+
+test('auto apply accepts one digit numeric answers for employer text questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Есть ли у вас опыт проектирования интеграций на крупных гос. проектах?',
+      'Да',
+      'Нет',
+      'Был ли у вас опыт управления командой, наставничества в роли техлида/тимлида?',
+      'Да',
+      'Нет',
+      'Каким максимальным количеством разработчиков у вас был опыт руководства?',
+      'Писать тут',
+      'Сколько лет вы разрабатываете на Java?',
+      'Писать тут',
+      'В каком городе вы проживаете?',
+      'Писать тут',
+      'Ваши пожелания по уровню з/п(минимум и комфорт)?',
+      'Писать тут'
+    ].join('\n'),
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 4,
+    questionFieldLabels: [
+      'Каким максимальным количеством разработчиков у вас был опыт руководства?',
+      'Сколько лет вы разрабатываете на Java?',
+      'В каком городе вы проживаете?',
+      'Ваши пожелания по уровню з/п(минимум и комфорт)?'
+    ],
+    questionControls: [
+      { type: 'radio', name: 'integration', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'integration', label: 'Нет', value: 'no' },
+      { type: 'radio', name: 'lead', label: 'Да', value: 'lead_yes' },
+      { type: 'radio', name: 'lead', label: 'Нет', value: 'lead_no' }
+    ],
+    groqResponse: {
+      ok: true,
+      text: [
+        'Choice group 1: Нет',
+        'Choice group 2: Да',
+        'Text question 1: 5',
+        'Text question 2: 9',
+        'Text question 3: Москва',
+        'Text question 4: 300000 минимум, 350000 комфорт'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Нет', 'Да']);
+  assert.deepEqual(result.textareaValues, ['5', '9', 'Москва', '300000 минимум, 350000 комфорт']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
 test('auto apply retries Groq when choice answer does not match options', async () => {

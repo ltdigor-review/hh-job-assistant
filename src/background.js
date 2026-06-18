@@ -5,8 +5,10 @@ import './defaults.js';
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
-const OLD_DEFAULT_DELAY_MIN_MS = 8000;
-const OLD_DEFAULT_DELAY_MAX_MS = 15000;
+const LEGACY_DEFAULT_DELAYS = [
+  [8000, 15000],
+  [1500, 3000]
+];
 const GROQ_REQUEST_TIMEOUT_MS = 35000;
 const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
 const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
@@ -171,7 +173,7 @@ async function ensureDefaults() {
     patch.coverPrompt = DEFAULTS.coverPrompt;
   }
 
-  if (current.delayMinMs === OLD_DEFAULT_DELAY_MIN_MS && current.delayMaxMs === OLD_DEFAULT_DELAY_MAX_MS) {
+  if (LEGACY_DEFAULT_DELAYS.some(([min, max]) => current.delayMinMs === min && current.delayMaxMs === max)) {
     patch.delayMinMs = DEFAULTS.delayMinMs;
     patch.delayMaxMs = DEFAULTS.delayMaxMs;
   }
