@@ -21,6 +21,7 @@ async function runContentAutoApply({
   bodyText = 'HH вакансии',
   responseHref = '',
   responseAttrs = {},
+  responseClickOpensDialog = true,
   navigateOnResponseClick = false,
   delayedNavigateOnResponseClick = false,
   bodyTextAfterResponseClick = '',
@@ -46,6 +47,7 @@ async function runContentAutoApply({
   runtimeCallbackOnly = false,
   message = null,
   initialLocalStore = null,
+  cardText = 'Java Developer\nООО Test\nОткликнуться',
   sendMessageAfterImport = true,
   authenticated = true,
   stopWhenState = ''
@@ -251,6 +253,7 @@ async function runContentAutoApply({
         });
         return;
       }
+      if (!responseClickOpensDialog) return;
       openResponseDialog();
     }
   });
@@ -260,7 +263,7 @@ async function runContentAutoApply({
   });
   const nextLink = nextPageUrl ? new FakeElement({ text: 'дальше', href: nextPageUrl }) : null;
   const card = new FakeElement({
-    text: 'Java Developer\nООО Test\nОткликнуться',
+    text: cardText,
     selectorMap: {
       '[data-qa="serp-item__title"]': [titleLink],
       'a[href*="/vacancy/"]': [titleLink],
@@ -650,6 +653,54 @@ test('auto apply skips cover-letter vacancy when Groq key is missing', async () 
   assert.equal(result.response.skipped, 1);
   assert.equal(result.appended.at(-1).status, 'skipped_missing_groq_key');
   assert.match(result.appended.at(-1).error, /ключ Groq API/);
+});
+
+test('auto apply stop during cover-letter generation prevents fill and submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Добавьте сопроводительное письмо\nОтправить',
+    hasTextarea: true,
+    groqResponse: { ok: true, text: 'Здравствуйте, хочу откликнуться.' },
+    stopWhenState: 'generating_cover_letter'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.states.at(-1).state, 'stopped');
+});
+
+test('auto apply does not count global search already-applied text as current vacancy applied', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    bodyText: 'Java Developer\nОткликнуться\nДругая вакансия\nВы откликнулись',
+    bodyTextAfterResponseClick: 'Java Developer\nОткликнуться\nДругая вакансия\nВы откликнулись',
+    responseClickOpensDialog: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
+});
+
+test('auto apply does not count current card as applied while response button is active', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    cardText: 'Java Developer\nВы откликнулись\nОткликнуться',
+    bodyTextAfterResponseClick: 'Java Developer\nВы откликнулись\nОткликнуться',
+    responseClickOpensDialog: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
 });
 
 test('auto apply stops before response link that redirects to signup', async () => {
@@ -1544,6 +1595,37 @@ test('auto apply skips choice questions when Groq returns no matching option lab
   assert.deepEqual(result.checkedLabels, []);
   assert.equal(result.groqRequests.length, 2);
   assert.equal(result.appended.at(-1).status, 'skipped_choice_answer_unmatched');
+  assert.match(result.appended.at(-1).error, /ожидались точные варианты: группа 1: Да \/ Нет/);
+  assert.match(result.appended.at(-1).error, /Groq ответил: Можно рассмотреть разные варианты/);
+});
+
+test('auto apply skips choice questions with details when Groq choice retry is empty', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
+    ],
+    groqResponse: [
+      { ok: true, text: 'Подходит гибридный формат работы.' },
+      {
+        ok: false,
+        error: 'Groq вернул пустой ответ (задача: уточнение вариантов HH, HTTP 200, finish_reason=length, попытки 2/2, max_tokens=300, completion_tokens=300). Если finish_reason=length, модель уперлась в лимит вывода и не вернула message.content.'
+      }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.appended.at(-1).status, 'skipped_choice_answer_unmatched');
+  assert.match(result.appended.at(-1).error, /ошибка уточнения: Groq вернул пустой ответ/);
+  assert.match(result.appended.at(-1).error, /finish_reason=length/);
 });
 
 test('auto apply uses fallback choice answers after recoverable Groq error', async () => {
@@ -3052,4 +3134,26 @@ test('stop run clears queues, reports stopped state, and appends debug log event
   assert.equal(states.at(-1).state, 'stopped');
   assert.equal(logs.at(-1).event, 'stop_run');
   assert.equal(logs.at(-1).details.url, 'https://hh.ru/search/vacancy?text=java');
+});
+
+test('content status reports resumable auto-apply queue', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    message: { type: 'GET_CONTENT_STATUS' },
+    initialLocalStore: {
+      autoApplySearchQueue: { active: true }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.canContinueAutoApply, true);
+});
+
+test('continue auto apply reports missing saved queue', async () => {
+  const result = await runContentAutoApply({
+    message: { type: 'CONTINUE_AUTO_APPLY' }
+  });
+
+  assert.equal(result.response.ok, false);
+  assert.match(result.response.error, /Нет сохраненного запуска/);
 });

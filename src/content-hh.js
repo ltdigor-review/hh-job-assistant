@@ -60,6 +60,9 @@ const HH_SELECTORS = {
 
 const CLICK_DELAY_MIN_MS = 900;
 const CLICK_DELAY_MAX_MS = 1800;
+const FOLLOWUP_CONFIRM_CLICK_DELAY_MIN_MS = 120;
+const FOLLOWUP_CONFIRM_CLICK_DELAY_MAX_MS = 300;
+const FOLLOWUP_CONFIRM_SETTLE_MS = 300;
 const POST_FILL_SETTLE_MS = 1000;
 const POST_SUBMIT_SETTLE_MS = 5000;
 const SUBMIT_CONFIRM_TIMEOUT_MS = 15000;
@@ -165,7 +168,17 @@ async function storageSet(value, options = {}) {
 
 function sleep(ms) {
   if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const deadline = Date.now() + Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (stopRequested || Date.now() >= deadline) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, Math.min(100, deadline - Date.now()));
+    };
+    tick();
+  });
 }
 
 function getRuntimeMessageTimeoutMs() {
@@ -194,9 +207,23 @@ function randomDelay(minMs, maxMs) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
 
-async function waitBeforeClick() {
+async function waitBeforeClick(minMs = CLICK_DELAY_MIN_MS, maxMs = CLICK_DELAY_MAX_MS) {
   if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) return;
-  await sleep(randomDelay(CLICK_DELAY_MIN_MS, CLICK_DELAY_MAX_MS));
+  await sleep(randomDelay(minMs, maxMs));
+}
+
+async function markStopped(counters = {}) {
+  await clearPendingSubmit();
+  await saveQueue({ active: false });
+  await saveSearchQueue({ active: false });
+  await setRunState({ state: 'stopped', ...counters, currentAction: 'Остановлено', lastError: '' });
+}
+
+async function stopIfRequested(counters = {}) {
+  if (!stopRequested) return false;
+  await markStopped(counters);
+  closeDialog();
+  return true;
 }
 
 function getVacancyId(url) {
@@ -498,6 +525,29 @@ function isAlreadyAppliedPage(root = document) {
   return /вы откликнулись|отклик отправлен|отклик успешно|отклик на вакансию отправлен/i.test(
     textOf(root) || textOf(root.body)
   );
+}
+
+function hasActiveResponseControl(root = document, item = null) {
+  if (root === item?.card && !item?.responseFormOpen && item?.responseButton && !isDisabled(item.responseButton)) return true;
+
+  const itemVacancyId = getVacancyDedupeKey(item);
+  const responseControlSelectors = HH_SELECTORS.responseButtons.filter((selector) => selector !== 'button');
+  return queryAll(responseControlSelectors, root).some((node) => {
+    if (isDisabled(node)) return false;
+    const nodeVacancyId = getVacancyId(node.href || '');
+    return !itemVacancyId || !nodeVacancyId || nodeVacancyId === itemVacancyId;
+  });
+}
+
+function isAlreadyAppliedForCurrentItem(root = document, item = null, { ignoreActiveResponseControl = false } = {}) {
+  if (!ignoreActiveResponseControl && hasActiveResponseControl(root, item)) return false;
+  if (!isAlreadyAppliedPage(root)) return false;
+  if (root !== document) return true;
+  if (isResponseFormPage()) return true;
+
+  const currentVacancyId = getVacancyId(location.href);
+  const itemVacancyId = getVacancyDedupeKey(item);
+  return Boolean(currentVacancyId && (!itemVacancyId || currentVacancyId === itemVacancyId));
 }
 
 function findTextarea(root = getDialogRoot()) {
@@ -862,9 +912,9 @@ async function clickFollowupConfirmButton(confirmButton, counters) {
     currentAction: 'HH предупреждает: отклик может получить отказ — подтверждаю отклик',
     lastError: ''
   });
-  await waitBeforeClick();
+  await waitBeforeClick(FOLLOWUP_CONFIRM_CLICK_DELAY_MIN_MS, FOLLOWUP_CONFIRM_CLICK_DELAY_MAX_MS);
   clickWithActionCursor(confirmButton);
-  await sleep(window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ ? 0 : 1800);
+  await sleep(FOLLOWUP_CONFIRM_SETTLE_MS);
 }
 
 async function confirmFollowupIfNeeded(previousText, counters) {
@@ -968,6 +1018,10 @@ async function sendRuntimeMessage(message, options = {}) {
 async function setRunState(patch) {
   const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
   const nextPatch = { ...(patch || {}) };
+  if (stopRequested && stopReason === 'user_stop' && nextPatch.state && nextPatch.state !== 'stopped' && nextPatch.state !== 'error') {
+    nextPatch.state = 'stopped';
+    nextPatch.currentAction = 'Остановлено';
+  }
   if (terminalStates.has(nextPatch.state) && !Object.prototype.hasOwnProperty.call(nextPatch, 'currentAction')) {
     nextPatch.currentAction = nextPatch.state === 'complete' ? 'Отклики завершены' : '';
   }
@@ -1049,10 +1103,7 @@ async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = 
 }
 
 async function stopBeforeSubmitIfRequested(counters) {
-  if (!stopRequested) return false;
-  await clearPendingSubmit();
-  await setRunState({ state: 'stopped', ...counters, currentAction: 'Остановлено', lastError: '' });
-  return true;
+  return stopIfRequested(counters);
 }
 
 async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected }) {
@@ -1061,8 +1112,8 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
   while (Date.now() - started <= timeoutMs) {
     const root = getDialogRoot();
     if (
-      isAlreadyAppliedPage(root) ||
-      isAlreadyAppliedPage(document) ||
+      isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
+      isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
       detectBlockedResponseReason(root) ||
       findFollowupConfirmButton(root) ||
       (!hasSubmitControl(root) && !hasSubmitControl(document))
@@ -1087,7 +1138,10 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     return false;
   }
 
-  if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
+  if (
+    isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
+    isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })
+  ) {
     counters.applied += 1;
     await clearPendingSubmit();
     await appendResult({
@@ -1307,6 +1361,10 @@ function isRecoverableGroqError(error) {
   return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown/i.test(error instanceof Error ? error.message : String(error));
 }
 
+function isEmptyGroqResponseError(error) {
+  return /groq вернул пустой ответ/i.test(error instanceof Error ? error.message : String(error));
+}
+
 function isFatalAutoApplyError(error) {
   return /login|captcha|anti-bot|слишком много запросов|не робот|страница входа|антибот/i.test(
     error instanceof Error ? error.message : String(error)
@@ -1465,6 +1523,42 @@ function fillQuestionControls(groups, answerText) {
     }
   }
   return { selected, labels };
+}
+
+function truncateForStatus(value, maxLength = 180) {
+  const text = cleanText(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function formatChoiceOptionSummary(groups) {
+  return groups
+    .slice(0, 3)
+    .map((group, index) => {
+      const options = group.options
+        .map((option) => cleanText(option.label))
+        .filter(Boolean)
+        .slice(0, 6)
+        .join(' / ');
+      const suffix = group.options.length > 6 ? ' / …' : '';
+      return `группа ${index + 1}: ${options}${suffix}`;
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+function formatChoiceUnmatchedMessage(groups, answerText, retryError = '') {
+  const optionSummary = formatChoiceOptionSummary(groups);
+  const answerSummary = truncateForStatus(answerText, 180);
+  const details = [
+    optionSummary ? `ожидались точные варианты: ${optionSummary}` : '',
+    answerSummary ? `Groq ответил: ${answerSummary}` : '',
+    retryError ? `ошибка уточнения: ${truncateForStatus(retryError, 220)}` : ''
+  ].filter(Boolean);
+  return [
+    'Пропущено: Groq не вернул подходящие варианты ответов HH.',
+    details.length > 0 ? `Нет совпадения с вариантами HH (${details.join('; ')}).` : ''
+  ].filter(Boolean).join(' ');
 }
 
 function getChatUrl(value = location.href) {
@@ -1640,7 +1734,7 @@ async function processChatItem(item, config, counters) {
   await setRunState({ state: 'generating_chat_reply', ...counters });
   const draftAnswer = await generateChatReply({
     vacancyUrl: meta.vacancyUrl,
-    vacancyText: '',
+    vacancyText: [meta.vacancyTitle, meta.chatText].filter(Boolean).join('\n\n'),
     chatText: meta.chatText
   });
   if (stopRequested) {
@@ -1809,6 +1903,7 @@ async function handleChatAssist() {
 async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    if (stopRequested) return getDialogRoot();
     const root = getDialogRoot();
     const currentText = getRootText(root);
     if (root !== document && currentText) return root;
@@ -1834,6 +1929,7 @@ async function waitForNavigationQueueSettle(beforeUrl, currentRoot) {
 
   while (Date.now() - started <= timeoutMs || (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ && attempts < 3)) {
     attempts += 1;
+    if (stopRequested) return currentRoot;
     if (location.href !== beforeUrl || isResponseFormPage()) {
       return isResponseFormPage() ? document : getDialogRoot();
     }
@@ -1883,7 +1979,9 @@ async function handleDryRun(limit) {
 }
 
 async function applyToVacancy(item, counters) {
-  if (item.responseFormOpen && isAlreadyAppliedPage(document)) {
+  if (await stopIfRequested(counters)) return;
+
+  if (item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
     counters.applied += 1;
     await appendResult({
       index: item.index,
@@ -1898,7 +1996,7 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
-  if (isAlreadyAppliedPage(item.card)) {
+  if (isAlreadyAppliedForCurrentItem(item.card, item)) {
     counters.applied += 1;
     await appendResult({
       index: item.index,
@@ -1934,6 +2032,7 @@ async function applyToVacancy(item, counters) {
   }
 
   let root;
+  let beforeUrl = location.href;
   if (item.responseFormOpen) {
     root = document;
   } else {
@@ -1943,12 +2042,14 @@ async function applyToVacancy(item, counters) {
       currentAction: `Откликаюсь на: ${item.title || item.vacancyId || 'вакансия'}`
     });
     const beforeText = textOf(document.body);
-    const beforeUrl = location.href;
+    beforeUrl = location.href;
     if (item.navigationQueue) {
       await saveQueue(item.navigationQueue);
     }
     await sleep(250);
+    if (await stopIfRequested(counters)) return;
     await waitBeforeClick();
+    if (await stopIfRequested(counters)) return;
     if (isUnsafeHhUrl(item.responseButton.href)) {
       throw new Error('Перед нажатием отклика обнаружена страница входа или регистрации');
     }
@@ -1956,22 +2057,27 @@ async function applyToVacancy(item, counters) {
     clickWithActionCursor(item.responseButton);
 
     root = await waitForDialogOrChange(beforeText);
+    if (await stopIfRequested(counters)) return;
     if (item.navigationQueue && root === document && location.href === beforeUrl && !isResponseFormPage()) {
       root = await waitForNavigationQueueSettle(beforeUrl, root);
     }
+    if (await stopIfRequested(counters)) return;
     if (item.navigationQueue && location.href === beforeUrl && !isResponseFormPage()) {
       await saveQueue({ active: false });
     }
     await setRunState({ state: 'applying', ...counters, currentAction: `Проверяю форму отклика: ${item.title || item.vacancyId || 'вакансия'}` });
     await sleep(700);
+    if (await stopIfRequested(counters)) return;
     root = await confirmInitialFollowupIfNeeded(root, beforeText, counters);
   }
+
+  if (await stopIfRequested(counters)) return;
 
   if (isUnsafePage()) {
     throw new Error('После нажатия обнаружена страница входа, captcha или антибот-проверка');
   }
 
-  if (isAlreadyAppliedPage(root)) {
+  if (isAlreadyAppliedForCurrentItem(root, item)) {
     counters.applied += 1;
     await appendResult({
       index: item.index,
@@ -2072,15 +2178,19 @@ async function applyToVacancy(item, counters) {
       setBusyCursor(false);
     }
 
+    if (await stopIfRequested(counters)) return;
+
     if (questionControlGroups.length > 0) {
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю ответы на вопросы работодателя' });
       setBusyCursor(true);
       let selectedChoices = { selected: 0, labels: [] };
+      let choiceRetryError = '';
       try {
         selectedChoices = fillQuestionControls(questionControlGroups, assistance);
       } finally {
         setBusyCursor(false);
       }
+      if (await stopIfRequested(counters)) return;
       if (selectedChoices.selected === 0) {
         await appendAgentLog('question_choices_retry', {
           vacancyId: item.vacancyId,
@@ -2097,24 +2207,36 @@ async function applyToVacancy(item, counters) {
           assistance = await generateChoiceRetryAssistance('', buildChoiceRetryContext(questionControlGroups), assistance);
           selectedChoices = fillQuestionControls(questionControlGroups, assistance);
         } catch (error) {
-          if (!isRecoverableGroqError(error)) {
+          if (isEmptyGroqResponseError(error)) {
+            choiceRetryError = localizeError(error);
+            await appendAgentLog('question_choices_retry_empty', {
+              vacancyId: item.vacancyId,
+              error: choiceRetryError
+            });
+            selectedChoices = { selected: 0, labels: [] };
+          } else if (!isRecoverableGroqError(error)) {
             throw error;
+          } else {
+            assistance = await getFallbackQuestionAssistance(questionFields, questionControlGroups);
+            selectedChoices = fillQuestionControls(questionControlGroups, assistance);
           }
-          assistance = await getFallbackQuestionAssistance(questionFields, questionControlGroups);
-          selectedChoices = fillQuestionControls(questionControlGroups, assistance);
         } finally {
           setBusyCursor(false);
         }
+        if (await stopIfRequested(counters)) return;
       }
       await appendAgentLog('question_choices_applied', {
         vacancyId: item.vacancyId,
         groups: questionControlGroups.length,
         selected: selectedChoices.selected,
-        labels: selectedChoices.labels.slice(0, 20)
+        labels: selectedChoices.labels.slice(0, 20),
+        expectedOptions: selectedChoices.selected === 0 ? formatChoiceOptionSummary(questionControlGroups) : '',
+        rejectedAnswer: selectedChoices.selected === 0 ? truncateForStatus(assistance, 240) : '',
+        retryError: selectedChoices.selected === 0 ? choiceRetryError : ''
       });
       const missingChoiceGroups = validateSelectedQuestionControls(questionControlGroups);
       if (selectedChoices.selected === 0) {
-        const message = 'Пропущено: Groq не вернул подходящие варианты ответов HH.';
+        const message = formatChoiceUnmatchedMessage(questionControlGroups, assistance, choiceRetryError);
         counters.skipped += 1;
         await appendResult({
           index: item.index,
@@ -2148,9 +2270,11 @@ async function applyToVacancy(item, counters) {
         return;
       }
       await sleep(POST_FILL_SETTLE_MS);
+      if (await stopIfRequested(counters)) return;
     }
 
     if (questionFields.length > 0) {
+      if (await stopIfRequested(counters)) return;
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       setBusyCursor(true);
       const answers = await normalizeQuestionAnswers(splitGeneratedAnswers(assistance, questionFields.length), questionFields);
@@ -2174,6 +2298,7 @@ async function applyToVacancy(item, counters) {
         closeDialog();
         return;
       }
+      if (await stopIfRequested(counters)) return;
       try {
         questionFields.forEach((field, index) => {
           field.focus?.();
@@ -2188,6 +2313,7 @@ async function applyToVacancy(item, counters) {
         answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
       });
       await sleep(POST_FILL_SETTLE_MS);
+      if (await stopIfRequested(counters)) return;
       const missingTextFields = validateFilledQuestionFields(questionFields, answers);
       if (missingTextFields.length > 0) {
         const message = `Пропущено: ответы HH не записались в поля (${missingTextFields.join(', ')}).`;
@@ -2233,17 +2359,20 @@ async function applyToVacancy(item, counters) {
         setBusyCursor(false);
       }
 
+      if (await stopIfRequested(counters)) return;
+
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю обязательное сопроводительное письмо' });
       setBusyCursor(true);
       setNativeValue(coverLetterTextarea, letter);
       setBusyCursor(false);
       coverLetterUsed = true;
       await sleep(POST_FILL_SETTLE_MS);
+      if (await stopIfRequested(counters)) return;
     }
 
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
-      if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
+      if (isAlreadyAppliedForCurrentItem(root, item) || isAlreadyAppliedForCurrentItem(document, item)) {
         await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: true });
         return;
       }
@@ -2274,7 +2403,9 @@ async function applyToVacancy(item, counters) {
     }
   clickWithActionCursor(submitButton);
     await sleep(POST_SUBMIT_SETTLE_MS);
+    if (await stopIfRequested(counters)) return;
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
+    if (await stopIfRequested(counters)) return;
 
     const confirmed = await verifySubmitConfirmed({
       item,
@@ -2307,6 +2438,10 @@ async function applyToVacancy(item, counters) {
   const textarea = findTextarea(root);
 
   if (root === document && !isResponseFormPage() && !hasSubmitControl(document) && !textarea) {
+    if (location.href === beforeUrl && isHhSearchPageUrl(location.href)) {
+      await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: форма отклика HH не открылась.');
+      return;
+    }
     counters.applied += 1;
     await appendResult({
       index: item.index,
@@ -2360,6 +2495,8 @@ async function applyToVacancy(item, counters) {
       setBusyCursor(false);
     }
 
+    if (await stopIfRequested(counters)) return;
+
     await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю сопроводительное письмо' });
     setBusyCursor(true);
     textarea.focus?.();
@@ -2367,11 +2504,12 @@ async function applyToVacancy(item, counters) {
     setBusyCursor(false);
     coverLetterUsed = true;
     await sleep(500);
+    if (await stopIfRequested(counters)) return;
   }
 
   const submitButton = findSubmitButton(root);
   if (!submitButton) {
-    if (isAlreadyAppliedPage(root) || isAlreadyAppliedPage(document)) {
+    if (isAlreadyAppliedForCurrentItem(root, item) || isAlreadyAppliedForCurrentItem(document, item)) {
       await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: false });
       return;
     }
@@ -2400,9 +2538,11 @@ async function applyToVacancy(item, counters) {
   if (await stopBeforeSubmitIfRequested(counters)) {
     return;
   }
-    clickWithActionCursor(submitButton);
+  clickWithActionCursor(submitButton);
   await sleep(POST_SUBMIT_SETTLE_MS);
+  if (await stopIfRequested(counters)) return;
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
+  if (await stopIfRequested(counters)) return;
 
   const confirmed = await verifySubmitConfirmed({
     item,
@@ -2472,6 +2612,17 @@ async function saveSearchQueue(queue) {
   await storageSet({ autoApplySearchQueue: queue });
 }
 
+async function getAutoApplyQueueStatus() {
+  const { autoApplyQueue, autoApplySearchQueue } = await storageGet(['autoApplyQueue', 'autoApplySearchQueue'], { optional: true });
+  const hasResponseQueue = autoApplyQueue?.active === true && Array.isArray(autoApplyQueue.items);
+  const hasSearchQueue = autoApplySearchQueue?.active === true;
+  return {
+    canContinueAutoApply: hasResponseQueue || hasSearchQueue,
+    hasResponseQueue,
+    hasSearchQueue
+  };
+}
+
 function getNextSearchPageUrl() {
   const selectorLink = queryFirst(HH_SELECTORS.nextPageLinks);
   if (selectorLink?.href && !isDisabled(selectorLink)) {
@@ -2513,6 +2664,10 @@ async function continueQueuedAutoApply() {
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
     return false;
   }
+  if (stopRequested) {
+    await markStopped(autoApplyQueue.counters || {});
+    return true;
+  }
   requireAuthenticatedHhPage();
 
   if (autoApplyQueue.returnToSearch && isVacancyDetailPage() && !queuedItemMatchesCurrentVacancy(autoApplyQueue)) {
@@ -2526,9 +2681,9 @@ async function continueQueuedAutoApply() {
     await saveQueue({ ...autoApplyQueue, active: false, recoveredFromUrl: location.href });
     if (autoApplyQueue.returnToSearch && isHhSearchPageUrl(location.href)) {
       activeRunId = autoApplyQueue.runId || activeRunId;
-      stopRequested = false;
       stopReason = '';
       await finalizePendingSubmitFromSearchReturn(counters, autoApplyQueue.runId || activeRunId);
+      if (await stopIfRequested(counters)) return true;
       await handleAutoApply(
         autoApplyQueue.limit || 20,
         counters,
@@ -2551,6 +2706,7 @@ async function continueQueuedAutoApply() {
   const queue = autoApplyQueue;
   const itemData = queue.items[queue.index];
   if (!itemData) {
+    if (await stopIfRequested(queue.counters || {})) return true;
     await saveQueue({ ...queue, active: false });
     await setRunState({ state: 'complete', ...(queue.counters || {}) });
     return true;
@@ -2567,6 +2723,7 @@ async function continueQueuedAutoApply() {
 
   counters.processed += 1;
   const item = isResponseFormPage() ? buildResponseFormItem(itemData) : buildQueuedVacancyDetailItem(itemData);
+  if (await stopIfRequested(counters)) return true;
 
   try {
     await applyToVacancy(item, counters);
@@ -2629,12 +2786,17 @@ async function continueQueuedAutoApply() {
   await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
   const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
   await sleep(delayMs);
+  if (await stopIfRequested(counters)) return true;
   await setRunState({ state: 'applying', ...counters, currentAction: 'Открываю следующую форму отклика HH', lastError: '' });
+  if (await stopIfRequested(counters)) return true;
   navigateTo(nextItem.responseUrl);
   return true;
 }
 
 async function handleAutoApply(limit, existingCounters = null, existingProcessedVacancyIds = [], options = {}) {
+  if (await stopIfRequested(existingCounters || {})) {
+    return { ok: true, ...(existingCounters || {}) };
+  }
   if (isUnsafePage()) {
     throw new Error('Обнаружена страница входа, captcha или антибот-проверка');
   }
@@ -2691,7 +2853,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
   await setRunState({ state: 'applying', ...counters, lastError: '' });
 
   for (const item of vacancies) {
-    if (stopRequested) break;
+    if (await stopIfRequested(counters)) break;
 
     const sourceUrl = getQueueSourceUrl();
     const vacancyKey = getVacancyDedupeKey(item);
@@ -2789,11 +2951,12 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     if (!stopRequested) {
       await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
       await sleep(randomDelay(config.delayMinMs, config.delayMaxMs));
+      if (await stopIfRequested(counters)) break;
       await setRunState({ state: 'applying', ...counters, currentAction: 'Продолжаю отклики', lastError: '' });
     }
   }
 
-  if (!stopRequested && counters.applied < limit && (maxProcessed == null || counters.processed < maxProcessed)) {
+  if (!(await stopIfRequested(counters)) && counters.applied < limit && (maxProcessed == null || counters.processed < maxProcessed)) {
     const nextPageUrl = getNextSearchPageUrl();
     if (nextPageUrl) {
       await saveSearchQueue({
@@ -2805,7 +2968,9 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         maxProcessed,
         processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
       });
+      if (await stopIfRequested(counters)) return { ok: true, ...counters };
       await setRunState({ state: 'applying', ...counters, currentAction: 'Переход на следующую страницу HH' });
+      if (await stopIfRequested(counters)) return { ok: true, ...counters };
       navigateTo(nextPageUrl);
       return { ok: true, ...counters, navigated: true, nextPageUrl };
     }
@@ -2829,12 +2994,16 @@ function normalizeMaxProcessed(value) {
 
 async function continueSearchAutoApply() {
   if (queuedSearchStarted || isResponseFormPage() || !isHhSearchPageUrl(location.href)) {
-    return;
+    return false;
   }
 
   const { autoApplySearchQueue } = await storageGet(['autoApplySearchQueue']);
   if (!autoApplySearchQueue?.active) {
-    return;
+    return false;
+  }
+  if (stopRequested) {
+    await markStopped(autoApplySearchQueue.counters || {});
+    return true;
   }
   requireAuthenticatedHhPage();
 
@@ -2850,11 +3019,35 @@ async function continueSearchAutoApply() {
       autoApplySearchQueue.processedVacancyIds || [],
       { maxProcessed: autoApplySearchQueue.maxProcessed || null }
     );
+    return true;
   } catch (error) {
     const message = localizeError(error);
     await saveSearchQueue({ active: false });
     await setRunState({ state: 'error', ...(autoApplySearchQueue.counters || {}), lastError: message });
+    return true;
   }
+}
+
+async function continueSavedAutoApply() {
+  const status = await getAutoApplyQueueStatus();
+  if (!status.canContinueAutoApply) {
+    throw new Error('Нет сохраненного запуска для продолжения.');
+  }
+  stopRequested = false;
+  stopReason = '';
+  activeRunId = activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+
+  const continuedQueue = await continueQueuedAutoApply();
+  if (continuedQueue) {
+    return { ok: true, continued: true };
+  }
+
+  const continuedSearch = await continueSearchAutoApply();
+  if (continuedSearch) {
+    return { ok: true, continued: true };
+  }
+
+  throw new Error('Откройте вкладку hh.ru с сохраненной очередью откликов.');
 }
 
 async function startRun(mode, limitOverride = null, options = {}) {
@@ -2972,21 +3165,27 @@ async function maybeStartFromUrlParam() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
-      case 'GET_CONTENT_STATUS':
+      case 'GET_CONTENT_STATUS': {
+        const queueStatus = await getAutoApplyQueueStatus();
         sendResponse({
           ok: true,
           authenticated: hasAuthenticatedHhSignal(),
           unsafe: isUnsafePage(),
           activeRunId,
           stopRequested,
+          canContinueAutoApply: queueStatus.canContinueAutoApply,
           url: location.href
         });
         break;
+      }
       case 'START_DRY_RUN':
         sendResponse(await startRun('dry', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
         break;
       case 'START_AUTO_APPLY':
         sendResponse(await startRun('live', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
+        break;
+      case 'CONTINUE_AUTO_APPLY':
+        sendResponse(await continueSavedAutoApply());
         break;
       case 'START_CHAT_ASSIST':
         stopRequested = false;
@@ -3001,9 +3200,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'STOP_RUN':
         stopRequested = true;
         stopReason = 'user_stop';
-        await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } });
         await appendAgentLog('stop_run', { activeRunId, url: location.href });
-        await setRunState({ state: 'stopped' });
+        await markStopped();
         sendResponse({ ok: true, activeRunId });
         break;
       default:

@@ -574,12 +574,34 @@ function getMaxTokensForTask(task) {
   return 250;
 }
 
+function getGroqTaskLabel(task) {
+  if (task === 'test_assist') return 'ответы на вопросы работодателя';
+  if (task === 'choice_retry') return 'уточнение вариантов HH';
+  if (task === 'chat_reply') return 'ответ в чат';
+  return 'сопроводительное письмо';
+}
+
 function normalizeUsage(usage = {}) {
   return {
     promptTokens: Number.isFinite(Number(usage.prompt_tokens)) ? Number(usage.prompt_tokens) : null,
     completionTokens: Number.isFinite(Number(usage.completion_tokens)) ? Number(usage.completion_tokens) : null,
     totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null
   };
+}
+
+function formatGroqEmptyResponseError({ task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
+  const normalizedUsage = normalizeUsage(usage);
+  const parts = [
+    `задача: ${getGroqTaskLabel(task)}`,
+    `HTTP ${status || 200}`,
+    finishReason ? `finish_reason=${finishReason}` : '',
+    `попытки ${attempt}/${maxAttempts}`,
+    `max_tokens=${maxTokens}`
+  ];
+  if (normalizedUsage.completionTokens != null) {
+    parts.push(`completion_tokens=${normalizedUsage.completionTokens}`);
+  }
+  return `Groq вернул пустой ответ (${parts.filter(Boolean).join(', ')}). Если finish_reason=length, модель уперлась в лимит вывода и не вернула message.content.`;
 }
 
 async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '' }) {
@@ -717,6 +739,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content?.trim();
     if (!content) {
+      const finishReason = data?.choices?.[0]?.finish_reason || '';
       await appendAgentLog('groq_request_error', {
         task,
         status: response.status,
@@ -724,13 +747,24 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         attempt,
         maxAttempts,
         choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-        finishReason: data?.choices?.[0]?.finish_reason || ''
+        finishReason,
+        maxTokens: requestBody.max_tokens,
+        model: data?.model || requestBody.model,
+        usage: normalizeUsage(data?.usage)
       });
       if (attempt < maxAttempts) {
         await sleep(GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS);
         continue;
       }
-      throw new Error('Groq вернул пустой ответ');
+      throw new Error(formatGroqEmptyResponseError({
+        task,
+        status: response.status,
+        finishReason,
+        attempt,
+        maxAttempts,
+        maxTokens: requestBody.max_tokens,
+        usage: data?.usage
+      }));
     }
     await appendAgentLog('groq_response_payload', {
       task,
@@ -747,7 +781,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
 }
 
 async function generateChatReply({ vacancyUrl = '', vacancyText = '', chatText = '' }) {
-  const parsedVacancyText = vacancyText || await getVacancyContextByUrl(vacancyUrl);
+  const parsedVacancyText = String(vacancyText || '').trim() || await getVacancyContextByUrl(vacancyUrl);
   return callGroq({
     task: 'chat_reply',
     vacancyText: parsedVacancyText,

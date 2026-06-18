@@ -12,6 +12,7 @@
 - This repository is public. Never commit credentials, API keys, cookies, tokens, local browser profiles, or other secrets. Keep secrets in local environment/profile storage only.
 - Production/prod-like hh.ru browser checks must use an authorized hh.ru profile. Prefer `.hhja-chromium-profile`; if a fresh profile is opened, wait for the user to sign in before treating the check as valid.
 - Analyze extension logs from local Chrome/Chromium profile storage, not downloads. Use `npm run inspect:logs -- --storage-dir <Local Extension Settings path>` or inspect `chrome.storage.local` keys `agentDebugLogFile`, `agentDebugLogText`, `agentDebugLog`, `runState`, and `runResults`.
+- Write hh.ru automation code assuming hh.ru frequently changes visible text and page layout. Prefer centralized detector/helper functions, stable structural signals, URLs, data attributes, enabled/disabled controls, and current-vacancy scoping over hardcoded copy. Text matching is allowed only as a narrow fallback inside those helpers, and an active current-vacancy response control must override any "already applied" text signal.
 - `push to master` means push directly to the repository primary branch, whether named `master` or `main`.
 - For GitHub operations in this repository, use account `ltdigor-review`.
 

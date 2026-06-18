@@ -34,6 +34,8 @@ export const ACTIVE_RUN_STATES = new Set([
   'sending_chat_reply'
 ]);
 
+const RESTART_LABEL_STATES = new Set(['paused', 'stopped', 'complete', 'error']);
+
 function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -132,6 +134,12 @@ function deriveStopTitle(activeRun) {
   return activeRun ? 'Остановить текущий запуск' : 'Нет активного запуска';
 }
 
+function deriveContinueTitle({ activeRun, tabReady, canContinue }) {
+  if (activeRun) return 'Сначала остановите или дождитесь завершения текущего запуска';
+  if (!tabReady) return 'Откройте вкладку hh.ru';
+  return canContinue ? 'Продолжить сохраненный запуск откликов' : 'Нет сохраненного запуска для продолжения';
+}
+
 export function derivePopupView({
   runState = {},
   tabState = {},
@@ -140,16 +148,21 @@ export function derivePopupView({
 } = {}) {
   const activeRun = isActiveRun(runState);
   const tabReady = tabState.kind === 'ready';
+  const canContinue = tabReady && tabState.canContinueAutoApply === true;
+  const restartLabel = RESTART_LABEL_STATES.has(runState.state);
   return {
     status: deriveStatus({ runState, tabState, hasGroqKey }),
     currentAction: deriveCurrentAction(runState),
     buttons: {
       autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
+      autoApplyLabel: restartLabel ? 'Запуск заново' : 'Запуск откликов',
+      continueDisabled: activeRun || !canContinue,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,
       chatAssistVisible: experimentalFeaturesEnabled === true,
       chatAssistDisabled: activeRun || !tabReady || !hasGroqKey,
       autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
+      continueTitle: deriveContinueTitle({ activeRun, tabReady, canContinue }),
       stopTitle: deriveStopTitle(activeRun)
     },
     counters: {

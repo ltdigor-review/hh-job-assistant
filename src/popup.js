@@ -16,6 +16,7 @@ const nodes = {
   chatReports: document.getElementById('chatReports'),
   version: document.getElementById('version'),
   autoApply: document.getElementById('autoApply'),
+  continueApply: document.getElementById('continueApply'),
   stop: document.getElementById('stop'),
   refreshResumes: document.getElementById('refreshResumes'),
   chatAssist: document.getElementById('chatAssist')
@@ -84,11 +85,14 @@ function renderView() {
   nodes.errors.textContent = view.counters.errors;
 
   nodes.autoApply.disabled = view.buttons.autoApplyDisabled;
+  nodes.autoApply.textContent = view.buttons.autoApplyLabel;
+  nodes.continueApply.disabled = view.buttons.continueDisabled;
   nodes.stop.disabled = view.buttons.stopDisabled;
   nodes.refreshResumes.disabled = view.buttons.refreshResumesDisabled;
   nodes.chatAssist.hidden = !view.buttons.chatAssistVisible;
   nodes.chatAssist.disabled = view.buttons.chatAssistDisabled;
   nodes.autoApply.title = view.buttons.autoApplyTitle;
+  nodes.continueApply.title = view.buttons.continueTitle;
   nodes.stop.title = view.buttons.stopTitle;
 }
 
@@ -248,7 +252,8 @@ async function readTabState() {
 
     return {
       kind: 'ready',
-      canStartAutoApply: isAutoApplyStartUrl(url)
+      canStartAutoApply: isAutoApplyStartUrl(url),
+      canContinueAutoApply: response.canContinueAutoApply === true
     };
   } catch (error) {
     return {
@@ -305,7 +310,12 @@ async function sendToActiveTab(type) {
 }
 
 async function runContentAction(type, label) {
-  lastRunState = { ...lastRunState, state: type === 'STOP_RUN' ? 'stopped' : 'scanning', currentAction: label };
+  const optimisticState = type === 'STOP_RUN' ? 'stopped' : type === 'START_AUTO_APPLY' ? 'scanning' : 'applying';
+  lastRunState = {
+    ...lastRunState,
+    state: optimisticState,
+    currentAction: label
+  };
   renderView();
   const response = await sendToActiveTab(type);
   if (!response?.ok) {
@@ -328,6 +338,13 @@ async function runRuntimeAction(type, label, activeState) {
 
 nodes.autoApply.addEventListener('click', () => {
   runContentAction('START_AUTO_APPLY', 'Запускаю отклики...').catch((error) => {
+    lastRunState = { state: 'error', lastError: localizeError(error) };
+    renderView();
+  });
+});
+
+nodes.continueApply.addEventListener('click', () => {
+  runContentAction('CONTINUE_AUTO_APPLY', 'Продолжаю отклики...').catch((error) => {
     lastRunState = { state: 'error', lastError: localizeError(error) };
     renderView();
   });

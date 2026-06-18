@@ -557,6 +557,80 @@ test('chat reply prompt includes resume, vacancy, chat question, and expected sa
   assert.match(userContent, /какие ожидания по зарплате/);
 });
 
+test('chat reply uses provided vacancy text without opening the vacancy page', async () => {
+  let listener = null;
+  let tabsCreateCalls = 0;
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return { choices: [{ message: { content: 'Здравствуйте, готов обсудить.' } }] };
+    }
+  });
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          const data = {
+            groqApiKey: 'gsk_test',
+            groqModel: 'test-model',
+            resumeText: 'Java developer, Spring Boot',
+            expectedSalary: '',
+            coverPrompt: 'cover prompt'
+          };
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, data[key]]));
+          }
+          return {};
+        },
+        async set() {}
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      },
+      async create() {
+        tabsCreateCalls += 1;
+        throw new Error('vacancy tab should not be opened');
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      {
+        type: 'GENERATE_CHAT_REPLY',
+        vacancyUrl: 'https://hh.ru/vacancy/123',
+        vacancyText: 'Вакансия из открытого чата: Java developer',
+        chatText: 'Работодатель: готовы обсудить оффер?'
+      },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(tabsCreateCalls, 0);
+});
+
 test('Groq empty 200 response is retried once before returning text', async () => {
   let listener = null;
   let calls = 0;
@@ -624,6 +698,80 @@ test('Groq empty 200 response is retried once before returning text', async () =
   assert.equal(emptyErrorLog.details.attempt, 1);
   assert.equal(emptyErrorLog.details.maxAttempts, 2);
   assert.equal(responseLog.details.attempt, 2);
+});
+
+test('Groq empty response reports task, finish reason, attempts, and token cap', async () => {
+  let listener = null;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Java developer, Spring Boot',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt',
+    agentDebugLog: []
+  };
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        model: 'test-model',
+        choices: [{ message: { content: '' }, finish_reason: 'length' }],
+        usage: { prompt_tokens: 449, completion_tokens: 300, total_tokens: 749 }
+      };
+    }
+  });
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(callback) { listener = callback; } }
+    },
+    tabs: { onUpdated: { addListener() {} } },
+    alarms: { create() {}, onAlarm: { addListener() {} } },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  const response = await new Promise((resolve) => {
+    const stayedAsync = listener(
+      { type: 'GENERATE_COVER_LETTER', task: 'choice_retry', extraText: 'Choice group 1:\n1. Да\n2. Нет' },
+      {},
+      resolve
+    );
+    assert.equal(stayedAsync, true);
+  });
+
+  assert.equal(response.ok, false);
+  assert.match(response.error, /задача: уточнение вариантов HH/);
+  assert.match(response.error, /finish_reason=length/);
+  assert.match(response.error, /попытки 2\/2/);
+  assert.match(response.error, /max_tokens=300/);
+  assert.match(response.error, /completion_tokens=300/);
+  const emptyErrorLogs = localData.agentDebugLog.filter((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
+  assert.equal(emptyErrorLogs.length, 2);
+  assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
+  assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 300);
+  assert.equal(emptyErrorLogs.at(-1).details.usage.completionTokens, 300);
 });
 
 test('background stores capped chat reports with direct chat links', async () => {
@@ -1697,7 +1845,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults', 'chatReports', 'clearReports']) {
+  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults', 'chatReports', 'clearReports']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /\.copy-button/);
@@ -1713,6 +1861,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /Скопировано/);
   assert.match(js, /experimentalFeaturesEnabled/);
   assert.match(js, /nodes\.chatAssist\.hidden = !view\.buttons\.chatAssistVisible/);
+  assert.match(js, /nodes\.autoApply\.textContent = view\.buttons\.autoApplyLabel/);
+  assert.match(js, /nodes\.continueApply\.disabled = view\.buttons\.continueDisabled/);
   assert.doesNotMatch(html, /id="copyStatus"|Копировать статус/);
   assert.doesNotMatch(js, /copyStatus|lastStatusCopyText/);
   for (const removedId of ['dryRun', 'groqApiKey', 'saveGroqKey', 'testGroq', 'extensionStatus', 'tabStatus', 'agentDebugLog', 'clearAgentDebugLog', 'currentActionDetail']) {
@@ -1727,6 +1877,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.doesNotMatch(js, /nodes\.found/);
 
   assert.ok(html.indexOf('id="autoApply"') < html.indexOf('id="stop"'));
+  assert.ok(html.indexOf('id="autoApply"') < html.indexOf('id="continueApply"'));
+  assert.ok(html.indexOf('id="continueApply"') < html.indexOf('id="stop"'));
   assert.ok(html.indexOf('id="stop"') < html.indexOf('id="refreshResumes"'));
   assert.ok(html.indexOf('id="openOptions"') < html.indexOf('id="appStatus"'));
   assert.ok(html.indexOf('id="currentAction"') < html.indexOf('id="autoApply"'));
@@ -1742,6 +1894,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.doesNotMatch(js, /Уже был отклик/);
   assert.match(js, /currentAction/);
   assert.match(js, /START_AUTO_APPLY/);
+  assert.match(js, /CONTINUE_AUTO_APPLY/);
   assert.match(js, /START_CHAT_ASSIST/);
   assert.match(js, /GET_CHAT_REPORTS/);
   assert.match(js, /GET_CONTENT_STATUS/);
@@ -1873,6 +2026,7 @@ test('popup view model disables start and enables stop only during active runs',
   assert.equal(active.currentAction.title, 'Составляем сопроводительное письмо');
   assert.equal(Object.hasOwn(active.currentAction, 'detail'), false);
   assert.equal(active.buttons.autoApplyDisabled, true);
+  assert.equal(active.buttons.continueDisabled, true);
   assert.equal(active.buttons.stopDisabled, false);
 
   const idle = derivePopupView({
@@ -1882,7 +2036,33 @@ test('popup view model disables start and enables stop only during active runs',
   });
   assert.equal(idle.currentAction.title, 'Ожидание');
   assert.equal(idle.buttons.autoApplyDisabled, false);
+  assert.equal(idle.buttons.autoApplyLabel, 'Запуск откликов');
+  assert.equal(idle.buttons.continueDisabled, true);
   assert.equal(idle.buttons.stopDisabled, true);
+});
+
+test('popup view model exposes restart and continue controls after pause', async () => {
+  const { derivePopupView } = await import(new URL('src/popup-view.js', root));
+
+  const paused = derivePopupView({
+    runState: { state: 'paused' },
+    tabState: { kind: 'ready', canStartAutoApply: true, canContinueAutoApply: true },
+    hasGroqKey: true
+  });
+  assert.equal(paused.buttons.autoApplyLabel, 'Запуск заново');
+  assert.equal(paused.buttons.autoApplyDisabled, false);
+  assert.equal(paused.buttons.continueDisabled, false);
+  assert.equal(paused.buttons.stopDisabled, true);
+  assert.equal(paused.buttons.continueTitle, 'Продолжить сохраненный запуск откликов');
+
+  const stopped = derivePopupView({
+    runState: { state: 'stopped' },
+    tabState: { kind: 'ready', canStartAutoApply: true, canContinueAutoApply: false },
+    hasGroqKey: true
+  });
+  assert.equal(stopped.buttons.autoApplyLabel, 'Запуск заново');
+  assert.equal(stopped.buttons.continueDisabled, true);
+  assert.equal(stopped.buttons.continueTitle, 'Нет сохраненного запуска для продолжения');
 });
 
 test('popup buttons expose disabled-state reasons', async () => {
@@ -1894,6 +2074,7 @@ test('popup buttons expose disabled-state reasons', async () => {
     hasGroqKey: true
   });
   assert.equal(wrongHhPage.buttons.autoApplyTitle, 'Откройте страницу https://hh.ru/search/vacancy?...');
+  assert.equal(wrongHhPage.buttons.continueTitle, 'Нет сохраненного запуска для продолжения');
   assert.equal(wrongHhPage.buttons.stopTitle, 'Нет активного запуска');
 
   const active = derivePopupView({
@@ -1902,6 +2083,7 @@ test('popup buttons expose disabled-state reasons', async () => {
     hasGroqKey: true
   });
   assert.equal(active.buttons.autoApplyTitle, 'Дождитесь завершения текущего запуска');
+  assert.equal(active.buttons.continueTitle, 'Сначала остановите или дождитесь завершения текущего запуска');
   assert.equal(active.buttons.stopTitle, 'Остановить текущий запуск');
 });
 
@@ -1912,6 +2094,16 @@ test('hh page scroll helpers avoid forcing targets to viewport center', async ()
   assert.doesNotMatch(content, /scrollIntoView/);
   assert.doesNotMatch(content, /scrollIntoView\(\{\s*block: 'center'/);
   assert.doesNotMatch(background, /scrollIntoView\?\.\(\{\s*block: 'center'/);
+});
+
+test('hh country warning confirmation uses short follow-up timing', async () => {
+  const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
+
+  assert.match(content, /FOLLOWUP_CONFIRM_CLICK_DELAY_MIN_MS = 120/);
+  assert.match(content, /FOLLOWUP_CONFIRM_CLICK_DELAY_MAX_MS = 300/);
+  assert.match(content, /FOLLOWUP_CONFIRM_SETTLE_MS = 300/);
+  assert.match(content, /waitBeforeClick\(FOLLOWUP_CONFIRM_CLICK_DELAY_MIN_MS, FOLLOWUP_CONFIRM_CLICK_DELAY_MAX_MS\)/);
+  assert.doesNotMatch(content, /sleep\(window\.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ \? 0 : 1800\)/);
 });
 
 test('options preserve masked Groq key unless user edits the key field', async () => {
