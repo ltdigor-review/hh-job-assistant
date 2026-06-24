@@ -105,6 +105,9 @@ function resultMessage(item) {
   if (item.status === 'skipped_test_missing_groq_key') {
     return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует ответы на вопросы работодателя или тест, но ключ Groq API не указан.`;
   }
+  if (item.status === 'skipped_hh_daily_response_limit') {
+    return 'Исчерпан лимит в 200 откликов в день. HH временно не дает отправлять новые отклики.';
+  }
   if (/^skipped/.test(item.status || '')) {
     return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} — ${localizeError(item.error || item.status)}`;
   }

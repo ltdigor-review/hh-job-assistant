@@ -147,6 +147,50 @@ function hhBlockedFixture() {
     </html>`;
 }
 
+function hhDailyLimitFixture() {
+  return `<!doctype html>
+    <html lang="ru">
+      <head>
+        <meta charset="utf-8">
+        <title>HH daily limit fixture</title>
+        <style>
+          body { font-family: Arial, sans-serif; }
+          [role="status"] {
+            position: fixed;
+            top: 24px;
+            right: 24px;
+            max-width: 420px;
+            padding: 16px;
+            background: white;
+            border: 1px solid #ccd6e2;
+            box-shadow: 0 8px 24px rgba(0,0,0,.18);
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <article data-qa="vacancy-serp__vacancy">
+            <a data-qa="serp-item__title" href="https://hh.ru/vacancy/123">Chief Product Officer/CPO Data</a>
+            <button data-qa="vacancy-serp__vacancy_response">Откликнуться</button>
+          </article>
+          <a data-qa="pager-next" href="https://hh.ru/search/vacancy?text=java&page=1">дальше</a>
+        </main>
+        <script>
+          document.querySelector('[data-qa="vacancy-serp__vacancy_response"]').addEventListener('click', () => {
+            const notice = document.createElement('div');
+            notice.setAttribute('data-qa', 'vacancy-response-error-notification');
+            notice.setAttribute('role', 'status');
+            notice.innerHTML = \`
+              <span>В течение 24 часов можно совершить не более 200 откликов. Вы исчерпали лимит откликов, попробуйте отправить отклик позднее.</span>
+              <button data-qa="snackbar-close-action" aria-label="Закрыть"></button>
+            \`;
+            document.body.append(notice);
+          });
+        </script>
+      </body>
+    </html>`;
+}
+
 function buildInjection(contentScriptSource) {
   return `
     (async () => {
@@ -257,6 +301,79 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
     assert.equal(results.at(-1).status, 'skipped_response_unavailable');
     assert.match(results.at(-1).error, /видимость резюме/);
     assert.ok(states.some((state) => state.currentAction === 'Переход на следующую страницу HH'));
+  } finally {
+    session?.close();
+    if (target?.id) {
+      await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`).catch(() => {});
+    }
+    if (!chrome.killed) {
+      chrome.kill('SIGTERM');
+    }
+    await Promise.race([
+      once(chrome, 'exit'),
+      new Promise((resolve) => setTimeout(resolve, 2000))
+    ]);
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('real browser UI completes when hh daily response limit snackbar appears', { timeout: 30000 }, async (t) => {
+  const browser = chromePath();
+  if (!browser) {
+    t.skip('Chrome/Chromium not found');
+    return;
+  }
+
+  const userDataDir = await mkdtemp(join(tmpdir(), 'hh-job-assistant-chrome-'));
+  const port = 9340;
+  const chrome = spawn(browser, [
+    '--headless=new',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-default-browser-check',
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${userDataDir}`,
+    'about:blank'
+  ], {
+    stdio: 'ignore'
+  });
+
+  let target;
+  let session;
+  try {
+    await waitForJson(`http://127.0.0.1:${port}/json/version`);
+    target = await cdpFetch(port, `/json/new?${encodeURIComponent(`data:text/html;charset=utf-8,${encodeURIComponent(hhDailyLimitFixture())}`)}`, {
+      method: 'PUT'
+    });
+    session = await createCdpSession(target.webSocketDebuggerUrl);
+    await session.send('Runtime.enable');
+    await waitForComplete(session);
+
+    const contentScriptSource = await readContentScriptSource();
+    const evaluation = await session.send('Runtime.evaluate', {
+      expression: buildInjection(contentScriptSource),
+      awaitPromise: true,
+      returnByValue: true,
+      timeout: 15000
+    });
+
+    if (evaluation.exceptionDetails) {
+      throw new Error(evaluation.exceptionDetails.text || 'Browser evaluation failed');
+    }
+
+    const value = evaluation.result.value;
+    const states = value.messages.filter((message) => message.type === 'SET_RUN_STATE').map((message) => message.patch);
+    const results = value.messages.filter((message) => message.type === 'APPEND_RUN_RESULT').map((message) => message.item);
+
+    assert.equal(value.response.ok, true);
+    assert.equal(value.response.skipped, 1);
+    assert.equal(value.response.errors, 0);
+    assert.equal(value.navigatedTo, '');
+    assert.match(value.bodyText, /не более 200 откликов/);
+    assert.equal(results.at(-1).status, 'skipped_hh_daily_response_limit');
+    assert.equal(states.at(-1).state, 'complete');
+    assert.equal(states.at(-1).currentAction, 'Исчерпан лимит в 200 откликов в день');
+    assert.equal(states.at(-1).lastError, '');
   } finally {
     session?.close();
     if (target?.id) {

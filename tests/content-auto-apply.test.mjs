@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { readContentScriptSource } from './helpers/content-script-source.mjs';
 import { FakeElement } from './helpers/fake-element.mjs';
 
+const HH_DAILY_RESPONSE_LIMIT_TEXT = 'В течение 24 часов можно совершить не более 200 откликов. Вы исчерпали лимит откликов, попробуйте отправить отклик позднее.';
+
 async function runContentAutoApply({
   messageType = 'START_AUTO_APPLY',
   dialogText,
@@ -944,6 +946,54 @@ test('auto apply skips open response form when blocked text is only in document 
   assert.equal(result.dialogOpen, false);
   assert.equal(result.appended.at(-1).status, 'skipped_response_unavailable');
   assert.match(result.appended.at(-1).error, /^Пропущено: видимость резюме/);
+});
+
+test('auto apply stops cleanly when hh shows daily response limit after response click', async () => {
+  const result = await runContentAutoApply({
+    responseClickOpensDialog: false,
+    bodyTextAfterResponseClick: HH_DAILY_RESPONSE_LIMIT_TEXT,
+    dailyLimit: 2,
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.appended.at(-1).status, 'skipped_hh_daily_response_limit');
+  assert.equal(result.localStore.runResults.at(-1).status, 'skipped_hh_daily_response_limit');
+  assert.match(result.appended.at(-1).error, /исчерпали лимит откликов/);
+  assert.equal(result.states.at(-1).state, 'complete');
+  assert.equal(result.states.at(-1).currentAction, 'Исчерпан лимит в 200 откликов в день');
+  assert.equal(result.states.at(-1).lastError, '');
+});
+
+test('auto apply stops cleanly when hh shows daily response limit after submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    submitBodyTextAfterClick: HH_DAILY_RESPONSE_LIMIT_TEXT,
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.errors, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.localStore.autoApplyPendingSubmit, null);
+  assert.equal(result.appended.at(-1).status, 'skipped_hh_daily_response_limit');
+  assert.equal(result.localStore.runResults.at(-1).status, 'skipped_hh_daily_response_limit');
+  assert.equal(result.states.at(-1).state, 'complete');
+  assert.equal(result.states.at(-1).currentAction, 'Исчерпан лимит в 200 откликов в день');
+  assert.equal(result.states.at(-1).lastError, '');
 });
 
 test('auto apply counts already applied open response form without submit button as confirmed', async () => {

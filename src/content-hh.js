@@ -71,6 +71,8 @@ const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
 const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
+const HH_DAILY_RESPONSE_LIMIT_ACTION = 'Исчерпан лимит в 200 откликов в день';
+const HH_DAILY_RESPONSE_LIMIT_MESSAGE = 'HH временно не дает отправлять новые отклики.';
 const {
   cleanText,
   sanitizeGeneratedText,
@@ -1006,6 +1008,25 @@ function detectBlockedResponseReason(root = getDialogRoot()) {
   return '';
 }
 
+function isHhDailyResponseLimitText(text) {
+  return /в\s+течение\s+24\s+час(?:ов|а)?.{0,160}не\s+более\s+200\s+откликов|исчерпали\s+лимит\s+откликов/i.test(cleanText(text));
+}
+
+function detectHhDailyResponseLimit(root = getDialogRoot()) {
+  const notificationSelectors = [
+    '[data-qa="vacancy-response-error-notification"][role="status"]',
+    '[data-qa="vacancy-response-error-notification"]'
+  ];
+  const notification = queryFirst(notificationSelectors, document) || (root !== document ? queryFirst(notificationSelectors, root) : null);
+  const notificationText = textOf(notification);
+  if (isHhDailyResponseLimitText(notificationText)) {
+    return cleanText(notificationText);
+  }
+
+  const text = textOf(root) || textOf(root?.body) || textOf(document.body);
+  return isHhDailyResponseLimitText(text) ? cleanText(text) : '';
+}
+
 function findFollowupConfirmButton(root = getDialogRoot()) {
   const text = getRootText(root);
   if (!/другой стране|такой отклик может получить отказ|скорее всего, будет отказ|получить отказ/i.test(text)) {
@@ -1160,7 +1181,33 @@ async function setRunState(patch) {
 }
 
 async function appendResult(item) {
-  await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'APPEND_RUN_RESULT', item }), { optional: true });
+  const response = await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'APPEND_RUN_RESULT', item }), { optional: true });
+  if (response?.ok) return;
+  if (extensionContextInvalidated) return;
+
+  const { runResults = [] } = await storageGet(['runResults'], { optional: true });
+  const result = {
+    ...item,
+    timestamp: item.timestamp || new Date().toISOString()
+  };
+  await storageSet({ runResults: [...runResults.slice(-199), result] }, { optional: true });
+  await appendAgentLog('run_result_storage_fallback', {
+    status: result.status || '',
+    vacancyId: result.vacancyId || '',
+    title: result.title || ''
+  });
+}
+
+async function ensureRunResultStored(item) {
+  if (extensionContextInvalidated) return;
+  const { runResults = [] } = await storageGet(['runResults'], { optional: true });
+  const exists = runResults.slice(-10).some((result) => (
+    result?.status === item.status &&
+    String(result?.vacancyId || '') === String(item.vacancyId || '') &&
+    result?.timestamp === item.timestamp
+  ));
+  if (exists) return;
+  await storageSet({ runResults: [...runResults.slice(-199), item] }, { optional: true });
 }
 
 async function savePendingSubmit({ item, counters, status, coverLetterUsed, testDetected }) {
@@ -1229,6 +1276,34 @@ async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = 
   closeDialog();
 }
 
+async function completeHhDailyResponseLimit(item, counters, reason = '') {
+  counters.skipped += 1;
+  await clearPendingSubmit();
+  await saveQueue({ active: false });
+  await saveSearchQueue({ active: false });
+  const result = {
+    index: item.index,
+    vacancyId: item.vacancyId,
+    title: item.title,
+    url: item.url,
+    status: 'skipped_hh_daily_response_limit',
+    coverLetterUsed: false,
+    testDetected: item.testDetected,
+    error: reason || `${HH_DAILY_RESPONSE_LIMIT_ACTION}. ${HH_DAILY_RESPONSE_LIMIT_MESSAGE}`,
+    timestamp: new Date().toISOString()
+  };
+  await appendResult(result);
+  await ensureRunResultStored(result);
+  await setRunState({
+    state: 'complete',
+    ...counters,
+    currentAction: HH_DAILY_RESPONSE_LIMIT_ACTION,
+    lastError: ''
+  });
+  closeDialog();
+  return { terminal: true, reason: 'hh_daily_response_limit' };
+}
+
 async function stopBeforeSubmitIfRequested(counters) {
   return stopIfRequested(counters);
 }
@@ -1241,6 +1316,8 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     if (
       isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
       isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
+      detectHhDailyResponseLimit(root) ||
+      detectHhDailyResponseLimit(document) ||
       detectBlockedResponseReason(root) ||
       findFollowupConfirmButton(root) ||
       (!hasSubmitControl(root) && !hasSubmitControl(document))
@@ -1256,6 +1333,11 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     await clickFollowupConfirmButton(followupConfirmButton, counters);
     await sleep(POST_FILL_SETTLE_MS);
     return verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected });
+  }
+
+  const dailyLimitReason = detectHhDailyResponseLimit(root) || detectHhDailyResponseLimit(document);
+  if (dailyLimitReason) {
+    return completeHhDailyResponseLimit(item, counters, dailyLimitReason);
   }
 
   const blockedReason = detectBlockedResponseReason(root);
@@ -2098,6 +2180,9 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
   while (Date.now() - started < timeoutMs) {
     if (stopRequested) return getDialogRoot();
     const root = getDialogRoot();
+    if (detectHhDailyResponseLimit(root) || detectHhDailyResponseLimit(document)) {
+      return root;
+    }
     const currentText = getRootText(root);
     if (root !== document && currentText) return root;
     if (
@@ -2174,6 +2259,11 @@ async function handleDryRun(limit) {
 
 async function applyToVacancy(item, counters) {
   if (await stopIfRequested(counters)) return;
+
+  const initialDailyLimitReason = detectHhDailyResponseLimit(document);
+  if (initialDailyLimitReason) {
+    return completeHhDailyResponseLimit(item, counters, initialDailyLimitReason);
+  }
 
   if (item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
     counters.applied += 1;
@@ -2335,6 +2425,11 @@ async function applyToVacancy(item, counters) {
   }
 
   if (await stopIfRequested(counters)) return;
+
+  const dailyLimitReason = detectHhDailyResponseLimit(root) || detectHhDailyResponseLimit(document);
+  if (dailyLimitReason) {
+    return completeHhDailyResponseLimit(item, counters, dailyLimitReason);
+  }
 
   if (isUnsafePage()) {
     throw new Error('После нажатия обнаружена страница входа, captcha или антибот-проверка');
@@ -2722,6 +2817,9 @@ async function applyToVacancy(item, counters) {
       coverLetterUsed,
       testDetected: true
     });
+    if (confirmed?.terminal) {
+      return confirmed;
+    }
     if (!confirmed) {
       return;
     }
@@ -2877,6 +2975,9 @@ async function applyToVacancy(item, counters) {
     coverLetterUsed,
     testDetected: false
   });
+  if (confirmed?.terminal) {
+    return confirmed;
+  }
   if (!confirmed) {
     return;
   }
@@ -3054,7 +3155,10 @@ async function continueQueuedAutoApply() {
   if (await stopIfRequested(counters)) return true;
 
   try {
-    await applyToVacancy(item, counters);
+    const outcome = await applyToVacancy(item, counters);
+    if (outcome?.terminal) {
+      return true;
+    }
   } catch (error) {
     const message = localizeError(error);
     counters.errors += 1;
@@ -3240,6 +3344,9 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         return { ok: true, ...counters, navigated: true, nextPageUrl: item.responseUrl };
       }
       const outcome = await applyToVacancy(item, counters);
+      if (outcome?.terminal) {
+        return { ok: true, ...counters };
+      }
       if (outcome?.navigated) {
         return { ok: true, ...counters, navigated: true, nextPageUrl: outcome.nextPageUrl };
       }
