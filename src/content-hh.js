@@ -624,6 +624,19 @@ function getFieldMarker(field) {
   return `${name}\n${dataQa}\n${placeholder}\n${ariaLabel}\n${nearText}`;
 }
 
+function getFieldLogTarget(field) {
+  if (!field) return {};
+  return {
+    tagName: String(field.tagName || '').toLowerCase(),
+    type: field.getAttribute?.('type') || '',
+    name: field.getAttribute?.('name') || '',
+    dataQa: field.getAttribute?.('data-qa') || '',
+    placeholder: field.getAttribute?.('placeholder') || '',
+    ariaLabel: field.getAttribute?.('aria-label') || '',
+    marker: getFieldMarker(field)
+  };
+}
+
 function getTaskBody(node) {
   return typeof node?.closest === 'function' ? node.closest('[data-qa="task-body"]') : null;
 }
@@ -2482,6 +2495,8 @@ async function applyToVacancy(item, counters) {
       }
       await appendAgentLog('question_choices_applied', {
         vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
         groups: questionControlGroups.length,
         selected: selectedChoices.selected,
         labels: selectedChoices.labels.slice(0, 20),
@@ -2493,6 +2508,8 @@ async function applyToVacancy(item, counters) {
         selectedChoices = fillFallbackQuestionControls(questionControlGroups);
         await appendAgentLog('question_choices_fallback_applied', {
           vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
           groups: questionControlGroups.length,
           selected: selectedChoices.selected,
           labels: selectedChoices.labels.slice(0, 20),
@@ -2571,7 +2588,12 @@ async function applyToVacancy(item, counters) {
       }
       await appendAgentLog('question_text_fields_applied', {
         vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
         fields: questionFields.length,
+        fieldTargets: questionFields.map((field) => getFieldLogTarget(field)),
+        insertedTexts: questionFields.map((field) => cleanText(getFieldValue(field))),
+        sourceAnswers: answers.slice(0, questionFields.length).map((answer) => cleanText(answer)),
         answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
       });
       await sleep(POST_FILL_SETTLE_MS);
@@ -2640,6 +2662,11 @@ async function applyToVacancy(item, counters) {
       if (await stopIfRequested(counters)) return;
       await appendAgentLog('mandatory_cover_letter_applied', {
         vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
+        field: getFieldLogTarget(coverLetterTextarea),
+        insertedText: cleanText(getFieldValue(coverLetterTextarea)),
+        sourceText: cleanText(letter),
         fieldLength: cleanText(getFieldValue(coverLetterTextarea)).length,
         letterLength: cleanText(letter).length
       });
@@ -2788,6 +2815,16 @@ async function applyToVacancy(item, counters) {
     coverLetterUsed = true;
     await sleep(500);
     if (await stopIfRequested(counters)) return;
+    await appendAgentLog('cover_letter_applied', {
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      field: getFieldLogTarget(textarea),
+      insertedText: cleanText(getFieldValue(textarea)),
+      sourceText: cleanText(letter),
+      fieldLength: cleanText(getFieldValue(textarea)).length,
+      letterLength: cleanText(letter).length
+    });
   }
 
   const submitButton = findSubmitButton(root);
@@ -3313,8 +3350,16 @@ async function continueSearchAutoApply() {
     return false;
   }
 
-  const { autoApplySearchQueue } = await storageGet(['autoApplySearchQueue']);
+  const { autoApplySearchQueue, runState } = await storageGet(['autoApplySearchQueue', 'runState']);
   if (!autoApplySearchQueue?.active) {
+    return false;
+  }
+  if (['complete', 'dry_run_complete', 'stopped', 'idle', 'error'].includes(runState?.state)) {
+    await saveSearchQueue({ active: false });
+    await appendAgentLog('stale_search_queue_cleared', {
+      state: runState?.state || '',
+      url: location.href
+    });
     return false;
   }
   if (stopRequested) {
@@ -3444,6 +3489,20 @@ function consumeReloadExtensionParam() {
   }
 }
 
+function consumeStopRunParam() {
+  try {
+    const url = new URL(location.href);
+    if (url.searchParams.get('hhjaStopRun') !== '1') {
+      return false;
+    }
+    url.searchParams.delete('hhjaStopRun');
+    window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function maybeReloadExtensionFromUrlParam() {
   if (!consumeReloadExtensionParam()) {
     return false;
@@ -3454,6 +3513,26 @@ async function maybeReloadExtensionFromUrlParam() {
     () => chrome.runtime.sendMessage({ type: 'RELOAD_EXTENSION', reason: 'hhjaReloadExtension', url: location.href }),
     { optional: true }
   );
+  return true;
+}
+
+async function maybeStopFromUrlParam() {
+  if (!consumeStopRunParam()) {
+    return false;
+  }
+
+  stopRequested = true;
+  stopReason = 'url_stop';
+  const { runState = {} } = await storageGet(['runState']);
+  const counters = {
+    found: Number(runState.found) || 0,
+    processed: Number(runState.processed) || 0,
+    applied: Number(runState.applied) || 0,
+    skipped: Number(runState.skipped) || 0,
+    errors: Number(runState.errors) || 0
+  };
+  await appendAgentLog('url_trigger_stop_run', { url: location.href });
+  await markStopped(counters);
   return true;
 }
 
@@ -3547,6 +3626,10 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
 async function initializeContentScript() {
   const reloadedFromUrl = await maybeReloadExtensionFromUrlParam();
   if (reloadedFromUrl) {
+    return;
+  }
+  const stoppedFromUrl = await maybeStopFromUrlParam();
+  if (stoppedFromUrl) {
     return;
   }
   const startedFromUrl = await maybeStartFromUrlParam();

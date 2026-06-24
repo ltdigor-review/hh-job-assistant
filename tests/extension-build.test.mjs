@@ -30,6 +30,7 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.equal(manifest.commands['start-auto-apply'].suggested_key.mac, 'Alt+Shift+A');
   assert.equal(manifest.options_page, 'src/options.html');
   assert.ok(manifest.permissions.includes('storage'));
+  assert.ok(manifest.permissions.includes('unlimitedStorage'));
   assert.ok(manifest.permissions.includes('tabs'));
   assert.ok(manifest.permissions.includes('scripting'));
   assert.ok(!manifest.permissions.includes('windows'));
@@ -365,6 +366,91 @@ test('background clears stale current action when a run completes', async () => 
   assert.equal(localData.runState.lastError, '');
 });
 
+test('background response watchdog leaves active form processing alone', async () => {
+  let onUpdatedListener = null;
+  let tabUpdateCalls = 0;
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&employerId=456';
+  const sourceUrl = 'https://hh.ru/search/vacancy?resume=abc';
+  const localData = {
+    autoApplyQueue: {
+      active: true,
+      returnToSearch: true,
+      sourceUrl,
+      index: 0,
+      items: [{ index: 1, vacancyId: '123', title: 'QA', url: 'https://hh.ru/vacancy/123' }],
+      counters: { found: 1, processed: 1, applied: 0, skipped: 0, errors: 0 }
+    },
+    autoApplySearchQueue: { active: false },
+    runState: {
+      state: 'filling_cover_letter',
+      found: 1,
+      processed: 1,
+      applied: 0,
+      skipped: 0,
+      errors: 0,
+      currentAction: 'Filling HH employer question fields',
+      lastError: '',
+      updatedAt: '2020-01-01T00:00:00.000Z'
+    },
+    runResults: []
+  };
+
+  globalThis.__HH_JOB_ASSISTANT_TEST_RESPONSE_WATCHDOG_MS__ = 1;
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} }
+    },
+    commands: {
+      onCommand: { addListener() {} }
+    },
+    tabs: {
+      async get(tabId) {
+        return { id: tabId, url: responseUrl, status: 'complete' };
+      },
+      async update() {
+        tabUpdateCalls += 1;
+      },
+      onUpdated: {
+        addListener(fn) {
+          onUpdatedListener = fn;
+        }
+      }
+    },
+    scripting: {}
+  };
+
+  try {
+    await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+    onUpdatedListener(7, { url: responseUrl }, { id: 7, url: responseUrl });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(tabUpdateCalls, 0);
+    assert.equal(localData.autoApplyQueue.active, true);
+    assert.equal(localData.runResults.length, 0);
+    assert.equal(localData.runState.state, 'filling_cover_letter');
+  } finally {
+    delete globalThis.__HH_JOB_ASSISTANT_TEST_RESPONSE_WATCHDOG_MS__;
+  }
+});
+
 test('test assistance prompt includes resume, vacancy, question text, and expected salary', async () => {
   let listener = null;
   let requestBody = null;
@@ -373,7 +459,9 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     groqModel: 'test-model',
     resumeText: 'Java developer, Spring Boot',
     expectedSalary: '250 000 руб. на руки',
-    coverPrompt: 'cover prompt'
+    coverPrompt: 'cover prompt',
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
   };
 
   globalThis.fetch = async (url, options) => {
@@ -468,9 +556,14 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.equal(groqPayloadLog.details.componentLengths.resumeBrief, 'Java developer, Spring Boot'.length);
   assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: Java developer'.length);
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
-  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test|Java developer|250 000|Вакансия|зарплату/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Java developer, Spring Boot/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /250 000 руб\. на руки/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Вакансия: Java developer/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Какую зарплату ожидаете\?/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
-  assert.equal(groqResponseLog.details.responsePreview, undefined);
+  assert.equal(groqResponseLog.details.content, 'Ответ');
+  assert.equal(groqResponseLog.details.responseBody.choices[0].message.content, 'Ответ');
   assert.match(groqResponseLog.details.responseHash, /^[0-9a-f]{8}$/);
   assert.equal(groqResponseLog.details.finishReason, 'stop');
   assert.equal(groqResponseLog.details.choiceCount, 1);
@@ -480,7 +573,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     completionTokens: 63,
     totalTokens: 1297
   });
-  assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|Ответ|Java developer|250 000|Вакансия|зарплату|rawResponse|responsePreview/);
+  assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|rawResponse|responsePreview/);
 });
 
 test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
@@ -646,7 +739,8 @@ test('Groq empty 200 response is retried once before returning text', async () =
     resumeText: 'Java developer, Spring Boot',
     expectedSalary: '',
     coverPrompt: 'cover prompt',
-    agentDebugLog: []
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
   };
 
   globalThis.fetch = async (url, options) => {
@@ -718,7 +812,8 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
     resumeText: 'Java developer, Spring Boot',
     expectedSalary: '',
     coverPrompt: 'cover prompt',
-    agentDebugLog: []
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
   };
 
   globalThis.fetch = async () => ({
@@ -782,6 +877,7 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
   assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.usage.completionTokens, 300);
+  assert.equal(emptyErrorLogs.at(-1).details.responseBody.choices[0].finish_reason, 'length');
 });
 
 test('background stores capped chat reports with direct chat links', async () => {
@@ -1453,7 +1549,9 @@ test('Groq prompt caps large payload components', async () => {
     groqModel: 'test-model',
     resumeText: longResume,
     expectedSalary: '250000',
-    coverPrompt: 'cover prompt'
+    coverPrompt: 'cover prompt',
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
   };
 
   globalThis.fetch = async (url, options) => {
@@ -1533,7 +1631,9 @@ test('Groq 429 response stores cooldown from retry-after', async () => {
     groqModel: 'test-model',
     resumeText: 'Java developer',
     expectedSalary: '',
-    coverPrompt: 'cover prompt'
+    coverPrompt: 'cover prompt',
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
   };
 
   globalThis.fetch = async () => ({
@@ -1928,6 +2028,8 @@ test('agent debug log is a timestamped local profile artifact outside the popup'
 
   assert.match(js, /agentDebugLogFile/);
   assert.match(js, /agentDebugLogText/);
+  assert.match(js, /agentDebugLogsEnabled/);
+  assert.match(js, /setting\?\.\[ENABLED_KEY\] !== true/);
   assert.match(js, /function reset/);
   assert.match(js, /hh-job-assistant-\$\{formatTimestampForFile/);
   assert.match(js, /\.debug/);
@@ -1937,6 +2039,49 @@ test('agent debug log is a timestamped local profile artifact outside the popup'
   assert.match(content, /HHJobAssistantLog\?\.reset\?\./);
   assert.ok(!manifest.permissions.includes('downloads'));
   assert.ok(!manifest.permissions.includes('offscreen'));
+});
+
+test('agent debug log writes only when explicitly enabled', async () => {
+  const source = await readFile(new URL('src/agent-log.js', root), 'utf8');
+  const storage = { agentDebugLogsEnabled: false };
+  const writes = [];
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, storage[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          writes.push(value);
+          Object.assign(storage, value);
+        }
+      }
+    }
+  };
+
+  try {
+    await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#agent-log-disabled-${crypto.randomUUID()}`);
+    await globalThis.HHJobAssistantLog.append('test', 'disabled_append', { value: 1 });
+    await globalThis.HHJobAssistantLog.reset('test', 'disabled_reset', { runId: 'run-1' });
+
+    assert.deepEqual(writes, []);
+    assert.equal(storage.agentDebugLog, undefined);
+    assert.equal(storage.agentDebugLogFile, undefined);
+    assert.equal(storage.agentDebugLogText, undefined);
+
+    storage.agentDebugLogsEnabled = true;
+    await globalThis.HHJobAssistantLog.append('test', 'enabled_append', { value: 2 });
+
+    assert.equal(Array.isArray(storage.agentDebugLog), true);
+    assert.equal(storage.agentDebugLog[0].event, 'enabled_append');
+    assert.match(storage.agentDebugLogText, /enabled_append/);
+  } finally {
+    delete globalThis.chrome;
+    delete globalThis.HHJobAssistantLog;
+  }
 });
 
 test('popup view model reports exact readiness and blocker text', async () => {
@@ -2118,6 +2263,15 @@ test('hh country warning confirmation uses short follow-up timing', async () => 
   assert.doesNotMatch(content, /sleep\(window\.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ \? 0 : 1800\)/);
 });
 
+test('content script can clear stale auto-apply queues from URL guard', async () => {
+  const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
+
+  assert.match(content, /hhjaStopRun/);
+  assert.match(content, /url_trigger_stop_run/);
+  assert.match(content, /stale_search_queue_cleared/);
+  assert.match(content, /\['complete', 'dry_run_complete', 'stopped', 'idle', 'error'\]\.includes\(runState\?\.state\)/);
+});
+
 test('options preserve masked Groq key unless user edits the key field', async () => {
   const source = await readFile(new URL('src/options.js', root), 'utf8');
   const handlers = new Map();
@@ -2131,6 +2285,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    agentDebugLogsEnabled: false,
     experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',
@@ -2158,7 +2313,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     };
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'experimentalFeaturesEnabled', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'experimentalFeaturesEnabled', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
 
   globalThis.HHJA_DEFAULTS = {
@@ -2173,6 +2328,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    agentDebugLogsEnabled: false,
     experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',
@@ -2198,6 +2354,11 @@ test('options preserve masked Groq key unless user edits the key field', async (
         },
         async set(value) {
           Object.assign(storage, value);
+        },
+        async remove(keys) {
+          for (const key of keys) {
+            delete storage[key];
+          }
         }
       }
     },
@@ -2254,6 +2415,8 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /id="chatReplyMode"/);
   assert.match(html, /id="chatLimit"/);
   assert.match(html, /id="experimentalFeaturesEnabled"/);
+  assert.match(html, /id="agentDebugLogsEnabled"/);
+  assert.match(html, /Технические логи для разработчика/);
   assert.match(html, /Экспериментальные функции/);
   assert.match(html, /<section id="chatAssistantSettings" hidden>/);
   assert.match(html, /id="delayMinMs" type="number" min="500" step="250"/);
@@ -2270,6 +2433,10 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(js, /chatReplyMode/);
   assert.match(js, /chatLimit/);
   assert.match(js, /experimentalFeaturesEnabled/);
+  assert.match(js, /agentDebugLogsEnabled/);
+  assert.match(js, /fields\.agentDebugLogsEnabled\.checked = values\.agentDebugLogsEnabled === true/);
+  assert.match(js, /agentDebugLogsEnabled: fields\.agentDebugLogsEnabled\.checked/);
+  assert.match(js, /chrome\.storage\.local\.remove\(\['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText'\]\)/);
   assert.match(js, /fields\.experimentalFeaturesEnabled\.checked = values\.experimentalFeaturesEnabled === true/);
   assert.match(js, /experimentalFeaturesEnabled: fields\.experimentalFeaturesEnabled\.checked/);
   assert.match(js, /chatAssistantSettings: document\.getElementById\('chatAssistantSettings'\)/);

@@ -447,6 +447,18 @@ async function runContentAutoApply({
       }
     }
   };
+  globalThis.HHJobAssistantLog = {
+    async append(scope, event, details = {}) {
+      if (localStore.agentDebugLogsEnabled !== true) return;
+      const entry = {
+        timestamp: new Date().toISOString(),
+        scope,
+        event,
+        details
+      };
+      localStore.agentDebugLog = [...(Array.isArray(localStore.agentDebugLog) ? localStore.agentDebugLog : []), entry];
+    }
+  };
 
   await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${crypto.randomUUID()}`);
   assert.ok(listener, 'content script should register a listener');
@@ -1196,6 +1208,7 @@ test('auto apply fills required contenteditable cover letter before submit', asy
     hasTextarea: false,
     hasContentEditableCoverLetter: true,
     disabledSubmit: true,
+    initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
     groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить задачи и опыт.' }
   });
 
@@ -1217,6 +1230,7 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
       'Отправить'
     ].join('\n'),
     hasTextarea: true,
+    initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
     groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.' }
   });
 
@@ -1227,6 +1241,10 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
   assert.equal(result.groqRequests.length, 1);
   assert.equal(result.groqRequests.at(-1).task, 'cover_letter');
   assert.equal(result.textareaValue, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  const coverLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'cover_letter_applied');
+  assert.equal(coverLog.details.insertedText, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  assert.equal(coverLog.details.sourceText, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  assert.match(coverLog.details.field.marker, /Сопроводительное письмо/);
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 

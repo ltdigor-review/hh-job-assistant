@@ -16,6 +16,7 @@
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    agentDebugLogsEnabled: false,
     experimentalFeaturesEnabled: false,
     chatUnreadOnly: true,
     chatReplyMode: 'draft',

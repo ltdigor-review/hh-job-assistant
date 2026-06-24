@@ -1,6 +1,8 @@
 (function initAgentLog(global) {
   const LOG_KEY = 'agentDebugLog';
   const LOG_FILE_KEY = 'agentDebugLogFile';
+  const LOG_TEXT_KEY = 'agentDebugLogText';
+  const ENABLED_KEY = 'agentDebugLogsEnabled';
   const MAX_ENTRIES = 500;
   const SECRET_KEY_PATTERN = /api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|bearer/i;
 
@@ -47,16 +49,20 @@
     const chromeApi = global.chrome || globalThis.chrome;
     const storage = chromeApi?.storage?.local;
     if (!storage?.get || !storage?.set) return;
+    const setting = await storage.get([ENABLED_KEY]);
+    if (setting?.[ENABLED_KEY] !== true) return;
     const current = await storage.get([LOG_KEY, LOG_FILE_KEY]);
     const entries = Array.isArray(current?.[LOG_KEY]) ? current[LOG_KEY] : [];
     const file = current?.[LOG_FILE_KEY] || createLogFile();
-    await storage.set({ [LOG_FILE_KEY]: file, agentDebugLogText: buildDebugFile(file, entries) });
+    await storage.set({ [LOG_FILE_KEY]: file, [LOG_TEXT_KEY]: buildDebugFile(file, entries) });
   }
 
   async function appendLocal(scope, event, details = {}) {
     const chromeApi = global.chrome || globalThis.chrome;
     const storage = chromeApi?.storage?.local;
     if (!storage?.get || !storage?.set) return;
+    const setting = await storage.get([ENABLED_KEY]);
+    if (setting?.[ENABLED_KEY] !== true) return;
 
     const entry = {
       timestamp: new Date().toISOString(),
@@ -82,13 +88,15 @@
     const storage = chromeApi?.storage?.local;
 
     if (!storage?.get || !storage?.set) return;
+    const setting = await storage.get([ENABLED_KEY]);
+    if (setting?.[ENABLED_KEY] !== true) return;
 
     try {
       const file = createLogFile(details?.runId || '');
       await storage.set({
         [LOG_KEY]: [],
         [LOG_FILE_KEY]: file,
-        agentDebugLogText: buildDebugFile(file, [])
+        [LOG_TEXT_KEY]: buildDebugFile(file, [])
       });
       await appendLocal(scope, event, details);
     } catch {
@@ -101,6 +109,8 @@
     reset,
     LOG_KEY,
     LOG_FILE_KEY,
+    LOG_TEXT_KEY,
+    ENABLED_KEY,
     MAX_ENTRIES
   };
 })(globalThis);

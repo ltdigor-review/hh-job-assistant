@@ -19,6 +19,7 @@ const fields = {
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
+  agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled'),
   experimentalFeaturesEnabled: document.getElementById('experimentalFeaturesEnabled'),
   chatUnreadOnly: document.getElementById('chatUnreadOnly'),
   chatReplyMode: document.getElementById('chatReplyMode'),
@@ -63,6 +64,7 @@ async function loadOptions() {
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
+  fields.agentDebugLogsEnabled.checked = values.agentDebugLogsEnabled === true;
   fields.experimentalFeaturesEnabled.checked = values.experimentalFeaturesEnabled === true;
   syncExperimentalSections();
   fields.chatUnreadOnly.checked = values.chatUnreadOnly !== false;
@@ -96,6 +98,7 @@ async function saveOptions() {
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
+    agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked,
     experimentalFeaturesEnabled: fields.experimentalFeaturesEnabled.checked,
     chatUnreadOnly: fields.chatUnreadOnly.checked,
     chatReplyMode: fields.chatReplyMode.value === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
@@ -120,6 +123,9 @@ async function saveOptions() {
   }
 
   await chrome.storage.local.set(patch);
+  if (!patch.agentDebugLogsEnabled) {
+    await chrome.storage.local.remove(['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText']);
+  }
   await loadOptions();
   setStatus('Сохранено.');
 }

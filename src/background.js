@@ -28,6 +28,11 @@ const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_EMPTY_RESPONSE_RETRIES = 1;
 const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
+const RESPONSE_FORM_PROCESSING_STATES = new Set([
+  'generating_cover_letter',
+  'filling_cover_letter',
+  'submitting'
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -159,6 +164,12 @@ async function storageSet(value) {
   return chrome.storage.local.set(value);
 }
 
+async function storageRemove(keys) {
+  if (chrome.storage.local.remove) {
+    return chrome.storage.local.remove(keys);
+  }
+}
+
 async function appendAgentLog(event, details = {}) {
   await globalThis.HHJobAssistantLog?.append?.('background', event, details);
 }
@@ -188,6 +199,10 @@ async function ensureDefaults() {
 
   if (Object.keys(patch).length > 0) {
     await storageSet(patch);
+  }
+
+  if (current.agentDebugLogsEnabled !== true) {
+    await storageRemove(['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText']);
   }
 }
 
@@ -676,7 +691,10 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   };
   await appendAgentLog('groq_request_payload', {
     task,
+    endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+    method: 'POST',
     model: requestBody.model,
+    requestBody,
     messageCount: requestBody.messages.length,
     messageLengths: requestBody.messages.map((message) => ({
       role: message.role,
@@ -738,14 +756,14 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       await appendAgentLog('groq_request_error', {
         task,
         status: response.status,
-        responseText: text.slice(0, 200),
+        responseText: text,
         attempt,
         maxAttempts
       });
       await appendAgentLog('groq_error_payload', {
         task,
         status: response.status,
-        responseText: text.slice(0, 500),
+        responseText: text,
         attempt,
         maxAttempts
       });
@@ -766,7 +784,8 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         finishReason,
         maxTokens: requestBody.max_tokens,
         model: data?.model || requestBody.model,
-        usage: normalizeUsage(data?.usage)
+        usage: normalizeUsage(data?.usage),
+        responseBody: data
       });
       if (attempt < maxAttempts) {
         if (finishReason === 'length') {
@@ -788,6 +807,8 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     const finishReason = data?.choices?.[0]?.finish_reason || '';
     await appendAgentLog('groq_response_payload', {
       task,
+      content,
+      responseBody: data,
       responseLength: content.length,
       responseHash: hashText(content),
       finishReason,
@@ -1239,6 +1260,10 @@ function getResponseNavigationWatchdogMs() {
   return RESPONSE_NAVIGATION_WATCHDOG_MS;
 }
 
+function isResponseFormProcessingState(runState = {}) {
+  return RESPONSE_FORM_PROCESSING_STATES.has(runState.state);
+}
+
 async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt) {
   const { autoApplyQueue, autoApplySearchQueue, runState = DEFAULTS.runState } = await storageGet([
     'autoApplyQueue',
@@ -1251,6 +1276,10 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
 
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab?.id || tab.url !== expectedUrl || !isHhResponseFormUrl(tab.url)) {
+    return;
+  }
+
+  if (isResponseFormProcessingState(runState)) {
     return;
   }
 
