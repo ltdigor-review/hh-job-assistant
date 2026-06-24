@@ -155,7 +155,7 @@ export function derivePopupView({
     currentAction: deriveCurrentAction(runState),
     buttons: {
       autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
-      autoApplyLabel: restartLabel ? 'Запуск заново' : 'Запуск откликов',
+      autoApplyLabel: restartLabel ? 'Запуск' : 'Запуск откликов',
       continueDisabled: activeRun || !canContinue,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,

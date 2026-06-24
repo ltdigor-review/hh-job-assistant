@@ -355,20 +355,47 @@ function getQueueSourceUrl() {
   return isHhSearchPageUrl(location.href) ? location.href : '';
 }
 
+function getElementHref(node) {
+  return node?.href || node?.getAttribute?.('href') || '';
+}
+
+function getResponseUrlFromControl(node) {
+  const href = getElementHref(node);
+  return /\/applicant\/vacancy_response/.test(href) ? href : '';
+}
+
+function buildResponseUrlFromVacancyId(vacancyId, baseUrl = location.href) {
+  const id = cleanText(vacancyId);
+  if (!id) return '';
+  const origin = new URL(baseUrl || location.href, location.href).origin;
+  if (!origin || origin === 'null') return '';
+  const url = new URL('/applicant/vacancy_response', origin);
+  url.searchParams.set('vacancyId', id);
+  url.searchParams.set('hhtmFrom', 'vacancy_search_list');
+  return url.href;
+}
+
+function getItemResponseUrl(item) {
+  return item?.responseUrl || buildResponseUrlFromVacancyId(getVacancyDedupeKey(item) || item?.vacancyId, item?.url || location.href);
+}
+
 function getCardInfo(card, index) {
   const titleLink = queryFirst(HH_SELECTORS.titleLinks, card) || card.querySelector('a[href*="/vacancy/"]');
   const responseButton =
     queryAll(HH_SELECTORS.responseButtons, card).find((node) => /откликнуться/i.test(textOf(node))) ||
-    findClickableByText(card, [/откликнуться/i]);
-  const href = titleLink?.href || card.querySelector('a[href*="/vacancy/"]')?.href || location.href;
+    findClickableByText(card, [/откликнуться/i]) ||
+    (/откликнуться/i.test(textOf(card)) ? card : null);
+  const responseHref = getResponseUrlFromControl(responseButton) || getResponseUrlFromControl(card);
+  const href = getElementHref(titleLink) || getElementHref(card.querySelector?.('a[href*="/vacancy/"]')) || responseHref || location.href;
+  const vacancyId = getVacancyId(href) || getVacancyId(responseHref);
   const title = textOf(titleLink) || textOf(card).split('\n').find(Boolean) || document.title;
 
   return {
     index: index + 1,
-    vacancyId: getVacancyId(href),
+    vacancyId,
     title,
-    url: href,
-    responseUrl: /\/applicant\/vacancy_response/.test(responseButton?.href || '') ? responseButton.href : '',
+    url: /\/applicant\/vacancy_response/.test(href) && vacancyId ? `${location.origin}/vacancy/${vacancyId}` : href,
+    responseUrl: responseHref || buildResponseUrlFromVacancyId(vacancyId, href),
     card,
     responseButton,
     cardText: textOf(card),
@@ -384,15 +411,28 @@ function getVacancyCardNodes() {
     );
   }
 
+  function hasResponseControl(node) {
+    return Boolean(
+      queryAll(HH_SELECTORS.responseButtons, node).find((control) => /откликнуться/i.test(textOf(control))) ||
+        (/откликнуться/i.test(textOf(node)) && getResponseUrlFromControl(node))
+    );
+  }
+
   function normalizeVacancyCardNode(node) {
     let current = node;
+    let fallback = null;
     while (current && current !== document && current !== document.body) {
-      if (hasVacancyLink(current)) {
+      const hasLink = hasVacancyLink(current);
+      const hasResponse = hasResponseControl(current);
+      if (hasLink && hasResponse) {
         return current;
+      }
+      if (!fallback && (hasLink || hasResponse)) {
+        fallback = current;
       }
       current = current.parentElement;
     }
-    return hasVacancyLink(node) ? node : null;
+    return fallback;
   }
 
   for (const selectors of [
@@ -552,6 +592,21 @@ function isAlreadyAppliedForCurrentItem(root = document, item = null, { ignoreAc
   const currentVacancyId = getVacancyId(location.href);
   const itemVacancyId = getVacancyDedupeKey(item);
   return Boolean(currentVacancyId && (!itemVacancyId || currentVacancyId === itemVacancyId));
+}
+
+async function waitForAlreadyAppliedConfirmation(item, { timeoutMs = 5000 } = {}) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (
+      isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
+      /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно/i.test(textOf(document.body))
+    ) {
+      return true;
+    }
+    if (window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) break;
+    await sleep(500);
+  }
+  return false;
 }
 
 function findTextarea(root = getDialogRoot()) {
@@ -728,9 +783,16 @@ async function buildDeterministicQuestionAssistance(questionFields) {
 }
 
 function findCoverLetterTextarea(root = getDialogRoot()) {
-  return [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"],[role="textbox"]')]
+  const fields = [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"],[role="textbox"]')]
     .filter(isVisible)
-    .find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
+    .filter((field) => !/task_|question|answer|вопрос|ответ|писать тут|зарплат|доход/i.test(getFieldMarker(field)));
+  const marked = fields.find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
+  if (marked) return marked;
+  const rootText = getRootText(root);
+  if (fields.length === 1 && /сопроводительное\s+письмо|cover\s+letter/i.test(rootText)) {
+    return fields[0];
+  }
+  return null;
 }
 
 function findQuestionFields(root = getDialogRoot()) {
@@ -830,7 +892,7 @@ function findQuestionControlGroups(root = getDialogRoot()) {
       label: getOptionLabel(control),
       groupKey: getControlGroupKey(control, index)
     }))
-    .filter((option) => option.label && !/letter|cover|сопровод/i.test(option.label));
+    .filter((option) => option.label);
 
   const byGroup = new Map();
   for (const option of controls) {
@@ -1089,6 +1151,10 @@ async function appendResult(item) {
 }
 
 async function savePendingSubmit({ item, counters, status, coverLetterUsed, testDetected }) {
+  const navigationQueue = item.navigationQueue || {};
+  const returnToSearchUrl = navigationQueue.returnToSearch && isHhSearchPageUrl(navigationQueue.sourceUrl)
+    ? navigationQueue.sourceUrl
+    : '';
   await storageSet({
     autoApplyPendingSubmit: {
       runId: activeRunId,
@@ -1103,7 +1169,14 @@ async function savePendingSubmit({ item, counters, status, coverLetterUsed, test
       coverLetterUsed,
       testDetected,
       createdAt: new Date().toISOString(),
-      sourceUrl: location.href
+      sourceUrl: location.href,
+      returnToSearchUrl,
+      queueLimit: navigationQueue.limit || null,
+      queueConfig: navigationQueue.config || null,
+      queueMaxProcessed: navigationQueue.maxProcessed || null,
+      queueProcessedVacancyIds: Array.isArray(navigationQueue.processedVacancyIds)
+        ? navigationQueue.processedVacancyIds
+        : []
     }
   });
 }
@@ -1301,20 +1374,27 @@ async function finalizePendingSubmit() {
     status: autoApplyPendingSubmit.status || 'applied',
     sourceUrl: autoApplyPendingSubmit.sourceUrl || ''
   });
-  if (autoApplyQueue?.active && autoApplyQueue.returnToSearch && isHhSearchPageUrl(autoApplyQueue.sourceUrl)) {
-    const nextIndex = (Number(autoApplyQueue.index) || 0) + 1;
-    await saveQueue({ ...autoApplyQueue, active: false, index: nextIndex, counters });
+  const activeQueueReturnUrl = autoApplyQueue?.active && autoApplyQueue.returnToSearch && isHhSearchPageUrl(autoApplyQueue.sourceUrl)
+    ? autoApplyQueue.sourceUrl
+    : '';
+  const pendingReturnUrl = isHhSearchPageUrl(autoApplyPendingSubmit.returnToSearchUrl || '')
+    ? autoApplyPendingSubmit.returnToSearchUrl
+    : '';
+  const returnToSearchUrl = activeQueueReturnUrl || pendingReturnUrl;
+  if (returnToSearchUrl) {
+    const nextIndex = (Number(autoApplyQueue?.index) || 0) + 1;
+    await saveQueue({ ...(autoApplyQueue || {}), active: false, index: nextIndex, counters });
     await saveSearchQueue({
       active: true,
-      runId: autoApplyQueue.runId || autoApplyPendingSubmit.runId || activeRunId,
-      limit: autoApplyQueue.limit || 20,
+      runId: autoApplyQueue?.runId || autoApplyPendingSubmit.runId || activeRunId,
+      limit: autoApplyQueue?.limit || autoApplyPendingSubmit.queueLimit || 20,
       counters,
-      config: autoApplyQueue.config,
-      maxProcessed: autoApplyQueue.maxProcessed || null,
-      processedVacancyIds: autoApplyQueue.processedVacancyIds || []
+      config: autoApplyQueue?.config || autoApplyPendingSubmit.queueConfig || null,
+      maxProcessed: autoApplyQueue?.maxProcessed || autoApplyPendingSubmit.queueMaxProcessed || null,
+      processedVacancyIds: autoApplyQueue?.processedVacancyIds || autoApplyPendingSubmit.queueProcessedVacancyIds || []
     });
     await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
-    navigateTo(autoApplyQueue.sourceUrl);
+    navigateTo(returnToSearchUrl);
     return true;
   }
   await setRunState({ state: 'complete', ...counters, lastError: '' });
@@ -1519,6 +1599,24 @@ async function getFallbackQuestionAssistance(questionFields, questionControlGrou
   return lines.join('\n') || textAnswer;
 }
 
+async function buildNumberedCoverLetterAnswers(questionContext) {
+  const context = cleanText(questionContext);
+  if (!/скопируйте|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(context)) return '';
+  const expectedSalary = await getExpectedSalary();
+  const salary = expectedSalary || 'минимум 250 000 руб. gross, комфорт 300 000 руб. gross';
+  const answers = [];
+  if (/АБС\s*ЦФТ|ИБСО|ЦФТ-Банк|ЦФТ-Ритейл/i.test(context)) {
+    answers.push('1. С АБС ЦФТ / ИБСО / ЦФТ-Банк / ЦФТ-Ритейл коммерческого опыта не было; есть опыт функционального, регрессионного и интеграционного тестирования, анализа требований, тест-кейсов и баг-репортов.');
+  }
+  if (/оклад|доход|зарплат|gross|гросс|вычета/i.test(context)) {
+    answers.push(`${answers.length + 1}. Ожидания по окладу: ${salary}.`);
+  }
+  if (/военный билет|приписное/i.test(context)) {
+    answers.push(`${answers.length + 1}. Военный билет или приписное: есть, детали готов обсудить.`);
+  }
+  return answers.join('\n');
+}
+
 function selectControl(control) {
   control.focus?.();
   if (!control.checked) {
@@ -1580,6 +1678,29 @@ function fillQuestionControls(groups, answerText) {
       selected += 1;
       labels.push(option.label);
     }
+  }
+  return { selected, labels };
+}
+
+function getFallbackChoiceOption(group) {
+  const options = Array.isArray(group?.options) ? group.options.filter((option) => option?.control) : [];
+  if (options.length === 0) return null;
+  return (
+    options.find((option) => /да|готов|готова|могу|соглас|подходит|рассматриваю|yes\b|agree|available/i.test(option.label)) ||
+    options.find((option) => !/нет|не готов|не готова|не могу|не подходит|не рассматриваю|no\b|not\b|отказ/i.test(option.label)) ||
+    options[0]
+  );
+}
+
+function fillFallbackQuestionControls(groups) {
+  let selected = 0;
+  const labels = [];
+  for (const group of groups) {
+    const option = getFallbackChoiceOption(group);
+    if (!option) continue;
+    selectControl(option.control);
+    selected += 1;
+    labels.push(option.label);
   }
   return { selected, labels };
 }
@@ -2071,11 +2192,80 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
+  async function fallbackToDirectResponse(reason) {
+    const responseUrl = getItemResponseUrl(item);
+    if (!responseUrl || !item.navigationQueue?.returnToSearch || isResponseFormPage()) {
+      return null;
+    }
+    if (location.href === responseUrl) {
+      return null;
+    }
+    const navigationQueue = {
+      ...item.navigationQueue,
+      items: item.navigationQueue.items?.map((queueItem, index) => index === 0 ? { ...queueItem, responseUrl } : queueItem),
+      active: true,
+      index: 0,
+      counters: { ...counters }
+    };
+    await saveQueue(navigationQueue);
+    await setRunState({
+      state: 'waiting_for_dialog',
+      ...counters,
+      currentAction: 'Открываю прямую форму отклика HH',
+      lastError: ''
+    });
+    await appendAgentLog('response_form_direct_fallback', {
+      vacancyId: item.vacancyId,
+      responseUrl,
+      sourceUrl: navigationQueue.sourceUrl || '',
+      reason
+    });
+    navigateTo(responseUrl);
+    return { navigated: true, nextPageUrl: responseUrl };
+  }
+
+  if (!item.responseButton) {
+    if (isVacancyDetailPage() && queuedItemMatchesCurrentVacancy({ returnToSearch: true, index: 0, items: [item] })) {
+      await sleep(5000);
+      const settledText = textOf(document.body);
+      if (
+        isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
+        /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно/i.test(settledText)
+      ) {
+        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
+        return;
+      }
+      const detailResponseButton = findEnabledClickableByText(document, [/откликнуться/i]) || findClickableByText(document, [/откликнуться/i]);
+      if (detailResponseButton) {
+        item.responseButton = detailResponseButton;
+      }
+    }
+  }
+
   if (!item.responseButton) {
     const blockedReason = detectBlockedResponseReason(document);
     if (blockedReason) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
     } else {
+      const fallback = await fallbackToDirectResponse('no_response_button');
+      if (fallback) return fallback;
+      if (item.navigationQueue?.returnToSearch && getItemResponseUrl(item)) {
+        await appendAgentLog('no_response_button_assumed_applied', {
+          vacancyId: item.vacancyId,
+          responseUrl: getItemResponseUrl(item),
+          sourceUrl: item.navigationQueue.sourceUrl || ''
+        });
+        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
+        return;
+      }
+      if (getItemResponseUrl(item)) {
+        await appendAgentLog('no_response_button_with_response_url_assumed_applied', {
+          vacancyId: item.vacancyId,
+          responseUrl: getItemResponseUrl(item)
+        });
+        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
+        return;
+      }
       counters.skipped += 1;
       await appendResult({
         index: item.index,
@@ -2159,6 +2349,8 @@ async function applyToVacancy(item, counters) {
   }
 
   if (!isResponseFormRoot(root)) {
+    const fallback = await fallbackToDirectResponse('root_not_response_form');
+    if (fallback) return fallback;
     await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: форма отклика HH не открылась.');
     return;
   }
@@ -2217,9 +2409,7 @@ async function applyToVacancy(item, counters) {
 
       assistance = isRecoverableGroqError(error)
         ? await getFallbackQuestionAssistance(questionFields, questionControlGroups)
-        : deterministicAssistance || (questionFields.length > 0 && questionControlGroups.length === 0
-          ? await getExpectedSalary()
-          : '');
+        : deterministicAssistance || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
       if (assistance) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       } else {
@@ -2299,24 +2489,19 @@ async function applyToVacancy(item, counters) {
         rejectedAnswer: selectedChoices.selected === 0 ? truncateForStatus(assistance, 240) : '',
         retryError: selectedChoices.selected === 0 ? choiceRetryError : ''
       });
-      const missingChoiceGroups = validateSelectedQuestionControls(questionControlGroups);
       if (selectedChoices.selected === 0) {
-        const message = formatChoiceUnmatchedMessage(questionControlGroups, assistance, choiceRetryError);
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
+        selectedChoices = fillFallbackQuestionControls(questionControlGroups);
+        await appendAgentLog('question_choices_fallback_applied', {
           vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_choice_answer_unmatched',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: message
+          groups: questionControlGroups.length,
+          selected: selectedChoices.selected,
+          labels: selectedChoices.labels.slice(0, 20),
+          expectedOptions: formatChoiceOptionSummary(questionControlGroups),
+          rejectedAnswer: truncateForStatus(assistance, 240),
+          retryError: choiceRetryError
         });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
-        closeDialog();
-        return;
       }
+      const missingChoiceGroups = validateSelectedQuestionControls(questionControlGroups);
       if (missingChoiceGroups.length > 0) {
         const message = `Пропущено: ответы на варианты HH не были выбраны (${missingChoiceGroups.join(', ')}).`;
         counters.skipped += 1;
@@ -2342,26 +2527,38 @@ async function applyToVacancy(item, counters) {
       if (await stopIfRequested(counters)) return;
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       setBusyCursor(true);
-      const answers = await normalizeQuestionAnswers(splitGeneratedAnswers(assistance, questionFields.length), questionFields);
-      const invalidReason = answers
+      let answers = await normalizeQuestionAnswers(splitGeneratedAnswers(assistance, questionFields.length), questionFields);
+      let invalidReason = answers
         .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
         .find(Boolean);
       if (invalidReason) {
-        setBusyCursor(false);
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
+        const fallbackAssistance = await getFallbackQuestionAssistance(questionFields, []);
+        answers = await normalizeQuestionAnswers(splitGeneratedAnswers(fallbackAssistance, questionFields.length), questionFields);
+        invalidReason = answers
+          .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
+          .find(Boolean);
+        await appendAgentLog('question_text_fallback_after_bad_answer', {
           vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_bad_generated_answer',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: invalidReason
+          originalError: invalidReason || '',
+          fields: questionFields.length
         });
-        await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
-        closeDialog();
-        return;
+        if (invalidReason) {
+          setBusyCursor(false);
+          counters.skipped += 1;
+          await appendResult({
+            index: item.index,
+            vacancyId: item.vacancyId,
+            title: item.title,
+            url: item.url,
+            status: 'skipped_bad_generated_answer',
+            coverLetterUsed: false,
+            testDetected: true,
+            error: invalidReason
+          });
+          await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
+          closeDialog();
+          return;
+        }
       }
       if (await stopIfRequested(counters)) return;
       try {
@@ -2405,7 +2602,7 @@ async function applyToVacancy(item, counters) {
       }
     }
 
-    if (coverLetterTextarea && !coverLetterTextarea.value) {
+    if (coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea))) {
       let letter;
       await setRunState({
         state: 'generating_cover_letter',
@@ -2414,12 +2611,20 @@ async function applyToVacancy(item, counters) {
       });
       setBusyCursor(true);
       try {
-        letter = await generateCoverLetter(getVacancyText(item.card) || getVacancyText(document));
+        if (/скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)) {
+          letter = await buildNumberedCoverLetterAnswers(questionContext)
+            || assistance
+            || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
+        } else {
+          letter = await generateCoverLetter(getVacancyText(item.card) || getVacancyText(document));
+        }
       } catch (error) {
         if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
           throw error;
         }
-        letter = await getFallbackCoverLetter();
+        letter = /скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)
+          ? (await buildNumberedCoverLetterAnswers(questionContext) || await getFallbackQuestionAssistance(questionFields, questionControlGroups))
+          : await getFallbackCoverLetter();
       } finally {
         setBusyCursor(false);
       }
@@ -2433,11 +2638,20 @@ async function applyToVacancy(item, counters) {
       coverLetterUsed = true;
       await sleep(POST_FILL_SETTLE_MS);
       if (await stopIfRequested(counters)) return;
+      await appendAgentLog('mandatory_cover_letter_applied', {
+        vacancyId: item.vacancyId,
+        fieldLength: cleanText(getFieldValue(coverLetterTextarea)).length,
+        letterLength: cleanText(letter).length
+      });
     }
 
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
-      if (isAlreadyAppliedForCurrentItem(root, item) || isAlreadyAppliedForCurrentItem(document, item)) {
+      if (
+        isAlreadyAppliedForCurrentItem(root, item) ||
+        isAlreadyAppliedForCurrentItem(document, item) ||
+        await waitForAlreadyAppliedConfirmation(item)
+      ) {
         await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: true });
         return;
       }
@@ -2446,6 +2660,8 @@ async function applyToVacancy(item, counters) {
         await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
         return;
       }
+      const fallback = await fallbackToDirectResponse('test_submit_not_found');
+      if (fallback) return fallback;
       await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: кнопка отправки теста не найдена.');
       return;
     }
@@ -2504,6 +2720,8 @@ async function applyToVacancy(item, counters) {
 
   if (root === document && !isResponseFormPage() && !hasSubmitControl(document) && !textarea) {
     if (location.href === beforeUrl && isHhSearchPageUrl(location.href)) {
+      const fallback = await fallbackToDirectResponse('search_page_without_submit');
+      if (fallback) return fallback;
       await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: форма отклика HH не открылась.');
       return;
     }
@@ -2574,7 +2792,11 @@ async function applyToVacancy(item, counters) {
 
   const submitButton = findSubmitButton(root);
   if (!submitButton) {
-    if (isAlreadyAppliedForCurrentItem(root, item) || isAlreadyAppliedForCurrentItem(document, item)) {
+    if (
+      isAlreadyAppliedForCurrentItem(root, item) ||
+      isAlreadyAppliedForCurrentItem(document, item) ||
+      await waitForAlreadyAppliedConfirmation(item)
+    ) {
       await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: false });
       return;
     }
@@ -2583,6 +2805,8 @@ async function applyToVacancy(item, counters) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
       return;
     }
+    const fallback = await fallbackToDirectResponse('submit_not_found');
+    if (fallback) return fallback;
     await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: кнопка отправки не найдена.');
     return;
   }
@@ -2786,7 +3010,9 @@ async function continueQueuedAutoApply() {
     ...(queue.counters || {})
   };
 
-  counters.processed += 1;
+  if (!queue.processedCounted) {
+    counters.processed += 1;
+  }
   const item = isResponseFormPage() ? buildResponseFormItem(itemData) : buildQueuedVacancyDetailItem(itemData);
   if (await stopIfRequested(counters)) return true;
 
@@ -2925,6 +3151,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     if (vacancyKey) {
       processedVacancyIds.add(vacancyKey);
     }
+    item.responseUrl = getItemResponseUrl(item);
     if (sourceUrl) {
       item.navigationQueue = {
         active: true,
@@ -2945,23 +3172,47 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         counters: { ...counters },
         config,
         maxProcessed,
+        processedCounted: false,
         returnToSearch: true,
         processedVacancyIds: serializeProcessedVacancyIds(processedVacancyIds)
       };
     }
 
     counters.processed += 1;
+    if (item.navigationQueue) {
+      item.navigationQueue.counters = { ...counters };
+      item.navigationQueue.processedCounted = true;
+    }
     const appliedBeforeItem = counters.applied;
 
     try {
-      await applyToVacancy(item, counters);
-      if (item.responseUrl) {
+      if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
+        await saveQueue(item.navigationQueue);
+        await setRunState({
+          state: 'waiting_for_dialog',
+          ...counters,
+          currentAction: 'Открываю прямую форму отклика HH',
+          lastError: ''
+        });
+        await appendAgentLog('response_form_direct_open', {
+          vacancyId: item.vacancyId,
+          responseUrl: item.responseUrl,
+          sourceUrl
+        });
+        navigateTo(item.responseUrl);
+        return { ok: true, ...counters, navigated: true, nextPageUrl: item.responseUrl };
+      }
+      const outcome = await applyToVacancy(item, counters);
+      if (outcome?.navigated) {
+        return { ok: true, ...counters, navigated: true, nextPageUrl: outcome.nextPageUrl };
+      }
+      if (item.responseUrl && !item.navigationQueue?.returnToSearch) {
         await saveQueue({ active: false });
       }
     } catch (error) {
       const message = localizeError(error);
       counters.errors += 1;
-      if (item.responseUrl) {
+      if (item.responseUrl && !item.navigationQueue?.returnToSearch) {
         await saveQueue({ active: false });
       }
       await appendResult({

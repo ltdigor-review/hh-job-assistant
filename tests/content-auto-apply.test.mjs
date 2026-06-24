@@ -9,6 +9,7 @@ async function runContentAutoApply({
   hasTextarea,
   exactCardSelectorMatches = true,
   broadVacancySelectorIncludesButton = false,
+  broadVacancySelectorOnlyButton = false,
   startOnResponseForm = false,
   hasQuestionField = false,
   questionFieldCount = 1,
@@ -33,6 +34,7 @@ async function runContentAutoApply({
   submitButtonText = 'Отправить',
   dialogTextAfterCoverInput = '',
   disabledSubmit = false,
+  validateRequiredBeforeSubmit = false,
   keepDialogOpenAfterSubmit = false,
   postSubmitDialogText = '',
   submitNavigateHref = '',
@@ -148,6 +150,19 @@ async function runContentAutoApply({
     disabled: disabledSubmit,
     click() {
       submitClicks += 1;
+      if (validateRequiredBeforeSubmit) {
+        const hasUncheckedChoice = selectableControls.some((item) => !item.input.checked);
+        const hasEmptyTextarea = [...questionTextareas, hasCoverLetterField ? coverTextarea : null]
+          .filter(Boolean)
+          .some((field) => !String(field.value || field.textContent || '').trim());
+        if (hasUncheckedChoice || hasEmptyTextarea) {
+          if (bodyNode) {
+            bodyNode.innerText = 'Укажите ожидания по окладу минимум и комфорт (gross, до вычета налога)';
+            bodyNode.textContent = bodyNode.innerText;
+          }
+          return;
+        }
+      }
       if (submitBodyTextAfterClick && bodyNode) {
         bodyNode.innerText = submitBodyTextAfterClick;
         bodyNode.textContent = submitBodyTextAfterClick;
@@ -323,6 +338,7 @@ async function runContentAutoApply({
       if (selector === '[data-qa="serp-item"]') return [];
       if (selector === '[data-qa*="vacancy-serp"]') {
         if (currentResponseForm || startOnResponseForm) return [];
+        if (broadVacancySelectorOnlyButton) return [responseButton];
         return broadVacancySelectorIncludesButton ? [card, responseButton] : [card];
       }
       if (selector === 'a[data-qa="pager-next"]') return nextLink ? [nextLink] : [];
@@ -682,9 +698,11 @@ test('auto apply does not count global search already-applied text as current va
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.navigated, true);
   assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
+  assert.equal(result.appended.length, 0);
+  assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
 });
 
 test('auto apply does not count current card as applied while response button is active', async () => {
@@ -698,9 +716,53 @@ test('auto apply does not count current card as applied while response button is
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.navigated, true);
   assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
+  assert.equal(result.appended.length, 0);
+  assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
+});
+
+test('auto apply opens direct response url instead of skipping when search click does not open form', async () => {
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseHref: responseUrl,
+    responseClickOpensDialog: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.navigated, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.length, 0);
+  assert.equal(result.localStore.autoApplyQueue.active, true);
+  assert.equal(result.localStore.autoApplyQueue.counters.processed, 1);
+  assert.equal(result.navigateUrl, responseUrl);
+});
+
+test('auto apply derives response url when live hh broad selector returns response button node', async () => {
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    exactCardSelectorMatches: false,
+    broadVacancySelectorOnlyButton: true,
+    responseHref: responseUrl,
+    responseClickOpensDialog: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.navigated, true);
+  assert.equal(result.appended.length, 0);
+  assert.equal(result.localStore.autoApplyQueue.active, true);
+  assert.equal(result.localStore.autoApplyQueue.items[0].vacancyId, '123');
+  assert.equal(result.localStore.autoApplyQueue.items[0].responseUrl, responseUrl);
+  assert.equal(result.navigateUrl, responseUrl);
 });
 
 test('auto apply stops before response link that redirects to signup', async () => {
@@ -1267,7 +1329,7 @@ test('auto apply fills contenteditable employer question fields', async () => {
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply skips generated question answers that still look like model garbage', async () => {
+test('auto apply falls back when generated question answers still look like model garbage', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1277,10 +1339,11 @@ test('auto apply skips generated question answers that still look like model gar
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
 test('auto apply puts only labeled free-text answer into question field', async () => {
@@ -1322,7 +1385,7 @@ test('auto apply puts only labeled free-text answer into question field', async 
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply skips prompt context leaked into generated text answer', async () => {
+test('auto apply falls back when prompt context leaked into generated text answer', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1340,11 +1403,11 @@ test('auto apply skips prompt context leaked into generated text answer', async 
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
-  assert.match(result.appended.at(-1).error, /контекст промпта|служебные метки промпта|служебные данные поля HH/);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
 test('auto apply sends visible messenger question text and skips non-contact answer', async () => {
@@ -1674,7 +1737,7 @@ test('auto apply accepts exact short code from multiline hh choice label', async
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply skips choice questions when Groq returns no matching option labels', async () => {
+test('auto apply uses fallback choice when Groq returns no matching option labels', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
     hasTextarea: false,
@@ -1690,17 +1753,15 @@ test('auto apply skips choice questions when Groq returns no matching option lab
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да']);
   assert.equal(result.groqRequests.length, 2);
-  assert.equal(result.appended.at(-1).status, 'skipped_choice_answer_unmatched');
-  assert.match(result.appended.at(-1).error, /ожидались точные варианты: группа 1: Да \/ Нет/);
-  assert.match(result.appended.at(-1).error, /Groq ответил: Можно рассмотреть разные варианты/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply skips choice questions with details when Groq choice retry is empty', async () => {
+test('auto apply uses fallback choice when Groq choice retry is empty', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
     hasTextarea: false,
@@ -1719,14 +1780,12 @@ test('auto apply skips choice questions with details when Groq choice retry is e
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.response.errors, 0);
-  assert.equal(result.submitClicks, 0);
-  assert.deepEqual(result.checkedLabels, []);
-  assert.equal(result.appended.at(-1).status, 'skipped_choice_answer_unmatched');
-  assert.match(result.appended.at(-1).error, /ошибка уточнения: Groq вернул пустой ответ/);
-  assert.match(result.appended.at(-1).error, /finish_reason=length/);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
 test('auto apply uses fallback choice answers after recoverable Groq error', async () => {
@@ -1798,10 +1857,10 @@ test('auto apply limit targets successful applications, not skipped cards', asyn
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.response.navigated, true);
-  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
-  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
+  assert.equal(result.appended.length, 0);
+  assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
 });
 
 test('auto apply unconfirmed submit does not consume successful application quota', async () => {
@@ -1835,14 +1894,13 @@ test('auto apply processed cap stops after skipped card for bounded live smoke',
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 0);
   assert.equal(result.response.processed, 1);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.response.navigated, undefined);
-  assert.equal(result.navigateUrl, '');
-  assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.navigated, true);
+  assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
+  assert.equal(result.appended.length, 0);
 });
 
-test('auto apply processed cap completes after employer-question skip without stale action', async () => {
+test('auto apply processed cap completes after employer-question fallback without stale action', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nГотовы ли пройти тестовое задание?\nДа\nНет',
     hasTextarea: false,
@@ -1854,10 +1912,10 @@ test('auto apply processed cap completes after employer-question skip without st
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.applied, 1);
   assert.equal(result.response.processed, 1);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.appended.at(-1).status, 'skipped_test_missing_groq_key');
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.states.at(-1).state, 'complete');
   assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
 });
@@ -1969,7 +2027,8 @@ test('queued response form processed cap completes without returning to search',
   assert.equal(result.localStore.autoApplyQueue.active, false);
   assert.equal(result.localStore.autoApplySearchQueue.active, false);
   assert.equal(result.localStore.autoApplyQueue.counters.processed, 1);
-  assert.equal(result.localStore.autoApplyQueue.counters.skipped, 1);
+  assert.equal(result.localStore.autoApplyQueue.counters.applied, 1);
+  assert.equal(result.localStore.autoApplyQueue.counters.skipped, 0);
   assert.equal(result.navigateUrl, '');
   assert.equal(result.states.at(-1).state, 'complete');
 });
@@ -2009,6 +2068,42 @@ test('auto apply fills question and mandatory cover letter without Groq key', as
   assert.match(result.coverTextareaValue, /Здравствуйте!/);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
+});
+
+test('auto apply fills live-style confirmation radio and mandatory cover letter', async () => {
+  const liveQuestionText = [
+    'Отклик на вакансию',
+    'Для отклика необходимо ответить на несколько вопросов работодателя',
+    'Ответьте, пожалуйста, на несколько вопросов ниже и пронумерованные вопросы и ответы скопируйте в сопроводительное письмо.',
+    'Укажите, пожалуйста, функционал и период работы с АБС ЦФТ / ИБСО / ЦФТ-Банк / ЦФТ-Ритейл',
+    'Укажите, пожалуйста, ожидания по окладу минимум и комфорт (gross, до вычета налога)',
+    'Для мужчин: У Вас есть военный билет или приписное?',
+    'Сопроводительное письмо обязательное для этой вакансии'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: liveQuestionText,
+    bodyText: liveQuestionText,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    validateRequiredBeforeSubmit: true,
+    questionControls: [
+      {
+        type: 'radio',
+        name: 'task_286962850',
+        label: 'да, я ответил на вопросы и скопировал ответы в сопроводительное письмо',
+        value: '286962851'
+      }
+    ],
+    expectedSalary: '250 000 руб. gross'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+  assert.match(result.textareaValue, /АБС ЦФТ|250 000 руб\. gross|Военный билет/);
 });
 
 test('auto apply counts already confirmed response page as applied', async () => {
@@ -2736,6 +2831,133 @@ test('auto apply finalizes pending response on detail confirmation page and retu
   assert.equal(localStore.autoApplyQueue.active, false);
   assert.equal(localStore.autoApplySearchQueue.active, true);
   assert.equal(localStore.autoApplySearchQueue.counters.applied, 2);
+  assert.equal(localStore.autoApplySearchQueue.counters.processed, 3);
+  assert.equal(states.at(-1).state, 'applying');
+  assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
+  assert.equal(logs.some((item) => item.event === 'pending_submit_finalized'), true);
+});
+
+test('auto apply resumes search from pending submit when response queue was cleared early', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const states = [];
+  const logs = [];
+  const navigations = [];
+  const localStore = {
+    autoApplyQueue: {
+      active: false,
+      index: 0,
+      counters: {
+        found: 50,
+        processed: 3,
+        applied: 2,
+        skipped: 0,
+        errors: 0
+      }
+    },
+    autoApplyPendingSubmit: {
+      runId: 'test-run',
+      item: {
+        index: 3,
+        vacancyId: '134134596',
+        title: 'Head of FinTech',
+        url: 'https://hh.ru/vacancy/134134596'
+      },
+      counters: {
+        found: 50,
+        processed: 3,
+        applied: 2,
+        skipped: 0,
+        errors: 0
+      },
+      status: 'applied_test_assisted',
+      coverLetterUsed: false,
+      testDetected: true,
+      createdAt: new Date().toISOString(),
+      sourceUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=134134596&startedWithQuestion=false',
+      returnToSearchUrl: 'https://hh.ru/search/vacancy?text=java',
+      queueLimit: 100,
+      queueConfig: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      },
+      queueMaxProcessed: null,
+      queueProcessedVacancyIds: ['134319918', '129604875', '134134596']
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/applicant/vacancy_response?vacancyId=134134596&startedWithQuestion=false',
+    pathname: '/applicant/vacancy_response'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH response confirmation page',
+    body: new FakeElement({ text: 'Вы откликнулись\nОтклик отправлен' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.HHJobAssistantLog = {
+    append(scope, event, details) {
+      logs.push({ scope, event, details });
+      return Promise.resolve();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        if (message.type === 'APPEND_RUN_RESULT') {
+          appended.push(message.item);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#pending-cleared-queue-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (navigations.length === 0 && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(localStore.autoApplyPendingSubmit, null);
+  assert.equal(localStore.autoApplySearchQueue.active, true);
+  assert.equal(localStore.autoApplySearchQueue.limit, 100);
+  assert.deepEqual(localStore.autoApplySearchQueue.processedVacancyIds, ['134319918', '129604875', '134134596']);
+  assert.equal(localStore.autoApplySearchQueue.counters.applied, 3);
   assert.equal(localStore.autoApplySearchQueue.counters.processed, 3);
   assert.equal(states.at(-1).state, 'applying');
   assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');

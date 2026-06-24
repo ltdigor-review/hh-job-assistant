@@ -2061,7 +2061,7 @@ test('popup view model exposes restart and continue controls after pause', async
     tabState: { kind: 'ready', canStartAutoApply: true, canContinueAutoApply: true },
     hasGroqKey: true
   });
-  assert.equal(paused.buttons.autoApplyLabel, 'Запуск заново');
+  assert.equal(paused.buttons.autoApplyLabel, 'Запуск');
   assert.equal(paused.buttons.autoApplyDisabled, false);
   assert.equal(paused.buttons.continueDisabled, false);
   assert.equal(paused.buttons.stopDisabled, true);
@@ -2072,7 +2072,7 @@ test('popup view model exposes restart and continue controls after pause', async
     tabState: { kind: 'ready', canStartAutoApply: true, canContinueAutoApply: false },
     hasGroqKey: true
   });
-  assert.equal(stopped.buttons.autoApplyLabel, 'Запуск заново');
+  assert.equal(stopped.buttons.autoApplyLabel, 'Запуск');
   assert.equal(stopped.buttons.continueDisabled, true);
   assert.equal(stopped.buttons.continueTitle, 'Нет сохраненного запуска для продолжения');
 });
