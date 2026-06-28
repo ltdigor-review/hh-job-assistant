@@ -106,7 +106,7 @@ function buildInjection(contentScriptSource) {
       const messages = [];
       let listener = null;
       const hasAuthSignal = () => {
-        const links = [...document.querySelectorAll('a[href*="/applicant/"],a[href*="/resume/"],a[href*="/chat"],a[href*="/negotiations"]')];
+        const links = [...document.querySelectorAll('a[href*="/applicant/"],a[href*="/resume/"],a[href*="/negotiations"],a[href*="/chat"]')];
         if (links.some((link) => /^https:\\/\\/([^/]+\\.)?hh\\.ru\\//.test(link.href || ''))) return true;
         const text = document.body.innerText || '';
         return /мои резюме|отклики|сообщения|профиль|личный кабинет/i.test(text) && !/войти|зарегистрироваться/i.test(text);

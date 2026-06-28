@@ -100,9 +100,6 @@ function pickConfig(fileEnv) {
   const dailyLimit = read('HHJA_DAILY_LIMIT');
   const delayMinMs = read('HHJA_DELAY_MIN_MS');
   const delayMaxMs = read('HHJA_DELAY_MAX_MS');
-  const chatReplyMode = read('HHJA_CHAT_REPLY_MODE');
-  const chatLimit = read('HHJA_CHAT_LIMIT');
-  const chatUnreadOnly = read('HHJA_CHAT_UNREAD_ONLY');
 
   if (groqApiKey) patch.groqApiKey = groqApiKey;
   if (groqModel) patch.groqModel = groqModel;
@@ -111,9 +108,6 @@ function pickConfig(fileEnv) {
   if (dailyLimit) patch.dailyLimit = Math.max(1, Math.min(Number(dailyLimit) || 20, 100));
   if (delayMinMs) patch.delayMinMs = Math.max(500, Number(delayMinMs) || 2500);
   if (delayMaxMs) patch.delayMaxMs = Math.max(500, Number(delayMaxMs) || 5000);
-  if (chatReplyMode) patch.chatReplyMode = chatReplyMode === 'auto_send' ? 'auto_send' : 'draft';
-  if (chatLimit) patch.chatLimit = Math.max(1, Math.min(Number(chatLimit) || 10, 100));
-  if (chatUnreadOnly) patch.chatUnreadOnly = !/^(0|false|no)$/i.test(chatUnreadOnly);
 
   return patch;
 }

@@ -12,15 +12,13 @@
     resumeGroqBriefVersion: '',
     groqCooldownUntil: '',
     expectedSalary: '',
+    employmentPreference: '',
+    workFormatPreference: '',
     coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
     agentDebugLogsEnabled: false,
-    experimentalFeaturesEnabled: false,
-    chatUnreadOnly: true,
-    chatReplyMode: 'draft',
-    chatLimit: 10,
     runState: {
       state: 'idle',
       found: 0,
@@ -32,7 +30,8 @@
       currentAction: '',
       updatedAt: null
     },
-    runResults: [],
-    chatReports: []
+    autoApplyStopRequested: false,
+    autoApplyStopRequestedAt: '',
+    runResults: []
   };
 })();

@@ -15,7 +15,7 @@ const action = process.env.HHJA_ACTION || process.argv[2] || '';
 const outputPath = process.env.HHJA_OUTPUT || '';
 const timeoutMs = Number(process.env.HHJA_CHROMIUM_TIMEOUT_MS || 30000);
 const actionTimeoutMs = Number(process.env.HHJA_ACTION_TIMEOUT_MS || 120000);
-const startUrl = process.env.HH_TEST_URL || (action === 'START_CHAT_ASSIST' ? 'https://hh.ru/chat' : 'https://hh.ru/');
+const startUrl = process.env.HH_TEST_URL || 'https://hh.ru/';
 const browserPath = process.env.HHJA_CHROMIUM_PATH || await findBrowserPath();
 
 function fail(message) {
@@ -238,29 +238,6 @@ async function sendRuntimeAction(session, sessionId, messageType) {
   return evaluation.result?.value || null;
 }
 
-async function waitForActiveContentScript(session, sessionId) {
-  const started = Date.now();
-  const expression = `new Promise((resolve) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (!tab?.id) {
-        resolve({ ok: false, error: 'No active tab' });
-        return;
-      }
-      chrome.tabs.sendMessage(tab.id, { type: 'GET_CONTENT_STATUS' }, (response) => {
-        resolve(response || { ok: false, error: chrome.runtime.lastError?.message || 'No content response' });
-      });
-    });
-  })`;
-  while (Date.now() - started < timeoutMs) {
-    const evaluation = await evaluate(session, sessionId, expression, timeoutMs).catch((error) => ({
-      result: { value: { ok: false, error: error.message } }
-    }));
-    if (evaluation.result?.value?.ok) return evaluation.result.value;
-    await delay(500);
-  }
-  throw new Error('Content script was not ready in the active hh.ru tab.');
-}
-
 async function createExtensionPageSession(session, extensionTargetUrl) {
   const extensionId = extensionTargetUrl.match(/^chrome-extension:\/\/([^/]+)/)?.[1] || '';
   if (!extensionId) {
@@ -276,11 +253,10 @@ async function createExtensionPageSession(session, extensionTargetUrl) {
 
 async function readEvidence(session, sessionId) {
   const expression = `new Promise((resolve) => {
-    chrome.storage.local.get(['runState', 'runResults', 'chatReports', 'resumeUrl'], (value) => {
+    chrome.storage.local.get(['runState', 'runResults', 'resumeUrl'], (value) => {
       resolve({
         runState: value.runState || null,
         runResults: Array.isArray(value.runResults) ? value.runResults.slice(-20) : [],
-        chatReports: Array.isArray(value.chatReports) ? value.chatReports.slice(-20) : [],
         resumeUrlPresent: Boolean(value.resumeUrl)
       });
     });
@@ -290,14 +266,6 @@ async function readEvidence(session, sessionId) {
   return {
     runState: value.runState || null,
     runResults: value.runResults || [],
-    chatReports: (value.chatReports || []).map((item) => ({
-      chatUrl: item.chatUrl || '',
-      status: item.status || '',
-      reason: item.reason || '',
-      sent: Boolean(item.sent),
-      hasDraftAnswer: Boolean(item.draftAnswer),
-      error: item.error || ''
-    })),
     resumeUrlPresent: Boolean(value.resumeUrlPresent)
   };
 }
@@ -322,8 +290,8 @@ async function closeBrowser(child) {
   await waitForExit(child);
 }
 
-if (!['REFRESH_RESUMES_NOW', 'START_CHAT_ASSIST', 'TEST_GROQ'].includes(action)) {
-  fail('Set HHJA_ACTION to REFRESH_RESUMES_NOW, START_CHAT_ASSIST, or TEST_GROQ.');
+if (!['REFRESH_RESUMES_NOW', 'TEST_GROQ'].includes(action)) {
+  fail('Set HHJA_ACTION to REFRESH_RESUMES_NOW or TEST_GROQ.');
 }
 
 let browser = null;
@@ -348,10 +316,6 @@ try {
   const extensionTarget = await waitForExtensionTarget(session);
   const extensionPage = await createExtensionPageSession(session, extensionTarget.url);
   await session.send('Target.activateTarget', { targetId: pageTarget.targetId }).catch(() => {});
-  if (action === 'START_CHAT_ASSIST') {
-    await waitForActiveContentScript(session, extensionPage.sessionId);
-  }
-
   let resumeUrl = '';
   if (action === 'REFRESH_RESUMES_NOW') {
     resumeUrl = await maybeSetResumeUrl(session, extensionTarget.sessionId, pageSessionId);

@@ -13,14 +13,11 @@ const nodes = {
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
   recentResults: document.getElementById('recentResults'),
-  chatReportsSection: document.getElementById('chatReportsSection'),
-  chatReports: document.getElementById('chatReports'),
   version: document.getElementById('version'),
   autoApply: document.getElementById('autoApply'),
   continueApply: document.getElementById('continueApply'),
   stop: document.getElementById('stop'),
-  refreshResumes: document.getElementById('refreshResumes'),
-  chatAssist: document.getElementById('chatAssist')
+  refreshResumes: document.getElementById('refreshResumes')
 };
 
 nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
@@ -28,7 +25,6 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
 let hasGroqKey = false;
-let experimentalFeaturesEnabled = false;
 let copyToastTimeout = null;
 
 async function copyText(text) {
@@ -71,8 +67,7 @@ function renderView() {
   const view = derivePopupView({
     runState: lastRunState,
     tabState: lastTabState,
-    hasGroqKey,
-    experimentalFeaturesEnabled
+    hasGroqKey
   });
 
   nodes.appStatus.className = `panel status-panel ${view.status.tone}`;
@@ -90,9 +85,6 @@ function renderView() {
   nodes.continueApply.disabled = view.buttons.continueDisabled;
   nodes.stop.disabled = view.buttons.stopDisabled;
   nodes.refreshResumes.disabled = view.buttons.refreshResumesDisabled;
-  nodes.chatAssist.hidden = !view.buttons.chatAssistVisible;
-  nodes.chatAssist.disabled = view.buttons.chatAssistDisabled;
-  nodes.chatReportsSection.hidden = !view.buttons.chatAssistVisible;
   nodes.autoApply.title = view.buttons.autoApplyTitle;
   nodes.continueApply.title = view.buttons.continueTitle;
   nodes.stop.title = view.buttons.stopTitle;
@@ -157,56 +149,6 @@ function renderResults(runResults = []) {
       } else {
         node.append(text);
       }
-      return node;
-    })
-  );
-}
-
-function reportMessage(item) {
-  if (item.status === 'reported_external_contact') {
-    return `Внешний контакт: ${item.employerName || item.vacancyTitle || 'чат'}`;
-  }
-  if (item.status === 'sent') {
-    return `Отправлено: ${item.employerName || item.vacancyTitle || 'чат'}`;
-  }
-  if (item.status === 'drafted') {
-    return `Черновик: ${item.employerName || item.vacancyTitle || 'чат'}`;
-  }
-  if (item.status === 'error') {
-    return `Ошибка: ${item.employerName || item.vacancyTitle || 'чат'} — ${localizeError(item.error, 'неизвестная ошибка')}`;
-  }
-  return `${item.status || 'Отчет'}: ${item.employerName || item.vacancyTitle || 'чат'}`;
-}
-
-function renderChatReports(chatReports = []) {
-  const items = chatReports.slice(-5).reverse();
-  if (items.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'report';
-    empty.textContent = 'Отчетов по чатам пока нет.';
-    nodes.chatReports.replaceChildren(empty);
-    return;
-  }
-
-  nodes.chatReports.replaceChildren(
-    ...items.map((item) => {
-      const node = document.createElement('div');
-      node.className = 'report';
-
-      const title = document.createElement('div');
-      title.textContent = reportMessage(item);
-
-      const link = document.createElement('a');
-      link.href = item.chatUrl || 'https://hh.ru/chat';
-      link.target = '_blank';
-      link.rel = 'noreferrer';
-      link.textContent = item.chatUrl || 'https://hh.ru/chat';
-
-      const detail = document.createElement('div');
-      detail.textContent = item.contactText || item.reason || item.vacancyTitle || '';
-
-      node.append(title, link);
-      if (detail.textContent) node.append(detail);
       return node;
     })
   );
@@ -287,19 +229,11 @@ async function readRuntimeState() {
 
 async function refreshPopup() {
   const [settings, runtimeError] = await Promise.all([
-    chrome.storage.local.get(['groqApiKey', 'experimentalFeaturesEnabled']),
+    chrome.storage.local.get(['groqApiKey']),
     readRuntimeState()
   ]);
   hasGroqKey = Boolean(settings.groqApiKey);
-  experimentalFeaturesEnabled = settings.experimentalFeaturesEnabled === true;
   lastTabState = runtimeError || await readTabState();
-
-  if (experimentalFeaturesEnabled) {
-    const reportsResponse = await chrome.runtime.sendMessage({ type: 'GET_CHAT_REPORTS' });
-    if (reportsResponse?.ok) {
-      renderChatReports(reportsResponse.chatReports || []);
-    }
-  }
 
   renderView();
 }
@@ -331,14 +265,34 @@ async function runContentAction(type, label) {
   await refreshPopup();
 }
 
+async function stopRunNow() {
+  lastRunState = {
+    ...lastRunState,
+    state: 'stopped',
+    currentAction: 'Остановлено'
+  };
+  renderView();
+  const response = await chrome.runtime.sendMessage({ type: 'STOP_RUN' });
+  if (response?.ok === false) {
+    throw new Error(localizeError(response.error, 'Остановка не выполнена'));
+  }
+  try {
+    const tabResponse = await sendToActiveTab('STOP_RUN');
+    if (tabResponse?.ok === false) {
+      throw new Error(localizeError(tabResponse.error, 'Остановка не выполнена'));
+    }
+  } catch {
+    // Durable stop flag in storage is enough for the running HH tab to stop on its next poll.
+  }
+  await refreshPopup();
+}
+
 async function runRuntimeAction(type, label, activeState) {
   lastRunState = { ...lastRunState, state: activeState, currentAction: label };
   renderView();
   const response = await chrome.runtime.sendMessage({ type });
   if (!response?.ok) {
     lastRunState = { state: 'error', lastError: localizeError(response?.error, 'Действие не выполнено') };
-  } else if (response.navigated) {
-    lastRunState = { state: 'idle', currentAction: 'Открыл чат. Запустите еще раз после загрузки.' };
   }
   await refreshPopup();
 }
@@ -358,7 +312,7 @@ nodes.continueApply.addEventListener('click', () => {
 });
 
 nodes.stop.addEventListener('click', () => {
-  runContentAction('STOP_RUN', 'Останавливаю...').catch((error) => {
+  stopRunNow().catch((error) => {
     lastRunState = { state: 'error', lastError: localizeError(error) };
     renderView();
   });
@@ -366,13 +320,6 @@ nodes.stop.addEventListener('click', () => {
 
 nodes.refreshResumes.addEventListener('click', () => {
   runRuntimeAction('REFRESH_RESUMES_NOW', 'Поднимаем резюме...', 'refreshing_resumes').catch((error) => {
-    lastRunState = { state: 'error', lastError: localizeError(error) };
-    renderView();
-  });
-});
-
-nodes.chatAssist.addEventListener('click', () => {
-  runRuntimeAction('START_CHAT_ASSIST', 'Обрабатываем чаты...', 'processing_chat').catch((error) => {
     lastRunState = { state: 'error', lastError: localizeError(error) };
     renderView();
   });
@@ -387,16 +334,6 @@ nodes.recentResults.addEventListener('click', (event) => {
     lastRunState = { state: 'error', lastError: localizeError(error, 'Не удалось скопировать ошибку') };
     renderView();
   });
-});
-
-document.getElementById('clearReports').addEventListener('click', async () => {
-  try {
-    await chrome.runtime.sendMessage({ type: 'CLEAR_CHAT_REPORTS' });
-    await refreshPopup();
-  } catch (error) {
-    lastRunState = { state: 'error', lastError: localizeError(error) };
-    renderView();
-  }
 });
 
 document.getElementById('openOptions').addEventListener('click', () => {

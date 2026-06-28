@@ -21,14 +21,17 @@
 - Do not treat raw checkbox/radio fallback values such as `on`, `true`, `short`, or the question label itself as HH answer options. Cover-letter model output must be final compact Russian text only; reject prompt/context/list leakage and fall back before filling.
 - `push to master` means push directly to the repository primary branch, whether named `master` or `main`.
 - For GitHub operations in this repository, use account `ltdigor-review`.
+- For token-efficient work, follow the ObsidianVault KB article `KnowledgeBase/Articles/Codex Token Budget Workflow.md`. Prefer `npm run context:budget`, `npm run diff:summary`, and `npm run test:summary` before broad diffs, full logs, or repeated repo-wide searches.
 
 ## Multi-Agent Work Loop
 
-- For non-trivial implementation work, operate in a three-agent loop:
+- For UI/browser-flow changes and risky implementation work, operate in a three-agent loop:
   1. Planner agent: inspects repo context, creates the implementation plan, prepares a concrete test checklist with expected results, and does not edit files.
   2. Approver/implementer agent: reviews the plan, asks clarifying questions when requirements are unclear or risky, then implements only the approved scope.
   3. Browser UI tester agent: verifies user-visible behavior in a browser UI after implementation using the prepared checklist, records pass/fail evidence for each checklist item, and sends fixes back through the loop when needed.
+- During development planning, decompose work into small ordered steps with clear ownership, dependencies, expected evidence, and stop conditions before editing code.
 - Use this loop especially for frontend changes, browser extension behavior, user flows, and anything requiring UI confirmation.
+- For small docs, script, test, or localized non-UI fixes, a single-agent path is allowed when the scope is clear and validation is narrow.
 - The browser UI tester must use browser-based verification when a local app, extension page, or UI flow is available. Prefer automated checks first, then targeted manual browser inspection for layout, console errors, and interaction behavior.
 - The browser UI tester must not invent a new test scope unless the checklist is clearly incomplete; if so, note the added check and why it was needed.
 - Keep each role's output terse and actionable: plan, decision, change, evidence, blocker.

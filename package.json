@@ -1,10 +1,11 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.156",
+  "version": "0.1.163",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
+    "test:summary": "bash scripts/test-summary.sh",
     "build": "npm test",
     "test:extension": "node scripts/chromium-extension-smoke.mjs",
     "test:hh:chromium": "node scripts/chromium-hh-live-smoke.mjs",
@@ -14,6 +15,8 @@
     "run:hh:chromium": "node scripts/chromium-run-action.mjs",
     "start:hh:chromium": "node scripts/chromium-start-auto-apply.mjs",
     "inspect:logs": "node scripts/inspect-extension-log.mjs",
+    "diff:summary": "bash scripts/diff-summary.sh",
+    "context:budget": "bash scripts/context-budget.sh",
     "test:all": "npm test && npm run test:extension && npm run test:hh"
   }
 }

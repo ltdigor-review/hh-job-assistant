@@ -15,19 +15,13 @@ const fields = {
   resumeUrl: document.getElementById('resumeUrl'),
   resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   expectedSalary: document.getElementById('expectedSalary'),
+  employmentPreference: document.getElementById('employmentPreference'),
+  workFormatPreference: document.getElementById('workFormatPreference'),
   coverPrompt: document.getElementById('coverPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
-  agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled'),
-  experimentalFeaturesEnabled: document.getElementById('experimentalFeaturesEnabled'),
-  chatUnreadOnly: document.getElementById('chatUnreadOnly'),
-  chatReplyMode: document.getElementById('chatReplyMode'),
-  chatLimit: document.getElementById('chatLimit')
-};
-
-const sections = {
-  chatAssistantSettings: document.getElementById('chatAssistantSettings')
+  agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled')
 };
 
 const statusNode = document.getElementById('status');
@@ -43,10 +37,6 @@ function setStatus(text, isError = false) {
   statusNode.style.color = isError ? '#b91c1c' : '#475569';
 }
 
-function syncExperimentalSections() {
-  sections.chatAssistantSettings.hidden = !fields.experimentalFeaturesEnabled.checked;
-}
-
 async function loadOptions() {
   const values = await chrome.storage.local.get(Object.keys({ ...DEFAULTS, groqApiKey: '' }));
 
@@ -58,6 +48,12 @@ async function loadOptions() {
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
+  fields.employmentPreference.value = ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(values.employmentPreference)
+    ? values.employmentPreference
+    : DEFAULTS.employmentPreference;
+  fields.workFormatPreference.value = ['', 'remote', 'hybrid', 'office', 'any'].includes(values.workFormatPreference)
+    ? values.workFormatPreference
+    : DEFAULTS.workFormatPreference;
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
     ? DEFAULTS.coverPrompt
     : values.coverPrompt || DEFAULTS.coverPrompt;
@@ -65,11 +61,6 @@ async function loadOptions() {
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
   fields.agentDebugLogsEnabled.checked = values.agentDebugLogsEnabled === true;
-  fields.experimentalFeaturesEnabled.checked = values.experimentalFeaturesEnabled === true;
-  syncExperimentalSections();
-  fields.chatUnreadOnly.checked = values.chatUnreadOnly !== false;
-  fields.chatReplyMode.value = values.chatReplyMode === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode;
-  fields.chatLimit.value = values.chatLimit ?? DEFAULTS.chatLimit;
 }
 
 async function saveOptions() {
@@ -94,15 +85,17 @@ async function saveOptions() {
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
+    employmentPreference: ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(fields.employmentPreference.value)
+      ? fields.employmentPreference.value
+      : DEFAULTS.employmentPreference,
+    workFormatPreference: ['', 'remote', 'hybrid', 'office', 'any'].includes(fields.workFormatPreference.value)
+      ? fields.workFormatPreference.value
+      : DEFAULTS.workFormatPreference,
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
-    agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked,
-    experimentalFeaturesEnabled: fields.experimentalFeaturesEnabled.checked,
-    chatUnreadOnly: fields.chatUnreadOnly.checked,
-    chatReplyMode: fields.chatReplyMode.value === 'auto_send' ? 'auto_send' : DEFAULTS.chatReplyMode,
-    chatLimit: Math.max(1, Math.min(Number(fields.chatLimit.value) || DEFAULTS.chatLimit, 100))
+    agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked
   };
 
   if (patch.delayMaxMs < patch.delayMinMs) {
@@ -150,8 +143,6 @@ fields.groqApiKey.addEventListener('focus', () => {
 fields.groqApiKey.addEventListener('input', () => {
   groqKeyDirty = true;
 });
-
-fields.experimentalFeaturesEnabled.addEventListener('change', syncExperimentalSections);
 
 document.getElementById('save').addEventListener('click', () => {
   saveOptions().catch((error) => setStatus(localizeError(error), true));

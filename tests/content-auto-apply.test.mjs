@@ -1510,14 +1510,14 @@ test('auto apply fills messenger question when answer contains contact handle', 
     questionFieldLabel: 'Укажите, пожалуйста, ник для связи в телеграмме. Или в ином мессенджере.',
     groqResponse: {
       ok: true,
-      text: 'Text question 1: t.me/vadim_software_engineer'
+      text: 'Text question 1: t.me/example_candidate'
     }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 't.me/vadim_software_engineer');
+  assert.equal(result.textareaValue, 't.me/example_candidate');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
@@ -1575,7 +1575,7 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
     questionFieldCount: 2,
     expectedSalary: '600000',
     initialLocalStore: {
-      resumeParsedText: 'Tech Lead\nКонтакт: t.me/vadim_software_engineer'
+      resumeParsedText: 'Tech Lead\nКонтакт: t.me/example_candidate'
     },
     groqResponse: {
       ok: true,
@@ -1589,7 +1589,7 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.submitClicks, 1);
-  assert.deepEqual(result.textareaValues, ['600000', 't.me/vadim_software_engineer']);
+  assert.deepEqual(result.textareaValues, ['600000', 't.me/example_candidate']);
   assert.equal(result.groqRequests.length, 0);
 });
 
@@ -1736,6 +1736,7 @@ test('auto apply retries Groq when choice answer does not match options', async 
       { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
       { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
     ],
+    initialLocalStore: { workFormatPreference: 'hybrid' },
     groqResponse: [
       { ok: true, text: 'Подходит гибридный формат работы.' },
       { ok: true, text: 'Choice group 1: Да' }
@@ -1814,6 +1815,7 @@ test('auto apply uses fallback choice when Groq returns no matching option label
       { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
       { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
     ],
+    initialLocalStore: { workFormatPreference: 'hybrid' },
     groqResponse: [
       { ok: true, text: 'Подходит гибридный формат работы.' },
       { ok: true, text: 'Можно рассмотреть разные варианты.' }
@@ -1856,6 +1858,90 @@ test('auto apply uses fallback choice when Groq choice retry is empty', async ()
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
+test('auto apply fallback obeys configured work-format preference', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакой формат работы вам подходит?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'work_format', label: 'Удаленка', value: 'remote' },
+      { type: 'radio', name: 'work_format', label: 'Гибрид', value: 'hybrid' },
+      { type: 'radio', name: 'work_format', label: 'Офис', value: 'office' }
+    ],
+    initialLocalStore: { workFormatPreference: 'remote' },
+    groqResponse: { ok: false, error: 'Groq request failed: 429 rate limit' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Удаленка']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+
+  const hybridResult = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакой формат работы вам подходит?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'work_format', label: 'Удаленка', value: 'remote' },
+      { type: 'radio', name: 'work_format', label: 'Гибрид', value: 'hybrid' },
+      { type: 'radio', name: 'work_format', label: 'Офис', value: 'office' }
+    ],
+    initialLocalStore: { workFormatPreference: 'hybrid' },
+    groqResponse: { ok: false, error: 'Groq request failed: 429 rate limit' }
+  });
+
+  assert.equal(hybridResult.response.ok, true);
+  assert.equal(hybridResult.response.applied, 1);
+  assert.equal(hybridResult.submitClicks, 1);
+  assert.deepEqual(hybridResult.checkedLabels, ['Гибрид']);
+  assert.equal(hybridResult.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply fallback obeys configured employment preference', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакой формат оформления вам подходит: ТК или ИП?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'employment', label: 'ТК', value: 'labor_contract' },
+      { type: 'radio', name: 'employment', label: 'ИП', value: 'individual_entrepreneur' }
+    ],
+    initialLocalStore: { employmentPreference: 'individual_entrepreneur' },
+    groqResponse: [
+      { ok: true, text: 'Можно рассмотреть разные варианты.' },
+      { ok: true, text: 'Можно рассмотреть разные варианты.' }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['ИП']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+
+  const laborContractResult = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакой формат оформления вам подходит: ТК или ИП?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'employment', label: 'ТК', value: 'labor_contract' },
+      { type: 'radio', name: 'employment', label: 'ИП', value: 'individual_entrepreneur' }
+    ],
+    initialLocalStore: { employmentPreference: 'labor_contract' },
+    groqResponse: [
+      { ok: true, text: 'Можно рассмотреть разные варианты.' },
+      { ok: true, text: 'Можно рассмотреть разные варианты.' }
+    ]
+  });
+
+  assert.equal(laborContractResult.response.ok, true);
+  assert.equal(laborContractResult.response.applied, 1);
+  assert.equal(laborContractResult.submitClicks, 1);
+  assert.deepEqual(laborContractResult.checkedLabels, ['ТК']);
+  assert.equal(laborContractResult.appended.at(-1).status, 'applied_test_assisted');
+});
+
 test('auto apply uses fallback choice answers after recoverable Groq error', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы ли вы работать в гибридном графике?',
@@ -1866,6 +1952,7 @@ test('auto apply uses fallback choice answers after recoverable Groq error', asy
       { type: 'radio', name: 'hybrid', label: 'Да', value: 'yes' },
       { type: 'radio', name: 'hybrid', label: 'Нет', value: 'no' }
     ],
+    initialLocalStore: { workFormatPreference: 'hybrid' },
     groqResponse: { ok: false, error: 'Groq request failed: 429 rate limit' }
   });
 
@@ -2134,6 +2221,57 @@ test('auto apply fills question and mandatory cover letter without Groq key', as
   assert.equal(result.submitClicks, 1);
   assert.equal(result.textareaValue, '250 000 руб. на руки');
   assert.match(result.coverTextareaValue, /Здравствуйте!/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+});
+
+test('auto apply does not paste question protocol into mandatory cover letter', async () => {
+  const protocolAnswer = [
+    'Choice group 1: Да',
+    'Choice group 2: Да',
+    'Choice group 3: B2',
+    'Choice group 4: Гибридный',
+    'Choice group 5: Сразу',
+    '',
+    'Text question 1: 350000',
+    'Text question 2: 5 лет в автоматизации тестирования Java, включая проекты в банковском секторе',
+    'Text question 3: Опыт работы с Docker-Compose, Kafka, Camunda, Selenium, Playwright, Gatling, WireMock, Allure, JUnit, PostgreSQL, MongoDB, ClickHouse, Elasticsearch, Grafana',
+    'Text question 4: Настроил локальное окружение с 30+ зависимостями, сократив время подготовки с 2ч до 25мин',
+    'Text question 5: Выстроил тестовую стратегию, позволившую команде проходить полный цикл проверок за 1день вместо 3дней',
+    'Text question 6: Спроектировал нагрузочный профиль до 12000 RPS и реализовал Gatling-тесты для критичных API'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Для отклика необходимо ответить на несколько вопросов работодателя',
+      'Сопроводительное письмо обязательное для этой вакансии',
+      'Откликнуться'
+    ].join('\n'),
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 6,
+    questionFieldLabel: 'Ответьте, пожалуйста, на вопросы ниже и скопируйте ответы в сопроводительное письмо',
+    hasCoverLetterField: true,
+    initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
+    questionControls: [
+      { type: 'radio', name: 'relocation', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'remote', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'english', label: 'B2', value: 'b2' },
+      { type: 'radio', name: 'schedule', label: 'Гибридный', value: 'hybrid' },
+      { type: 'radio', name: 'start', label: 'Сразу', value: 'now' }
+    ],
+    groqResponse: { ok: true, text: protocolAnswer }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да', 'Да', 'B2', 'Гибридный', 'Сразу']);
+  assert.match(result.textareaValues.join('\n'), /350000/);
+  assert.match(result.coverTextareaValue, /^Здравствуйте! Заинтересовала ваша вакансия/);
+  assert.doesNotMatch(result.coverTextareaValue, /Choice group|Text question/i);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
@@ -3522,6 +3660,8 @@ test('stop run clears queues, reports stopped state, and appends debug log event
   assert.equal(response.ok, true);
   assert.equal(localStore.autoApplyQueue.active, false);
   assert.equal(localStore.autoApplySearchQueue.active, false);
+  assert.equal(localStore.autoApplyStopRequested, true);
+  assert.match(localStore.autoApplyStopRequestedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(states.at(-1).state, 'stopped');
   assert.equal(logs.at(-1).event, 'stop_run');
   assert.equal(logs.at(-1).details.url, 'https://hh.ru/search/vacancy?text=java');

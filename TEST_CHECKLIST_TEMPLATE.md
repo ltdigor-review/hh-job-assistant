@@ -66,10 +66,9 @@ Use this template together with:
 - [ ] Tester uses a Chrome profile already signed in to hh.ru.
 - [ ] Tester confirms whether live side effects are allowed before any live action:
   - submitting hh.ru applications;
-  - sending resume, vacancy, question, or chat text to Groq;
+  - sending resume, vacancy, or question text to Groq;
   - refreshing/saving a real hh.ru resume;
-  - drafting or auto-sending chat replies.
-- [ ] Tester has a valid Groq API key when checking AI cover letters, employer questions, and chat replies.
+- [ ] Tester has a valid Groq API key when checking AI cover letters and employer questions.
 - [ ] Tester has a valid hh.ru resume URL matching `https://hh.ru/resume/...`.
 - [ ] Tester records Chrome profile, extension version, hh.ru account, and test timestamp in evidence.
 
@@ -97,12 +96,11 @@ npm run test:hh:chromium
 - [ ] Popup current action text renders compactly without overflow.
 - [ ] Popup exposes copy buttons for status errors and error/warning result text.
 - [ ] Options page exposes current settings.
-- [ ] Groq prompts include resume, vacancy, question/chat context, expected salary, and configured model.
+- [ ] Groq prompts include resume, vacancy, question context, expected salary, employment preference, work format preference, and configured model.
 - [ ] Auto-apply DOM tests pass for dry run, live apply, questions, skip/error handling, pagination, queue resume, stop, and Groq fallback paths.
 - [ ] Auto-apply regression passes for employer-question submit that opens a vacancy detail page and must return to the original search page.
 - [ ] Auto-apply regression passes for HH `Сгенерировать резюме` response dialogs.
 - [ ] Auto-apply status is updated before configured delay, then updated again before the next action.
-- [ ] Chat assistant tests pass for unread-only, draft-only, auto-send, external-contact reports, generated text cleanup, and bad output skip.
 - [ ] Resume refresh tests pass for configured URL, edit/save/raise, captcha/login failures, and missing buttons.
 - [ ] Browser UI regression test passes for blocked hh response modal continuation.
 - [ ] Extension smoke loads the current extension version in Chromium.
@@ -160,7 +158,7 @@ Result:
 - [ ] Popup does not show `Расширение выполняет задачу`.
 - [ ] Popup does not contain a secondary current-action detail line.
 - [ ] Status and recent error/warning rows can be copied from popup using `Копировать`.
-- [ ] Click `Запуск откликов`, `Поднятие резюме`, `Обработка чатов`, or `Стоп` on non-hh tab.
+- [ ] Click `Запуск откликов`, `Поднятие резюме`, or `Стоп` on non-hh tab.
 
 Expected result:
 
@@ -236,9 +234,7 @@ Result:
 - [ ] Edit cover-letter prompt.
 - [ ] Set daily apply limit.
 - [ ] Set delay min and max.
-- [ ] Toggle `Обрабатывать только непрочитанные чаты`.
-- [ ] Switch chat reply mode between `Только черновик` and `Отправлять автоматически`.
-- [ ] Set chat limit.
+- [ ] Toggle `Диагностический режим`.
 - [ ] Save settings.
 - [ ] Reload options page.
 
@@ -246,7 +242,6 @@ Expected result:
 
 - [ ] Settings persist after reload.
 - [ ] Daily apply limit is clamped to `1..100`.
-- [ ] Chat limit is clamped to `1..100`.
 - [ ] Delay values are at least `500`.
 - [ ] If max delay is lower than min delay, max is saved as min.
 - [ ] Changing resume URL clears cached parsed resume text.
@@ -501,126 +496,17 @@ Result:
 - Evidence:
 - Notes:
 
-### 16. Chat Assistant Navigation
-
-Requires explicit permission if it reads chats or drafts replies.
-
-- [ ] Open popup from non-chat hh.ru page.
-- [ ] Click `Обработка чатов`.
-- [ ] Confirm extension opens or navigates to `https://hh.ru/chat`.
-- [ ] Click `Обработка чатов` again after chat page loads.
-
-Expected result:
-
-- [ ] First click navigates to chat and reports that chat was opened.
-- [ ] Second click starts chat processing.
-- [ ] Unsafe login/captcha state stops processing.
-
-Result:
-
-- Status:
-- Evidence:
-- Notes:
-
-### 17. Chat Assistant Filtering
-
-Requires explicit permission to read chats.
-
-- [ ] Enable `Process unread chats only`.
-- [ ] Run chat assistant with unread and read chats visible.
-- [ ] Disable `Process unread chats only`.
-- [ ] Set chat limit.
-- [ ] Run again.
-
-Expected result:
-
-- [ ] Unread-only mode skips read chats.
-- [ ] Disabled unread-only mode can process visible chats up to limit.
-- [ ] Found/processed counters reflect selected chats.
-
-Result:
-
-- Status:
-- Evidence:
-- Notes:
-
-### 18. Chat Draft Mode
-
-Requires explicit permission to send chat/resume/vacancy text to Groq.
-
-- [ ] Set chat reply mode to `Draft only`.
-- [ ] Run on a chat with an employer question.
-- [ ] Inspect message input.
-
-Expected result:
-
-- [ ] Generated reply is inserted as a draft.
-- [ ] Reply is not sent.
-- [ ] Chat report status is `drafted`.
-- [ ] Generated markdown or model artifacts are stripped or rejected.
-
-Result:
-
-- Status:
-- Evidence:
-- Notes:
-
-### 19. Chat Auto-Send Mode
-
-Requires explicit permission because it can send real chat messages.
-
-- [ ] Set chat reply mode to `Auto-send`.
-- [ ] Run on a safe test chat.
-- [ ] Observe send behavior and report.
-
-Expected result:
-
-- [ ] Generated reply is inserted.
-- [ ] Send button is clicked only after valid generated text.
-- [ ] Chat report status is `sent`.
-- [ ] Missing send button produces an error.
-
-Result:
-
-- Status:
-- Evidence:
-- Notes:
-
-### 20. External Contact Chat Reports
-
-- [ ] Use chat text that asks for phone call, Telegram, WhatsApp, email, or external link.
-- [ ] Run chat assistant.
-- [ ] Open popup report section.
-
-Expected result:
-
-- [ ] Extension does not draft or send a reply.
-- [ ] Report status is `reported_external_contact`.
-- [ ] Report includes chat URL and contact text.
-- [ ] Contact type is classified as phone, telegram, whatsapp, email, or external link.
-
-Result:
-
-- Status:
-- Evidence:
-- Notes:
-
-### 21. Reports And Local Logs
+### 16. Reports And Local Logs
 
 - [ ] Generate at least one apply result.
-- [ ] Generate at least one chat report.
 - [ ] Open popup.
 - [ ] Inspect recent results.
-- [ ] Inspect chat reports.
 - [ ] Inspect local extension logs via `npm run inspect:logs` or profile storage.
-- [ ] Click `Очистить` for chat reports.
 
 Expected result:
 
 - [ ] Recent results show applied/skipped/error messages.
-- [ ] Chat report section shows latest reports with direct chat links.
 - [ ] Local logs include `agentDebugLogFile`, `agentDebugLogText`, `runState`, and recent events.
-- [ ] Chat report clear button clears only chat reports.
 - [ ] Popup refreshes without reload.
 
 Result:
@@ -661,18 +547,14 @@ Result:
 | Install/load extension | Chrome Load unpacked | Manifest, permissions, popup/options/content scripts | `extension-build.test.mjs` |
 | Popup health | Open popup on hh.ru and non-hh page | Extension ready, tab status, version | `extension-build.test.mjs` |
 | Popup current action/copy | Open popup during active run or error | Compact current action, no secondary detail text, copyable status/errors | `extension-build.test.mjs` |
-| Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, chat settings | `extension-build.test.mjs` |
+| Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, diagnostic mode | `extension-build.test.mjs` |
 | Auto-apply | `Запуск откликов` | Limit, delays, submit confirmation, status-before-delay, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
 | Employer questions | Auto-apply on test forms | Text/radio/checkbox, salary fallback, bad output skip, return to search after HH opens vacancy detail | `content-auto-apply.test.mjs` |
 | HH generated resume response | Auto-apply on HH response modal | `Сгенерировать резюме` button is clicked and confirmed | `content-auto-apply.test.mjs` |
 | Stop | `Стоп` | Queue cleared, stopped state, local log event | `content-auto-apply.test.mjs` |
 | Keyboard command | `Alt+Shift+A` | Valid URL guard, start auto-apply | `extension-build.test.mjs` |
 | Resume refresh | `Обновить резюме` | Configured URL, edit/save/raise, error states | `resume-refresh.test.mjs` |
-| Chat navigation | `Обработка чатов` | Open `/chat`, rerun after load | `content-chat-assist.test.mjs` |
-| Chat draft | Draft mode | Fill input, do not send, report | `content-chat-assist.test.mjs` |
-| Chat auto-send | Auto-send mode | Click send only after valid draft | `content-chat-assist.test.mjs` |
-| External contact reports | Chat asks for phone/messenger/email/link | Report and skip reply | `content-chat-assist.test.mjs` |
-| Reports/logs | Popup plus local storage | Recent results, chat reports, local debug artifact | `extension-build.test.mjs` |
+| Reports/logs | Popup plus local storage | Recent results, local debug artifact | `extension-build.test.mjs` |
 | Safety errors | Login/captcha/Groq/selector failures | Stop/skip/error with evidence | `content-auto-apply.test.mjs`, `resume-refresh.test.mjs` |
 
 ## Test Case Result Template

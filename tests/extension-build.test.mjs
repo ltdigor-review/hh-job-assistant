@@ -222,6 +222,10 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   assert.match(defaultsSource, /dailyLimit:\s*100/);
   assert.match(defaultsSource, /delayMinMs:\s*4000/);
   assert.match(defaultsSource, /delayMaxMs:\s*8000/);
+  assert.match(defaultsSource, /employmentPreference:\s*''/);
+  assert.match(defaultsSource, /workFormatPreference:\s*''/);
+  assert.match(defaultsSource, /agentDebugLogsEnabled:\s*false/);
+  assert.doesNotMatch(defaultsSource, /experimentalFeaturesEnabled|chatUnreadOnly|chatReplyMode|chatLimit|chatReports/);
   assert.match(defaultsSource, /globalThis\.HHJA_DEFAULTS/);
 
   assert.match(backgroundSource, /import '\.\/defaults\.js'/);
@@ -296,10 +300,10 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.delayMaxMs, 8000);
   assert.match(localData.coverPrompt, /до 450 символов/);
   assert.match(localData.coverPrompt, /Не пересказывай резюме или вакансию/);
-  assert.equal(localData.chatUnreadOnly, true);
-  assert.equal(localData.chatReplyMode, 'draft');
-  assert.equal(localData.chatLimit, 10);
-  assert.deepEqual(localData.chatReports, []);
+  assert.equal(localData.employmentPreference, '');
+  assert.equal(localData.workFormatPreference, '');
+  assert.equal(localData.autoApplyStopRequested, false);
+  assert.equal(localData.autoApplyStopRequestedAt, '');
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
@@ -459,6 +463,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     groqModel: 'test-model',
     resumeText: 'Java developer, Spring Boot',
     expectedSalary: '250 000 руб. на руки',
+    employmentPreference: '',
+    workFormatPreference: '',
     coverPrompt: 'cover prompt',
     agentDebugLog: [],
     agentDebugLogsEnabled: true
@@ -534,6 +540,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer, Spring Boot/);
   assert.match(userContent, /250 000 руб\. на руки/);
+  assert.match(userContent, /Оформление: предпочтение не выбрано/);
+  assert.match(userContent, /Формат работы: предпочтение не выбрано/);
   assert.match(userContent, /Вакансия: Java developer/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
@@ -558,6 +566,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
   assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Java developer, Spring Boot/);
   assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /250 000 руб\. на руки/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Оформление: предпочтение не выбрано/);
+  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Формат работы: предпочтение не выбрано/);
   assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Вакансия: Java developer/);
   assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
@@ -574,159 +584,6 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     totalTokens: 1297
   });
   assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|rawResponse|responsePreview/);
-});
-
-test('chat reply prompt includes resume, vacancy, chat question, and expected salary', async () => {
-  let listener = null;
-  let requestBody = null;
-
-  globalThis.fetch = async (url, options) => {
-    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
-    requestBody = JSON.parse(options.body);
-    return {
-      ok: true,
-      async json() {
-        return { choices: [{ message: { content: 'Здравствуйте, готов обсудить.' } }] };
-      }
-    };
-  };
-
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          const data = {
-            groqApiKey: 'gsk_test',
-            groqModel: 'test-model',
-            resumeText: 'Java developer, Spring Boot',
-            expectedSalary: '250 000 руб. на руки',
-            coverPrompt: 'cover prompt'
-          };
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, data[key]]));
-          }
-          return {};
-        },
-        async set() {}
-      }
-    },
-    runtime: {
-      getURL(path) {
-        return `chrome-extension://test/${path}`;
-      },
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        }
-      }
-    },
-    tabs: {
-      async get() {
-        return { status: 'complete' };
-      }
-    },
-    scripting: {}
-  };
-
-  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-
-  const response = await new Promise((resolve) => {
-    const stayedAsync = listener(
-      {
-        type: 'GENERATE_CHAT_REPLY',
-        vacancyText: 'Вакансия: Java developer',
-        chatText: 'Работодатель: какие ожидания по зарплате?'
-      },
-      {},
-      resolve
-    );
-    assert.equal(stayedAsync, true);
-  });
-
-  assert.equal(response.ok, true);
-  assert.equal(requestBody.model, 'test-model');
-  assert.equal(requestBody.max_tokens, 500);
-  const userContent = requestBody.messages.find((message) => message.role === 'user').content;
-  assert.match(userContent, /Java developer, Spring Boot/);
-  assert.match(userContent, /250 000 руб\. на руки/);
-  assert.match(userContent, /Вакансия: Java developer/);
-  assert.match(userContent, /какие ожидания по зарплате/);
-});
-
-test('chat reply uses provided vacancy text without opening the vacancy page', async () => {
-  let listener = null;
-  let tabsCreateCalls = 0;
-
-  globalThis.fetch = async () => ({
-    ok: true,
-    async json() {
-      return { choices: [{ message: { content: 'Здравствуйте, готов обсудить.' } }] };
-    }
-  });
-
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          const data = {
-            groqApiKey: 'gsk_test',
-            groqModel: 'test-model',
-            resumeText: 'Java developer, Spring Boot',
-            expectedSalary: '',
-            coverPrompt: 'cover prompt'
-          };
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, data[key]]));
-          }
-          return {};
-        },
-        async set() {}
-      }
-    },
-    runtime: {
-      getURL(path) {
-        return `chrome-extension://test/${path}`;
-      },
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        }
-      }
-    },
-    tabs: {
-      async get() {
-        return { status: 'complete' };
-      },
-      async create() {
-        tabsCreateCalls += 1;
-        throw new Error('vacancy tab should not be opened');
-      }
-    },
-    scripting: {}
-  };
-
-  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-
-  const response = await new Promise((resolve) => {
-    const stayedAsync = listener(
-      {
-        type: 'GENERATE_CHAT_REPLY',
-        vacancyUrl: 'https://hh.ru/vacancy/123',
-        vacancyText: 'Вакансия из открытого чата: Java developer',
-        chatText: 'Работодатель: готовы обсудить оффер?'
-      },
-      {},
-      resolve
-    );
-    assert.equal(stayedAsync, true);
-  });
-
-  assert.equal(response.ok, true);
-  assert.equal(tabsCreateCalls, 0);
 });
 
 test('Groq empty 200 response is retried once before returning text', async () => {
@@ -878,214 +735,6 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.usage.completionTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.responseBody.choices[0].finish_reason, 'length');
-});
-
-test('background stores capped chat reports with direct chat links', async () => {
-  let listener = null;
-  const localData = {
-    chatReports: Array.from({ length: 205 }, (_, index) => ({
-      id: `old-${index}`,
-      chatUrl: `https://hh.ru/chat/${index}`,
-      status: 'drafted'
-    }))
-  };
-
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
-          }
-          return {};
-        },
-        async set(value) {
-          Object.assign(localData, value);
-        }
-      }
-    },
-    runtime: {
-      getURL(path) {
-        return `chrome-extension://test/${path}`;
-      },
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        }
-      }
-    },
-    tabs: {
-      async get() {
-        return { status: 'complete' };
-      }
-    },
-    scripting: {}
-  };
-
-  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-
-  const appendResponse = await new Promise((resolve) => {
-    const stayedAsync = listener(
-      {
-        type: 'APPEND_CHAT_REPORT',
-        item: {
-          chatUrl: 'https://hh.ru/chat/new',
-          employerName: 'ООО Test',
-          status: 'reported_external_contact',
-          contactType: 'telegram',
-          contactText: '@test'
-        }
-      },
-      {},
-      resolve
-    );
-    assert.equal(stayedAsync, true);
-  });
-
-  const getResponse = await new Promise((resolve) => {
-    listener({ type: 'GET_CHAT_REPORTS' }, {}, resolve);
-  });
-
-  assert.equal(appendResponse.ok, true);
-  assert.equal(getResponse.ok, true);
-  assert.equal(getResponse.chatReports.length, 200);
-  assert.equal(getResponse.chatReports.at(-1).chatUrl, 'https://hh.ru/chat/new');
-  assert.equal(getResponse.chatReports.at(-1).sent, false);
-});
-
-test('background clears chat reports', async () => {
-  let listener = null;
-  const localData = {
-    chatReports: [{ id: 'report-1', chatUrl: 'https://hh.ru/chat/1' }],
-    agentDebugLog: [{ event: 'run_result', details: { status: 'applied' } }]
-  };
-
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
-          }
-          return {};
-        },
-        async set(value) {
-          Object.assign(localData, value);
-        }
-      }
-    },
-    runtime: {
-      getURL(path) {
-        return `chrome-extension://test/${path}`;
-      },
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        }
-      }
-    },
-    tabs: {
-      async get() {
-        return { status: 'complete' };
-      }
-    },
-    scripting: {}
-  };
-
-  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-
-  const clearReportsResponse = await new Promise((resolve) => {
-    const stayedAsync = listener({ type: 'CLEAR_CHAT_REPORTS' }, {}, resolve);
-    assert.equal(stayedAsync, true);
-  });
-
-  assert.equal(clearReportsResponse.ok, true);
-  assert.deepEqual(localData.chatReports, []);
-});
-
-test('background waits for content script when starting chat from non-hh tab', async () => {
-  let listener = null;
-  const sentMessages = [];
-  let getContentStatusCalls = 0;
-  const localData = {};
-  globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ = true;
-
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
-          }
-          return {};
-        },
-        async set(value) {
-          Object.assign(localData, value);
-        }
-      }
-    },
-    runtime: {
-      getURL(path) {
-        return `chrome-extension://test/${path}`;
-      },
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: {
-        addListener(fn) {
-          listener = fn;
-        }
-      }
-    },
-    tabs: {
-      async query() {
-        return [{ id: 1, url: 'https://example.com/', status: 'complete' }];
-      },
-      async create({ url }) {
-        return { id: 22, url, status: 'complete' };
-      },
-      async get(id) {
-        return { id, url: 'https://hh.ru/chat', status: 'complete' };
-      },
-      async sendMessage(tabId, message) {
-        sentMessages.push({ tabId, message });
-        if (message.type === 'GET_CONTENT_STATUS') {
-          getContentStatusCalls += 1;
-          if (getContentStatusCalls === 1) {
-            throw new Error('Receiving end does not exist.');
-          }
-          return { ok: true, authenticated: true, unsafe: false };
-        }
-        return { ok: true, processed: 0 };
-      },
-      onUpdated: {
-        addListener() {},
-        removeListener() {}
-      }
-    },
-    scripting: {
-      async executeScript() {
-        return [{ result: 'complete' }];
-      }
-    }
-  };
-
-  try {
-    await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-
-    const response = await new Promise((resolve) => {
-      const stayedAsync = listener({ type: 'START_CHAT_ASSIST' }, {}, resolve);
-      assert.equal(stayedAsync, true);
-    });
-
-    assert.equal(response.ok, true);
-    assert.deepEqual(sentMessages.map((item) => item.message.type), ['GET_CONTENT_STATUS', 'GET_CONTENT_STATUS', 'START_CHAT_ASSIST']);
-  } finally {
-    delete globalThis.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__;
-  }
 });
 
 test('background reloads extension on explicit reload message', async () => {
@@ -1811,7 +1460,7 @@ test('repo script can configure the persistent Chromium extension storage', asyn
   assert.match(js, /HHJA_GROQ_API_KEY/);
   assert.match(js, /GROQ_API_KEY/);
   assert.match(js, /HHJA_RESUME_URL/);
-  assert.match(js, /HHJA_CHAT_UNREAD_ONLY/);
+  assert.doesNotMatch(js, /HHJA_CHAT_/);
   assert.match(js, /chrome\.storage\.local\.set\(patch/);
   assert.match(js, /configuredKeys/);
   assert.match(js, /storedEvidence/);
@@ -1826,17 +1475,16 @@ test('repo script can run popup-equivalent actions in the persistent Chromium pr
   assert.equal(packageJson.scripts['run:hh:chromium'], 'node scripts/chromium-run-action.mjs');
   assert.match(js, /HHJA_ACTION/);
   assert.match(js, /REFRESH_RESUMES_NOW/);
-  assert.match(js, /START_CHAT_ASSIST/);
+  assert.doesNotMatch(js, /START_CHAT_ASSIST/);
   assert.match(js, /TEST_GROQ/);
   assert.match(js, /discoverResumeUrl/);
   assert.match(js, /resume_hash/);
   assert.match(js, /\^\\\\\/resume\\\\\/\[\^\/\?#\]\+/);
   assert.match(js, /createExtensionPageSession/);
   assert.match(js, /src\/popup\.html/);
-  assert.match(js, /waitForActiveContentScript/);
-  assert.match(js, /GET_CONTENT_STATUS/);
+  assert.doesNotMatch(js, /waitForActiveContentScript/);
   assert.match(js, /chrome\.runtime\.sendMessage/);
-  assert.match(js, /chatReports/);
+  assert.doesNotMatch(js, /chatReports/);
   assert.match(js, /resumeUrlPresent/);
   assert.match(js, /process\.exit\(0\)/);
   assert.doesNotMatch(js, /chrome:\/\/extensions/);
@@ -1903,7 +1551,6 @@ test('README describes purpose, features, and installation without config detail
     'Автоматическая подготовка сопроводительных писем.',
     'Подготовка ответов на вопросы работодателей',
     'Поднятие резюме на hh.ru.',
-    'Обработка чатов с работодателями.',
     '## Как установить',
     'Загрузить распакованное расширение',
     'Войдите в hh.ru'
@@ -1955,7 +1602,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'chatAssist', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults', 'chatReportsSection', 'chatReports', 'clearReports']) {
+  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /\.copy-button/);
@@ -1969,15 +1616,13 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /showCopyToast\(button\)/);
   assert.match(js, /setTimeout\([^,]+,\s*1000\)/s);
   assert.match(js, /Скопировано/);
-  assert.match(js, /experimentalFeaturesEnabled/);
-  assert.match(js, /nodes\.chatAssist\.hidden = !view\.buttons\.chatAssistVisible/);
-  assert.match(js, /nodes\.chatReportsSection\.hidden = !view\.buttons\.chatAssistVisible/);
-  assert.match(js, /if \(experimentalFeaturesEnabled\) \{/);
   assert.match(js, /nodes\.autoApply\.textContent = view\.buttons\.autoApplyLabel/);
   assert.match(js, /nodes\.continueApply\.disabled = view\.buttons\.continueDisabled/);
+  assert.match(js, /async function stopRunNow\(\)/);
+  assert.match(js, /chrome\.runtime\.sendMessage\(\{ type: 'STOP_RUN' \}\)/);
   assert.doesNotMatch(html, /id="copyStatus"|Копировать статус/);
   assert.doesNotMatch(js, /copyStatus|lastStatusCopyText/);
-  for (const removedId of ['dryRun', 'groqApiKey', 'saveGroqKey', 'testGroq', 'extensionStatus', 'tabStatus', 'agentDebugLog', 'clearAgentDebugLog', 'currentActionDetail']) {
+  for (const removedId of ['dryRun', 'groqApiKey', 'saveGroqKey', 'testGroq', 'extensionStatus', 'tabStatus', 'agentDebugLog', 'clearAgentDebugLog', 'currentActionDetail', 'chatAssist', 'chatReportsSection', 'chatReports', 'clearReports']) {
     assert.doesNotMatch(html, new RegExp(`id="${removedId}"`));
   }
   assert.match(html, /\.action-title\s*\{[^}]*font-size:\s*13px/s);
@@ -2007,11 +1652,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /currentAction/);
   assert.match(js, /START_AUTO_APPLY/);
   assert.match(js, /CONTINUE_AUTO_APPLY/);
-  assert.match(js, /START_CHAT_ASSIST/);
-  assert.match(js, /GET_CHAT_REPORTS/);
   assert.match(js, /GET_CONTENT_STATUS/);
-  assert.match(js, /CLEAR_CHAT_REPORTS/);
-  assert.match(js, /chatReports/);
+  assert.doesNotMatch(js, /START_CHAT_ASSIST|GET_CHAT_REPORTS|CLEAR_CHAT_REPORTS|chatReports/);
   assert.match(js, /refreshPopup/);
   assert.match(js, /isAutoApplyStartUrl/);
   assert.match(js, /url\?\.protocol === 'https:'/);
@@ -2105,26 +1747,7 @@ test('popup view model reports exact readiness and blocker text', async () => {
   assert.equal(withoutGroq.status.title, 'ГОТОВО, без автоответов');
   assert.equal(withoutGroq.status.detail, 'Вакансии с письмами/вопросами будут пропущены');
   assert.equal(withoutGroq.buttons.autoApplyDisabled, false);
-  assert.equal(withoutGroq.buttons.chatAssistDisabled, true);
-  assert.equal(withoutGroq.buttons.chatAssistVisible, false);
-
-  const experimentalWithoutGroq = derivePopupView({
-    runState: { state: 'idle' },
-    tabState: { kind: 'ready', canStartAutoApply: true },
-    hasGroqKey: false,
-    experimentalFeaturesEnabled: true
-  });
-  assert.equal(experimentalWithoutGroq.buttons.chatAssistVisible, true);
-  assert.equal(experimentalWithoutGroq.buttons.chatAssistDisabled, true);
-
-  const experimentalReady = derivePopupView({
-    runState: { state: 'idle' },
-    tabState: { kind: 'ready', canStartAutoApply: true },
-    hasGroqKey: true,
-    experimentalFeaturesEnabled: true
-  });
-  assert.equal(experimentalReady.buttons.chatAssistVisible, true);
-  assert.equal(experimentalReady.buttons.chatAssistDisabled, false);
+  assert.equal(withoutGroq.buttons.refreshResumesDisabled, false);
 
   const wrongHhPage = derivePopupView({
     runState: { state: 'idle' },
@@ -2281,15 +1904,13 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeUrl: '',
     resumeCacheTtlHours: 1,
     expectedSalary: '',
+    employmentPreference: '',
+    workFormatPreference: '',
     coverPrompt: '',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
-    agentDebugLogsEnabled: false,
-    experimentalFeaturesEnabled: false,
-    chatUnreadOnly: true,
-    chatReplyMode: 'draft',
-    chatLimit: 10
+    agentDebugLogsEnabled: false
   };
 
   function makeElement(id) {
@@ -2313,7 +1934,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     };
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'experimentalFeaturesEnabled', 'chatUnreadOnly', 'chatReplyMode', 'chatLimit', 'status', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
 
   globalThis.HHJA_DEFAULTS = {
@@ -2324,18 +1945,17 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeParsedAt: '',
     resumeCacheTtlHours: 1,
     expectedSalary: '',
+    employmentPreference: '',
+    workFormatPreference: '',
     coverPrompt: 'default prompt',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
     agentDebugLogsEnabled: false,
-    experimentalFeaturesEnabled: false,
-    chatUnreadOnly: true,
-    chatReplyMode: 'draft',
-    chatLimit: 10,
     runState: {},
-    runResults: [],
-    chatReports: []
+    autoApplyStopRequested: false,
+    autoApplyStopRequestedAt: '',
+    runResults: []
   };
   globalThis.HHJA_LOCALIZE_ERROR = (error, fallback) => fallback || String(error);
   globalThis.document = {
@@ -2377,12 +1997,15 @@ test('options preserve masked Groq key unless user edits the key field', async (
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
-    assert.equal(storage.experimentalFeaturesEnabled, false);
+    assert.equal(storage.employmentPreference, '');
+    assert.equal(storage.workFormatPreference, '');
 
-    elements.experimentalFeaturesEnabled.checked = true;
+    elements.employmentPreference.value = 'labor_contract';
+    elements.workFormatPreference.value = 'hybrid';
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(storage.experimentalFeaturesEnabled, true);
+    assert.equal(storage.employmentPreference, 'labor_contract');
+    assert.equal(storage.workFormatPreference, 'hybrid');
 
     handlers.get('groqApiKey:focus')();
     elements.groqApiKey.value = 'gsk_new';
@@ -2411,42 +2034,41 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
 
   assert.match(html, /id="resumeUrl"/);
   assert.match(html, /id="resumeCacheTtlHours" type="number" min="0.1" step="0.5"/);
-  assert.match(html, /id="chatUnreadOnly"/);
-  assert.match(html, /id="chatReplyMode"/);
-  assert.match(html, /id="chatLimit"/);
-  assert.match(html, /id="experimentalFeaturesEnabled"/);
+  assert.match(html, /id="employmentPreference"/);
+  assert.match(html, /<option value="">Не выбрано<\/option>/);
+  assert.match(html, /value="individual_entrepreneur">ИП/);
+  assert.match(html, /value="labor_contract">ТК/);
+  assert.match(html, /id="workFormatPreference"/);
+  assert.match(html, /value="remote">Удаленка/);
+  assert.match(html, /value="hybrid">Гибрид/);
   assert.match(html, /id="agentDebugLogsEnabled"/);
-  assert.match(html, /Технические логи для разработчика/);
-  assert.match(html, /Экспериментальные функции/);
-  assert.match(html, /<section id="chatAssistantSettings" hidden>/);
+  assert.match(html, /Диагностический режим/);
+  assert.match(html, /\.switch-track/);
   assert.match(html, /id="delayMinMs" type="number" min="500" step="250"/);
   assert.match(html, /id="delayMaxMs" type="number" min="500" step="250"/);
   assert.match(js, /resumeUrl/);
   assert.match(js, /resumeCacheTtlHours/);
+  assert.match(js, /employmentPreference/);
+  assert.match(js, /workFormatPreference/);
   assert.match(js, /new URL\(normalizedResumeUrl\)/);
   assert.match(js, /setCustomValidity\('Укажите ссылку на резюме hh\.ru вида https:\/\/hh\.ru\/resume\/\.\.\.'\)/);
   assert.match(js, /savedGroqKeyMasked/);
   assert.match(js, /groqKeyDirty/);
   assert.match(js, /fields\.groqApiKey\.dataset\.masked !== 'true' && \(!savedGroqKeyMasked \|\| groqKeyDirty\)/);
   assert.match(js, /Math\.max\(0\.1/);
-  assert.match(js, /chatUnreadOnly/);
-  assert.match(js, /chatReplyMode/);
-  assert.match(js, /chatLimit/);
-  assert.match(js, /experimentalFeaturesEnabled/);
   assert.match(js, /agentDebugLogsEnabled/);
   assert.match(js, /fields\.agentDebugLogsEnabled\.checked = values\.agentDebugLogsEnabled === true/);
   assert.match(js, /agentDebugLogsEnabled: fields\.agentDebugLogsEnabled\.checked/);
   assert.match(js, /chrome\.storage\.local\.remove\(\['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText'\]\)/);
-  assert.match(js, /fields\.experimentalFeaturesEnabled\.checked = values\.experimentalFeaturesEnabled === true/);
-  assert.match(js, /experimentalFeaturesEnabled: fields\.experimentalFeaturesEnabled\.checked/);
-  assert.match(js, /chatAssistantSettings: document\.getElementById\('chatAssistantSettings'\)/);
-  assert.match(js, /sections\.chatAssistantSettings\.hidden = !fields\.experimentalFeaturesEnabled\.checked/);
-  assert.match(js, /fields\.experimentalFeaturesEnabled\.addEventListener\('change', syncExperimentalSections\)/);
   assert.match(js, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
   assert.match(js, /Math\.max\(500/);
-  assert.match(js, /auto_send/);
   assert.doesNotMatch(html, /id="resumeText"|Resume text|resumeRefreshEnabled|Enable daily resume refresh/);
   assert.doesNotMatch(js, /resumeText|resumeRefreshEnabled/);
+  assert.doesNotMatch(
+    html,
+    /id="chatUnreadOnly"|id="chatReplyMode"|id="chatLimit"|id="experimentalFeaturesEnabled"|Технические логи для разработчика|Экспериментальные функции|chatAssistantSettings/
+  );
+  assert.doesNotMatch(js, /chatUnreadOnly|chatReplyMode|chatLimit|experimentalFeaturesEnabled|chatAssistantSettings|syncExperimentalSections|auto_send/);
 });
 
 test('options expose Groq production text model choices', async () => {

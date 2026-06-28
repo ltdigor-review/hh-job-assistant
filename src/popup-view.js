@@ -13,11 +13,7 @@ export const STATE_LABELS = {
   stopped: 'Остановлено',
   complete: 'Готово',
   error: 'Ошибка',
-  refreshing_resumes: 'Поднимаем резюме',
-  scanning_chat: 'Проверка чатов',
-  processing_chat: 'Обработка чатов',
-  generating_chat_reply: 'Готовим ответ в чат',
-  sending_chat_reply: 'Отправляем ответ в чат'
+  refreshing_resumes: 'Поднимаем резюме'
 };
 
 export const ACTIVE_RUN_STATES = new Set([
@@ -27,11 +23,7 @@ export const ACTIVE_RUN_STATES = new Set([
   'generating_cover_letter',
   'filling_cover_letter',
   'submitting',
-  'refreshing_resumes',
-  'scanning_chat',
-  'processing_chat',
-  'generating_chat_reply',
-  'sending_chat_reply'
+  'refreshing_resumes'
 ]);
 
 const RESTART_LABEL_STATES = new Set(['paused', 'stopped', 'complete', 'error']);
@@ -143,8 +135,7 @@ function deriveContinueTitle({ activeRun, tabReady, canContinue }) {
 export function derivePopupView({
   runState = {},
   tabState = {},
-  hasGroqKey = false,
-  experimentalFeaturesEnabled = false
+  hasGroqKey = false
 } = {}) {
   const activeRun = isActiveRun(runState);
   const tabReady = tabState.kind === 'ready';
@@ -159,8 +150,6 @@ export function derivePopupView({
       continueDisabled: activeRun || !canContinue,
       stopDisabled: !activeRun,
       refreshResumesDisabled: activeRun || !tabReady,
-      chatAssistVisible: experimentalFeaturesEnabled === true,
-      chatAssistDisabled: activeRun || !tabReady || !hasGroqKey,
       autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
       continueTitle: deriveContinueTitle({ activeRun, tabReady, canContinue }),
       stopTitle: deriveStopTitle(activeRun)

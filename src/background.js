@@ -22,7 +22,6 @@ const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
 const GROQ_COVER_LETTER_MAX_TOKENS = 500;
 const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 800;
-const GROQ_CHAT_REPLY_MAX_TOKENS = 500;
 const GROQ_CHOICE_RETRY_MAX_TOKENS = 300;
 const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
@@ -257,60 +256,25 @@ async function appendRunResult(item) {
   await appendAgentLog('run_result', result);
 }
 
-async function appendChatReport(item) {
-  const { chatReports = [] } = await storageGet(['chatReports']);
-  const report = {
-    id: item.id || `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-    timestamp: item.timestamp || nowIso(),
-    chatUrl: item.chatUrl || '',
-    employerName: item.employerName || '',
-    vacancyTitle: item.vacancyTitle || '',
-    vacancyUrl: item.vacancyUrl || '',
-    status: item.status || 'reported',
-    reason: item.reason || '',
-    contactType: item.contactType || '',
-    contactText: item.contactText || '',
-    questionText: item.questionText || '',
-    draftAnswer: item.draftAnswer || '',
-    sent: Boolean(item.sent),
-    error: item.error || ''
-  };
-  await storageSet({
-    chatReports: [
-      ...chatReports.slice(-199),
-      report
-    ]
-  });
-  await appendAgentLog('chat_report', report);
+function formatPreferenceContext({ employmentPreference = DEFAULTS.employmentPreference, workFormatPreference = DEFAULTS.workFormatPreference } = {}) {
+  const employmentText = {
+    '': 'Оформление: предпочтение не выбрано.',
+    individual_entrepreneur: 'Оформление: предпочитает ИП, если вопрос про ТК/ИП или формат договора.',
+    labor_contract: 'Оформление: предпочитает ТК, если вопрос про ТК/ИП или формат договора.',
+    any: 'Оформление: готов рассмотреть ИП или ТК.'
+  }[employmentPreference] || 'Оформление: предпочтение не выбрано.';
+  const workFormatText = {
+    '': 'Формат работы: предпочтение не выбрано.',
+    remote: 'Формат работы: предпочитает удаленку; гибрид можно рассмотреть только если это помогает получить приглашение.',
+    hybrid: 'Формат работы: предпочитает гибрид.',
+    office: 'Формат работы: готов к офису.',
+    any: 'Формат работы: готов рассмотреть удаленку, гибрид или офис.'
+  }[workFormatPreference] || 'Формат работы: предпочтение не выбрано.';
+  return `${employmentText}\n${workFormatText}`;
 }
 
-function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vacancyText, extraText }) {
-  if (task === 'chat_reply') {
-    return [
-      {
-        role: 'system',
-        content:
-          'Answer hh.ru employer chat in concise Russian. Use only resume brief, vacancy, chat, salary. Do not invent facts. Return final reply only.'
-      },
-      {
-        role: 'user',
-        content: [
-          'Резюме кандидата:',
-          resumeText || '(резюме не указано)',
-          '',
-          'Ожидаемая зарплата кандидата:',
-          expectedSalary || '(зарплата не указана)',
-          '',
-          'Вакансия:',
-          vacancyText || '(текст вакансии не найден)',
-          '',
-          'Контекст чата и вопрос работодателя:',
-          extraText || '(текст чата не найден)'
-        ].join('\n')
-      }
-    ];
-  }
-
+function buildGroqMessages({ task, resumeText, expectedSalary, employmentPreference, workFormatPreference, coverPrompt, vacancyText, extraText }) {
+  const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
   if (task === 'choice_retry') {
     return [
       {
@@ -347,6 +311,9 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
           'Ожидаемая зарплата кандидата:',
           expectedSalary || '(зарплата не указана)',
           '',
+          'Предпочтения кандидата:',
+          preferenceContext,
+          '',
           'Текст вакансии или теста:',
           vacancyText || '(текст не найден)',
           '',
@@ -370,6 +337,9 @@ function buildGroqMessages({ task, resumeText, expectedSalary, coverPrompt, vaca
         '',
         'Резюме:',
         resumeText || '(резюме не указано)',
+        '',
+        'Предпочтения кандидата:',
+        preferenceContext,
         '',
         'Вакансия:',
         vacancyText || '(текст вакансии не найден)'
@@ -594,7 +564,6 @@ async function getResumeGroqContext(sourceText, maxChars = RESUME_GROQ_BRIEF_MAX
 function getMaxTokensForTask(task) {
   if (task === 'test_assist') return GROQ_TEST_ASSIST_MAX_TOKENS;
   if (task === 'choice_retry') return GROQ_CHOICE_RETRY_MAX_TOKENS;
-  if (task === 'chat_reply') return GROQ_CHAT_REPLY_MAX_TOKENS;
   return GROQ_COVER_LETTER_MAX_TOKENS;
 }
 
@@ -608,7 +577,6 @@ function getLengthRetryMaxTokensForTask(task, currentMaxTokens) {
 function getGroqTaskLabel(task) {
   if (task === 'test_assist') return 'ответы на вопросы работодателя';
   if (task === 'choice_retry') return 'уточнение вариантов HH';
-  if (task === 'chat_reply') return 'ответ в чат';
   return 'сопроводительное письмо';
 }
 
@@ -640,9 +608,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     groqApiKey,
     groqModel = DEFAULTS.groqModel,
     expectedSalary = '',
+    employmentPreference = DEFAULTS.employmentPreference,
+    workFormatPreference = DEFAULTS.workFormatPreference,
     coverPrompt = DEFAULTS.coverPrompt,
     groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'coverPrompt', 'groqCooldownUntil']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
@@ -666,6 +636,8 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   const payloadParts = {
     resumeText: resumeContext.text,
     expectedSalary: String(expectedSalary).slice(0, 1000),
+    employmentPreference,
+    workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
     extraText: compactExtraText(extraText)
@@ -821,15 +793,6 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     return content;
   }
   throw new Error('Groq вернул пустой ответ');
-}
-
-async function generateChatReply({ vacancyUrl = '', vacancyText = '', chatText = '' }) {
-  const parsedVacancyText = String(vacancyText || '').trim() || await getVacancyContextByUrl(vacancyUrl);
-  return callGroq({
-    task: 'chat_reply',
-    vacancyText: parsedVacancyText,
-    extraText: chatText
-  });
 }
 
 async function testGroq() {
@@ -1190,36 +1153,6 @@ async function runResumeRefresh() {
   }
 }
 
-async function runChatAssistFromActiveTab() {
-  await globalThis.HHJobAssistantLog?.reset?.('background', 'chat_assist_started', {
-    action: 'chat_assist'
-  });
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  let tab = activeTab;
-  let shouldWaitForContentScript = false;
-
-  if (!tab?.id || !isHhUrl(tab.url)) {
-    tab = await chrome.tabs.create({ url: 'https://hh.ru/chat', active: true });
-    shouldWaitForContentScript = true;
-  }
-
-  let tabId = tab.id;
-  const tabUrl = new URL(tab.url || 'https://hh.ru/chat');
-
-  if (tabUrl.pathname !== '/chat') {
-    const updatedTab = await chrome.tabs.update(tabId, { url: 'https://hh.ru/chat' });
-    tabId = updatedTab?.id || tabId;
-    shouldWaitForContentScript = true;
-  }
-
-  if (shouldWaitForContentScript) {
-    await waitForTabReady(tabId, 30000);
-    await waitForContentStatus(tabId, 10000);
-  }
-
-  return chrome.tabs.sendMessage(tabId, { type: 'START_CHAT_ASSIST' });
-}
-
 function isAutoApplyStartUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -1397,16 +1330,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, ...state });
         break;
       }
-      case 'GET_CHAT_REPORTS': {
-        const { chatReports = [] } = await storageGet(['chatReports']);
-        sendResponse({ ok: true, chatReports });
-        break;
-      }
-      case 'CLEAR_CHAT_REPORTS': {
-        await storageSet({ chatReports: [] });
-        sendResponse({ ok: true });
-        break;
-      }
       case 'RELOAD_EXTENSION': {
         await appendAgentLog('reload_extension', {
           reason: message.reason || 'manual',
@@ -1414,6 +1337,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         sendResponse({ ok: true, reloading: true });
         chrome.runtime.reload();
+        break;
+      }
+      case 'STOP_RUN': {
+        await storageSet({
+          autoApplyStopRequested: true,
+          autoApplyStopRequestedAt: nowIso()
+        });
+        await setRunState({ state: 'stopped', currentAction: 'Остановлено', lastError: '' });
+        sendResponse({ ok: true });
         break;
       }
       case 'SET_RUN_STATE': {
@@ -1437,25 +1369,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
-      case 'APPEND_CHAT_REPORT': {
-        await appendChatReport(message.item || {});
-        sendResponse({ ok: true });
-        break;
-      }
       case 'GENERATE_COVER_LETTER': {
         const text = await callGroq({
           task: message.task || 'cover_letter',
           vacancyText: message.vacancyText || '',
           extraText: message.extraText || ''
-        });
-        sendResponse({ ok: true, text });
-        break;
-      }
-      case 'GENERATE_CHAT_REPLY': {
-        const text = await generateChatReply({
-          vacancyUrl: message.vacancyUrl || '',
-          vacancyText: message.vacancyText || '',
-          chatText: message.chatText || ''
         });
         sendResponse({ ok: true, text });
         break;
@@ -1467,11 +1385,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'REFRESH_RESUMES_NOW': {
         const result = await runResumeRefresh();
-        sendResponse(result);
-        break;
-      }
-      case 'START_CHAT_ASSIST': {
-        const result = await runChatAssistFromActiveTab();
         sendResponse(result);
         break;
       }
