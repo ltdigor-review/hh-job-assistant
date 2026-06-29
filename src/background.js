@@ -27,6 +27,8 @@ const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_EMPTY_RESPONSE_RETRIES = 1;
 const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
+const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_contract']);
+const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 const RESPONSE_FORM_PROCESSING_STATES = new Set([
   'generating_cover_letter',
   'filling_cover_letter',
@@ -257,23 +259,44 @@ async function appendRunResult(item) {
 }
 
 function formatPreferenceContext({ employmentPreference = DEFAULTS.employmentPreference, workFormatPreference = DEFAULTS.workFormatPreference } = {}) {
-  const employmentText = {
-    '': 'Оформление: предпочтение не выбрано.',
-    individual_entrepreneur: 'Оформление: предпочитает ИП, если вопрос про ТК/ИП или формат договора.',
-    labor_contract: 'Оформление: предпочитает ТК, если вопрос про ТК/ИП или формат договора.',
-    any: 'Оформление: готов рассмотреть ИП или ТК.'
-  }[employmentPreference] || 'Оформление: предпочтение не выбрано.';
-  const workFormatText = {
-    '': 'Формат работы: предпочтение не выбрано.',
-    remote: 'Формат работы: предпочитает удаленку; гибрид можно рассмотреть только если это помогает получить приглашение.',
-    hybrid: 'Формат работы: предпочитает гибрид.',
-    office: 'Формат работы: готов к офису.',
-    any: 'Формат работы: готов рассмотреть удаленку, гибрид или офис.'
-  }[workFormatPreference] || 'Формат работы: предпочтение не выбрано.';
+  const employmentValues = normalizeMultiPreference(employmentPreference, EMPLOYMENT_PREFERENCE_VALUES);
+  const workFormatValues = normalizeMultiPreference(workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES);
+  const employmentLabels = {
+    individual_entrepreneur: 'ИП',
+    labor_contract: 'ТК'
+  };
+  const workFormatLabels = {
+    remote: 'удаленку',
+    hybrid: 'гибрид',
+    office: 'офис'
+  };
+  const employmentText = employmentValues.length === 0
+    ? 'Оформление: предпочтение не выбрано.'
+    : `Оформление: готов рассмотреть ${formatRussianList(employmentValues.map((value) => employmentLabels[value]))}.`;
+  const workFormatText = workFormatValues.length === 0
+    ? 'Формат работы: предпочтение не выбрано.'
+    : `Формат работы: готов рассмотреть ${formatRussianList(workFormatValues.map((value) => workFormatLabels[value]))}.`;
   return `${employmentText}\n${workFormatText}`;
 }
 
-function buildGroqMessages({ task, resumeText, expectedSalary, employmentPreference, workFormatPreference, coverPrompt, vacancyText, extraText }) {
+function normalizeMultiPreference(value, allowedValues) {
+  const values = Array.isArray(value)
+    ? value
+    : value === 'any'
+      ? [...allowedValues]
+      : value
+        ? [value]
+        : [];
+  return [...new Set(values.filter((item) => allowedValues.has(item)))];
+}
+
+function formatRussianList(values) {
+  const cleanValues = values.filter(Boolean);
+  if (cleanValues.length <= 1) return cleanValues[0] || '';
+  return `${cleanValues.slice(0, -1).join(', ')} или ${cleanValues.at(-1)}`;
+}
+
+function buildGroqMessages({ task, resumeText, expectedSalary, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, extraText }) {
   const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
   if (task === 'choice_retry') {
     return [
@@ -299,8 +322,11 @@ function buildGroqMessages({ task, resumeText, expectedSalary, employmentPrefere
     return [
       {
         role: 'system',
-        content:
-          'Answer hh.ru screening questions in Russian. Optimize each answer for getting an interview invitation: give what the employer wants to hear while staying consistent with resume and vacancy. Use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must be concise, natural, confident, and directly answer the question; avoid generic lists of learning methods/tools unless the question explicitly asks for them. Avoid first-person pronouns. Do not invent facts. Do not end text drafts with a period.'
+        content: [
+          employerQuestionPrompt || DEFAULTS.employerQuestionPrompt,
+          '',
+          'Output contract: use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question; avoid generic lists of learning methods/tools unless the question explicitly asks for them. Avoid first-person pronouns. Do not end text drafts with a period.'
+        ].join('\n')
       },
       {
         role: 'user',
@@ -611,8 +637,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     employmentPreference = DEFAULTS.employmentPreference,
     workFormatPreference = DEFAULTS.workFormatPreference,
     coverPrompt = DEFAULTS.coverPrompt,
+    employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
     groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'groqCooldownUntil']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
@@ -639,6 +666,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     employmentPreference,
     workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
+    employerQuestionPrompt: String(employerQuestionPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
     extraText: compactExtraText(extraText)
   };
@@ -679,6 +707,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       resumeBrief: payloadParts.resumeText.length,
       expectedSalary: payloadParts.expectedSalary.length,
       coverPrompt: payloadParts.coverPrompt.length,
+      employerQuestionPrompt: payloadParts.employerQuestionPrompt.length,
       vacancy: payloadParts.vacancyText.length,
       extra: payloadParts.extraText.length
     },

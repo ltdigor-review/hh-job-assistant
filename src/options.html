@@ -143,6 +143,10 @@
         margin-top: 22px;
       }
 
+      .field-action {
+        margin-top: 10px;
+      }
+
       button {
         border: 1px solid #1f5fbf;
         border-radius: 6px;
@@ -172,7 +176,7 @@
       <div class="page-head">
         <h1>HH Job Assistant</h1>
         <label class="switch" for="agentDebugLogsEnabled">
-          <span>Диагностический режим</span>
+          <span>Логи</span>
           <input id="agentDebugLogsEnabled" type="checkbox">
           <span class="switch-track" aria-hidden="true"></span>
         </label>
@@ -190,27 +194,28 @@
       <div class="row">
         <div>
           <label for="employmentPreference">Формат оформления</label>
-          <select id="employmentPreference">
-            <option value="">Не выбрано</option>
+          <select id="employmentPreference" multiple size="2">
             <option value="individual_entrepreneur">ИП</option>
             <option value="labor_contract">ТК</option>
-            <option value="any">Любой</option>
           </select>
         </div>
         <div>
           <label for="workFormatPreference">Формат работы</label>
-          <select id="workFormatPreference">
-            <option value="">Не выбрано</option>
+          <select id="workFormatPreference" multiple size="3">
             <option value="remote">Удаленка</option>
             <option value="hybrid">Гибрид</option>
             <option value="office">Офис</option>
-            <option value="any">Любой</option>
           </select>
         </div>
       </div>
 
+      <h2>Промпты</h2>
+
       <label for="coverPrompt">Промпт для сопроводительного письма</label>
       <textarea id="coverPrompt"></textarea>
+
+      <label for="employerQuestionPrompt">Промпт для ответов на вопросы работодателя</label>
+      <textarea id="employerQuestionPrompt"></textarea>
 
       <div class="row">
         <div>
@@ -239,9 +244,12 @@
       <label for="groqApiKey">Ключ Groq API</label>
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
 
+      <div class="field-action">
+        <button id="testGroq" class="secondary" type="button">Проверить Groq</button>
+      </div>
+
       <div class="actions">
-        <button id="save">Сохранить</button>
-        <button id="testGroq" class="secondary">Проверить Groq</button>
+        <button id="save" type="button">Сохранить</button>
       </div>
 
       <div id="status" role="status"></div>

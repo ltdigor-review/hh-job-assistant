@@ -8,6 +8,8 @@ const GROQ_MODELS = new Set([
 ]);
 
 const OLD_DEFAULT_COVER_PROMPT = 'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.';
+const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_contract']);
+const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 
 const fields = {
   groqApiKey: document.getElementById('groqApiKey'),
@@ -18,6 +20,7 @@ const fields = {
   employmentPreference: document.getElementById('employmentPreference'),
   workFormatPreference: document.getElementById('workFormatPreference'),
   coverPrompt: document.getElementById('coverPrompt'),
+  employerQuestionPrompt: document.getElementById('employerQuestionPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
@@ -37,6 +40,29 @@ function setStatus(text, isError = false) {
   statusNode.style.color = isError ? '#b91c1c' : '#475569';
 }
 
+function normalizeMultiPreference(value, allowedValues) {
+  const values = Array.isArray(value)
+    ? value
+    : value === 'any'
+      ? [...allowedValues]
+      : value
+        ? [value]
+        : [];
+  return [...new Set(values.filter((item) => allowedValues.has(item)))];
+}
+
+function setMultiSelectValue(field, values) {
+  const selected = new Set(values);
+  for (const option of Array.from(field.options || [])) {
+    option.selected = selected.has(option.value);
+  }
+}
+
+function getMultiSelectValue(field, allowedValues) {
+  const options = Array.from(field.selectedOptions || field.options || []);
+  return [...new Set(options.filter((option) => option.selected && allowedValues.has(option.value)).map((option) => option.value))];
+}
+
 async function loadOptions() {
   const values = await chrome.storage.local.get(Object.keys({ ...DEFAULTS, groqApiKey: '' }));
 
@@ -48,15 +74,12 @@ async function loadOptions() {
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
-  fields.employmentPreference.value = ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(values.employmentPreference)
-    ? values.employmentPreference
-    : DEFAULTS.employmentPreference;
-  fields.workFormatPreference.value = ['', 'remote', 'hybrid', 'office', 'any'].includes(values.workFormatPreference)
-    ? values.workFormatPreference
-    : DEFAULTS.workFormatPreference;
+  setMultiSelectValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
+  setMultiSelectValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
     ? DEFAULTS.coverPrompt
     : values.coverPrompt || DEFAULTS.coverPrompt;
+  fields.employerQuestionPrompt.value = values.employerQuestionPrompt || DEFAULTS.employerQuestionPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
@@ -85,13 +108,10 @@ async function saveOptions() {
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
-    employmentPreference: ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(fields.employmentPreference.value)
-      ? fields.employmentPreference.value
-      : DEFAULTS.employmentPreference,
-    workFormatPreference: ['', 'remote', 'hybrid', 'office', 'any'].includes(fields.workFormatPreference.value)
-      ? fields.workFormatPreference.value
-      : DEFAULTS.workFormatPreference,
+    employmentPreference: getMultiSelectValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
+    workFormatPreference: getMultiSelectValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
+    employerQuestionPrompt: fields.employerQuestionPrompt.value.trim() || DEFAULTS.employerQuestionPrompt,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),

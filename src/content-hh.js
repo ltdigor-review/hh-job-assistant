@@ -39,6 +39,8 @@ const HH_SELECTORS = {
     'a[rel="next"]'
   ]
 };
+const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_contract']);
+const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 
 const CLICK_DELAY_MIN_MS = 900;
 const CLICK_DELAY_MAX_MS = 1800;
@@ -1595,13 +1597,20 @@ async function getConfig() {
     dailyLimit: Number(values.dailyLimit) || DEFAULTS.dailyLimit,
     delayMinMs: Number(values.delayMinMs) || DEFAULTS.delayMinMs,
     delayMaxMs: Number(values.delayMaxMs) || DEFAULTS.delayMaxMs,
-    employmentPreference: ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(values.employmentPreference)
-      ? values.employmentPreference
-      : DEFAULTS.employmentPreference,
-    workFormatPreference: ['', 'remote', 'hybrid', 'office', 'any'].includes(values.workFormatPreference)
-      ? values.workFormatPreference
-      : DEFAULTS.workFormatPreference
+    employmentPreference: normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
+    workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES)
   };
+}
+
+function normalizeMultiPreference(value, allowedValues) {
+  const values = Array.isArray(value)
+    ? value
+    : value === 'any'
+      ? [...allowedValues]
+      : value
+        ? [value]
+        : [];
+  return [...new Set(values.filter((item) => allowedValues.has(item)))];
 }
 
 async function generateCoverLetter(vacancyText) {
@@ -1701,12 +1710,8 @@ async function getQuestionPreferences() {
     workFormatPreference = DEFAULTS.workFormatPreference
   } = await storageGet(['employmentPreference', 'workFormatPreference'], { optional: true });
   return {
-    employmentPreference: ['', 'individual_entrepreneur', 'labor_contract', 'any'].includes(employmentPreference)
-      ? employmentPreference
-      : DEFAULTS.employmentPreference,
-    workFormatPreference: ['', 'remote', 'hybrid', 'office', 'any'].includes(workFormatPreference)
-      ? workFormatPreference
-      : DEFAULTS.workFormatPreference
+    employmentPreference: normalizeMultiPreference(employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
+    workFormatPreference: normalizeMultiPreference(workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES)
   };
 }
 
@@ -1749,13 +1754,18 @@ async function getFallbackQuestionAssistance(questionFields, questionControlGrou
   const textAnswer = expectedSalary || 'Готов обсудить детали и выполнить требования вакансии.';
   const lines = [];
   questionControlGroups.forEach((group, index) => {
-    const positiveOption =
-      getPreferredChoiceOption(group, preferences) ||
-      group.options.find((option) => /да|готов|готова|соглас|можно|full|полная|удален|remote/i.test(option.label)) ||
-      group.options.find((option) => !/нет|не готов|не готова|no\b/i.test(option.label)) ||
-      group.options[0];
-    if (positiveOption?.label) {
-      lines.push(`Choice group ${index + 1}: ${positiveOption.label}`);
+    const preferredOptions = getPreferredChoiceOptions(group, preferences);
+    const positiveOptions = group.type === 'checkbox' && preferredOptions.length > 0
+      ? preferredOptions
+      : [
+          getPreferredChoiceOption(group, preferences) ||
+          group.options.find((option) => /да|готов|готова|соглас|можно|full|полная|удален|remote/i.test(option.label)) ||
+          group.options.find((option) => !/нет|не готов|не готова|no\b/i.test(option.label)) ||
+          group.options[0]
+        ].filter(Boolean);
+    const labels = positiveOptions.map((option) => option.label).filter(Boolean);
+    if (labels.length > 0) {
+      lines.push(`Choice group ${index + 1}: ${labels.join('; ')}`);
     }
   });
   questionFields.forEach((_, index) => {
@@ -1857,9 +1867,13 @@ function findYesNoOption(options, wantYes) {
   return findOptionByPattern(options, wantYes ? yesPattern : noPattern);
 }
 
-function getPreferredChoiceOption(group, preferences = {}) {
+function preferenceListIncludes(preferences, key, value) {
+  return normalizeMultiPreference(preferences[key], key === 'employmentPreference' ? EMPLOYMENT_PREFERENCE_VALUES : WORK_FORMAT_PREFERENCE_VALUES).includes(value);
+}
+
+function getPreferredChoiceOptions(group, preferences = {}) {
   const options = Array.isArray(group?.options) ? group.options.filter((option) => option?.control) : [];
-  if (options.length === 0) return null;
+  if (options.length === 0) return [];
   const optionMarkers = options.map((option) => [
     option.label,
     option.control?.name || '',
@@ -1868,32 +1882,46 @@ function getPreferredChoiceOption(group, preferences = {}) {
     option.control?.getAttribute?.('value') || ''
   ].join('\n')).join('\n');
   const questionText = cleanText(`${group?.question || ''}\n${group?.key || ''}\n${optionMarkers}`);
+  const preferred = [];
 
   if (/ип|индивидуальн|самозан|тк|трудов|договор|оформлен/i.test(questionText)) {
-    if (preferences.employmentPreference === 'individual_entrepreneur') {
-      return findOptionByPattern(options, /(^|\b)(ип|индивидуальн|самозан)/i);
+    if (preferenceListIncludes(preferences, 'employmentPreference', 'individual_entrepreneur')) {
+      const option = findOptionByPattern(options, /(^|\b)(ип|индивидуальн|самозан)/i);
+      if (option) preferred.push(option);
     }
-    if (preferences.employmentPreference === 'labor_contract') {
-      return findOptionByPattern(options, /(^|\b)(тк|трудов|штат)/i);
+    if (preferenceListIncludes(preferences, 'employmentPreference', 'labor_contract')) {
+      const option = findOptionByPattern(options, /(^|\b)(тк|трудов|штат)/i);
+      if (option) preferred.push(option);
     }
   }
 
   if (/удален|удалён|remote|гибрид|hybrid|офис|office/i.test(questionText)) {
-    if (preferences.workFormatPreference === 'remote') {
-      return (
-        findOptionByPattern(options, /удален|удалён|remote/i) ||
-        (/гибрид|hybrid|офис|office/i.test(questionText) ? findYesNoOption(options, false) : null)
-      );
+    if (preferenceListIncludes(preferences, 'workFormatPreference', 'remote')) {
+      const option = findOptionByPattern(options, /удален|удалён|remote/i);
+      if (option) preferred.push(option);
     }
-    if (preferences.workFormatPreference === 'hybrid') {
-      return findOptionByPattern(options, /гибрид|hybrid/i) || findYesNoOption(options, /гибрид|hybrid/i.test(questionText));
+    if (preferenceListIncludes(preferences, 'workFormatPreference', 'hybrid')) {
+      const option = findOptionByPattern(options, /гибрид|hybrid/i);
+      if (option) preferred.push(option);
     }
-    if (preferences.workFormatPreference === 'office') {
-      return findOptionByPattern(options, /офис|office/i) || findYesNoOption(options, /офис|office/i.test(questionText));
+    if (preferenceListIncludes(preferences, 'workFormatPreference', 'office')) {
+      const option = findOptionByPattern(options, /офис|office/i);
+      if (option) preferred.push(option);
+    }
+    if (preferred.length === 0 && /гибрид|hybrid/i.test(questionText)) {
+      const option = findYesNoOption(options, preferenceListIncludes(preferences, 'workFormatPreference', 'hybrid'));
+      if (option) preferred.push(option);
+    } else if (preferred.length === 0 && /офис|office/i.test(questionText)) {
+      const option = findYesNoOption(options, preferenceListIncludes(preferences, 'workFormatPreference', 'office'));
+      if (option) preferred.push(option);
     }
   }
 
-  return null;
+  return [...new Map(preferred.map((option) => [option.control, option])).values()];
+}
+
+function getPreferredChoiceOption(group, preferences = {}) {
+  return getPreferredChoiceOptions(group, preferences)[0] || null;
 }
 
 function getFallbackChoiceOption(group, preferences = {}) {
@@ -1912,11 +1940,15 @@ async function fillFallbackQuestionControls(groups) {
   let selected = 0;
   const labels = [];
   for (const group of groups) {
-    const option = getFallbackChoiceOption(group, preferences);
-    if (!option) continue;
-    selectControl(option.control);
-    selected += 1;
-    labels.push(option.label);
+    const preferredOptions = getPreferredChoiceOptions(group, preferences);
+    const options = group.type === 'checkbox' && preferredOptions.length > 0
+      ? preferredOptions
+      : [getFallbackChoiceOption(group, preferences)].filter(Boolean);
+    for (const option of options) {
+      selectControl(option.control);
+      selected += 1;
+      labels.push(option.label);
+    }
   }
   return { selected, labels };
 }

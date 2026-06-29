@@ -1898,6 +1898,27 @@ test('auto apply fallback obeys configured work-format preference', async () => 
   assert.equal(hybridResult.appended.at(-1).status, 'applied_test_assisted');
 });
 
+test('auto apply fallback can select multiple configured work formats from checkbox group', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакие форматы работы вам подходят?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'checkbox', name: 'work_format', label: 'Удаленка', value: 'remote' },
+      { type: 'checkbox', name: 'work_format', label: 'Гибрид', value: 'hybrid' },
+      { type: 'checkbox', name: 'work_format', label: 'Офис', value: 'office' }
+    ],
+    initialLocalStore: { workFormatPreference: ['remote', 'hybrid'] },
+    groqResponse: { ok: false, error: 'Groq request failed: 429 rate limit' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Удаленка', 'Гибрид']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
 test('auto apply fallback obeys configured employment preference', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакой формат оформления вам подходит: ТК или ИП?',
@@ -1940,6 +1961,26 @@ test('auto apply fallback obeys configured employment preference', async () => {
   assert.equal(laborContractResult.submitClicks, 1);
   assert.deepEqual(laborContractResult.checkedLabels, ['ТК']);
   assert.equal(laborContractResult.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply fallback can select multiple configured employment formats from checkbox group', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакие форматы оформления вам подходят?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'checkbox', name: 'employment', label: 'ТК', value: 'labor_contract' },
+      { type: 'checkbox', name: 'employment', label: 'ИП', value: 'individual_entrepreneur' }
+    ],
+    initialLocalStore: { employmentPreference: ['individual_entrepreneur', 'labor_contract'] },
+    groqResponse: { ok: false, error: 'Groq request failed: 429 rate limit' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['ТК', 'ИП']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
 test('auto apply uses fallback choice answers after recoverable Groq error', async () => {
