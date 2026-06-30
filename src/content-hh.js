@@ -3363,7 +3363,7 @@ async function continueSavedAutoApply() {
 async function startRun(mode, limitOverride = null, options = {}) {
   const config = await getConfig();
   const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
-  const limit = Math.max(1, Math.min(Number(limitSource) || 20, 100));
+  const limit = Math.max(1, Math.min(Number(limitSource) || 20, 200));
   const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
   await clearStopRequestedFlag();
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;

@@ -64,6 +64,44 @@
         gap: 14px;
       }
 
+      .preference-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 16px;
+      }
+
+      .preference-field {
+        border: 1px solid #b8c4d4;
+        border-radius: 6px;
+        padding: 10px 12px 12px;
+      }
+
+      .preference-field legend {
+        padding: 0 4px;
+        font-weight: 700;
+      }
+
+      .preference-options {
+        display: grid;
+        gap: 8px;
+        margin-top: 4px;
+      }
+
+      .preference-option {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        font-weight: 400;
+        cursor: pointer;
+      }
+
+      .preference-option input {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+      }
+
       .checkbox {
         display: flex;
         align-items: center;
@@ -169,6 +207,26 @@
         margin-top: 16px;
         color: #475569;
       }
+
+      @media (max-width: 720px) {
+        body {
+          padding: 16px;
+        }
+
+        main {
+          padding: 18px;
+        }
+
+        .page-head,
+        .row {
+          grid-template-columns: 1fr;
+        }
+
+        .page-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
     </style>
   </head>
   <body>
@@ -191,36 +249,43 @@
       <label for="expectedSalary">Ожидаемая зарплата для ответов</label>
       <input id="expectedSalary" type="text" placeholder="Например: 250 000 руб. на руки">
 
-      <div class="row">
-        <div>
-          <label for="employmentPreference">Формат оформления</label>
-          <select id="employmentPreference" multiple size="2">
-            <option value="individual_entrepreneur">ИП</option>
-            <option value="labor_contract">ТК</option>
-          </select>
-        </div>
-        <div>
-          <label for="workFormatPreference">Формат работы</label>
-          <select id="workFormatPreference" multiple size="3">
-            <option value="remote">Удаленка</option>
-            <option value="hybrid">Гибрид</option>
-            <option value="office">Офис</option>
-          </select>
-        </div>
+      <div class="row preference-row">
+        <fieldset class="preference-field" id="employmentPreference">
+          <legend>Формат оформления</legend>
+          <div class="preference-options">
+            <label class="preference-option">
+              <input type="checkbox" name="employmentPreference" value="individual_entrepreneur">
+              <span>ИП</span>
+            </label>
+            <label class="preference-option">
+              <input type="checkbox" name="employmentPreference" value="labor_contract">
+              <span>ТК</span>
+            </label>
+          </div>
+        </fieldset>
+        <fieldset class="preference-field" id="workFormatPreference">
+          <legend>Формат работы</legend>
+          <div class="preference-options">
+            <label class="preference-option">
+              <input type="checkbox" name="workFormatPreference" value="remote">
+              <span>Удаленка</span>
+            </label>
+            <label class="preference-option">
+              <input type="checkbox" name="workFormatPreference" value="hybrid">
+              <span>Гибрид</span>
+            </label>
+            <label class="preference-option">
+              <input type="checkbox" name="workFormatPreference" value="office">
+              <span>Офис</span>
+            </label>
+          </div>
+        </fieldset>
       </div>
-
-      <h2>Промпты</h2>
-
-      <label for="coverPrompt">Промпт для сопроводительного письма</label>
-      <textarea id="coverPrompt"></textarea>
-
-      <label for="employerQuestionPrompt">Промпт для ответов на вопросы работодателя</label>
-      <textarea id="employerQuestionPrompt"></textarea>
 
       <div class="row">
         <div>
           <label for="dailyLimit">Дневной лимит откликов</label>
-          <input id="dailyLimit" type="number" min="1" max="100">
+          <input id="dailyLimit" type="number" min="1" max="200">
         </div>
         <div>
           <label for="delayMinMs">Минимальная пауза, мс</label>
@@ -247,6 +312,14 @@
       <div class="field-action">
         <button id="testGroq" class="secondary" type="button">Проверить Groq</button>
       </div>
+
+      <h2>Промпты</h2>
+
+      <label for="coverPrompt">Промпт для сопроводительного письма</label>
+      <textarea id="coverPrompt"></textarea>
+
+      <label for="employerQuestionPrompt">Промпт для ответов на вопросы работодателя</label>
+      <textarea id="employerQuestionPrompt"></textarea>
 
       <div class="actions">
         <button id="save" type="button">Сохранить</button>

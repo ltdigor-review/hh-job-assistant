@@ -51,16 +51,25 @@ function normalizeMultiPreference(value, allowedValues) {
   return [...new Set(values.filter((item) => allowedValues.has(item)))];
 }
 
-function setMultiSelectValue(field, values) {
+function getPreferenceInputs(field) {
+  return Array.from(field.querySelectorAll('input[type="checkbox"]'));
+}
+
+function setMultiCheckboxValue(field, values) {
   const selected = new Set(values);
-  for (const option of Array.from(field.options || [])) {
-    option.selected = selected.has(option.value);
+  for (const input of getPreferenceInputs(field)) {
+    input.checked = selected.has(input.value);
   }
 }
 
-function getMultiSelectValue(field, allowedValues) {
-  const options = Array.from(field.selectedOptions || field.options || []);
-  return [...new Set(options.filter((option) => option.selected && allowedValues.has(option.value)).map((option) => option.value))];
+function getMultiCheckboxValue(field, allowedValues) {
+  return [
+    ...new Set(
+      getPreferenceInputs(field)
+        .filter((input) => input.checked && allowedValues.has(input.value))
+        .map((input) => input.value)
+    )
+  ];
 }
 
 async function loadOptions() {
@@ -74,8 +83,8 @@ async function loadOptions() {
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
-  setMultiSelectValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
-  setMultiSelectValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
+  setMultiCheckboxValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
+  setMultiCheckboxValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
     ? DEFAULTS.coverPrompt
     : values.coverPrompt || DEFAULTS.coverPrompt;
@@ -108,11 +117,11 @@ async function saveOptions() {
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
-    employmentPreference: getMultiSelectValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
-    workFormatPreference: getMultiSelectValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
+    employmentPreference: getMultiCheckboxValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
+    workFormatPreference: getMultiCheckboxValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
     employerQuestionPrompt: fields.employerQuestionPrompt.value.trim() || DEFAULTS.employerQuestionPrompt,
-    dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 100)),
+    dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 200)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
     agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked

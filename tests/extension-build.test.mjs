@@ -231,8 +231,11 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   assert.match(backgroundSource, /import '\.\/defaults\.js'/);
   assert.match(backgroundSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
   assert.match(optionsHtml, /<script src="defaults\.js"><\/script>\s*<script src="options\.js"><\/script>/);
+  assert.match(optionsHtml, /id="dailyLimit" type="number" min="1" max="200"/);
   assert.match(optionsSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
+  assert.match(optionsSource, /Math\.min\(Number\(fields\.dailyLimit\.value\) \|\| DEFAULTS\.dailyLimit, 200\)/);
   assert.match(contentSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
+  assert.match(contentSource, /Math\.min\(Number\(limitSource\) \|\| 20, 200\)/);
 
   assert.ok(manifest.content_scripts[0].js.indexOf('src/defaults.js') < manifest.content_scripts[0].js.indexOf('src/content-hh.js'));
   for (const [file, source] of [
@@ -2010,27 +2013,27 @@ test('options preserve masked Groq key unless user edits the key field', async (
   };
 
   function makeElement(id) {
-    const optionsById = {
+    const inputsById = {
       employmentPreference: [
-        { value: 'individual_entrepreneur', selected: false },
-        { value: 'labor_contract', selected: false }
+        { value: 'individual_entrepreneur', checked: false, type: 'checkbox' },
+        { value: 'labor_contract', checked: false, type: 'checkbox' }
       ],
       workFormatPreference: [
-        { value: 'remote', selected: false },
-        { value: 'hybrid', selected: false },
-        { value: 'office', selected: false }
+        { value: 'remote', checked: false, type: 'checkbox' },
+        { value: 'hybrid', checked: false, type: 'checkbox' },
+        { value: 'office', checked: false, type: 'checkbox' }
       ]
     };
     const element = {
       id,
       value: '',
       checked: false,
-      options: optionsById[id] || [],
+      inputs: inputsById[id] || [],
       dataset: {},
       style: {},
       textContent: '',
-      get selectedOptions() {
-        return this.options.filter((option) => option.selected);
+      querySelectorAll(selector) {
+        return selector === 'input[type="checkbox"]' ? this.inputs : [];
       },
       setCustomValidity(value) {
         this.validationMessage = value;
@@ -2110,13 +2113,19 @@ test('options preserve masked Groq key unless user edits the key field', async (
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
+    assert.equal(storage.dailyLimit, 100);
     assert.deepEqual(storage.employmentPreference, []);
     assert.deepEqual(storage.workFormatPreference, []);
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
 
-    elements.employmentPreference.options[1].selected = true;
-    elements.workFormatPreference.options[0].selected = true;
-    elements.workFormatPreference.options[1].selected = true;
+    elements.dailyLimit.value = '250';
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.dailyLimit, 200);
+
+    elements.employmentPreference.inputs[1].checked = true;
+    elements.workFormatPreference.inputs[0].checked = true;
+    elements.workFormatPreference.inputs[1].checked = true;
     elements.employerQuestionPrompt.value = 'custom employer prompt';
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2151,15 +2160,17 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
 
   assert.match(html, /id="resumeUrl"/);
   assert.match(html, /id="resumeCacheTtlHours" type="number" min="0.1" step="0.5"/);
-  assert.match(html, /id="employmentPreference" multiple size="2"/);
-  assert.match(html, /value="individual_entrepreneur">ИП/);
-  assert.match(html, /value="labor_contract">ТК/);
-  assert.match(html, /id="workFormatPreference" multiple size="3"/);
-  assert.match(html, /value="remote">Удаленка/);
-  assert.match(html, /value="hybrid">Гибрид/);
+  assert.match(html, /<fieldset class="preference-field" id="employmentPreference">/);
+  assert.match(html, /value="individual_entrepreneur">\s*<span>ИП<\/span>/);
+  assert.match(html, /value="labor_contract">\s*<span>ТК<\/span>/);
+  assert.match(html, /<fieldset class="preference-field" id="workFormatPreference">/);
+  assert.doesNotMatch(html, /<select id="employmentPreference"|<select id="workFormatPreference"|multiple size=/);
+  assert.match(html, /value="remote">\s*<span>Удаленка<\/span>/);
+  assert.match(html, /value="hybrid">\s*<span>Гибрид<\/span>/);
   assert.doesNotMatch(html, /value="any">Любой|<option value="">Не выбрано<\/option>/);
   assert.match(html, /id="agentDebugLogsEnabled"/);
   assert.match(html, /<h2>Промпты<\/h2>/);
+  assert.ok(html.indexOf('<h2>Groq API</h2>') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /id="coverPrompt"/);
   assert.match(html, /id="employerQuestionPrompt"/);
   assert.match(html, /Логи/);
