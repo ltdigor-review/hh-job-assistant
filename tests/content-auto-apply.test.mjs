@@ -2727,6 +2727,200 @@ test('auto apply recovers from hh vacancy redirect back to original search page'
   assert.equal(states.at(-1).currentAction, 'Возвращаюсь на страницу поиска HH');
 });
 
+test('auto apply resumes search queue after hh redirects queued response to root page', async () => {
+  const source = await readContentScriptSource();
+  const navigations = [];
+  const states = [];
+  const localStore = {
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?resume=abc&hhtmFrom=main',
+      limit: 100,
+      maxProcessed: null,
+      returnToSearch: true,
+      items: [
+        {
+          index: 1,
+          vacancyId: '134794526',
+          title: 'Senior QA',
+          url: 'https://hh.ru/vacancy/134794526',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=134794526',
+          testDetected: false
+        }
+      ],
+      counters: {
+        found: 50,
+        processed: 1,
+        applied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      config: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      },
+      processedVacancyIds: ['134794526']
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://sochi.hh.ru/',
+    pathname: '/'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH root page',
+    body: new FakeElement({ text: 'HeadHunter' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#recover-root-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (navigations.length === 0 && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.deepEqual(navigations, ['https://hh.ru/search/vacancy?resume=abc&hhtmFrom=main']);
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(localStore.autoApplyQueue.recoveredFromUrl, 'https://sochi.hh.ru/');
+  assert.equal(localStore.autoApplySearchQueue.active, true);
+  assert.equal(localStore.autoApplySearchQueue.runId, 'test-run');
+  assert.equal(localStore.autoApplySearchQueue.limit, 100);
+  assert.deepEqual(localStore.autoApplySearchQueue.processedVacancyIds, ['134794526']);
+  assert.equal(states.at(-1).state, 'applying');
+  assert.equal(states.at(-1).currentAction, 'Возвращаюсь на страницу поиска HH');
+});
+
+test('auto apply ignores hidden resume parser page while response queue is active', async () => {
+  const source = await readContentScriptSource();
+  const navigations = [];
+  const states = [];
+  const localStore = {
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?resume=abc&hhtmFrom=main',
+      limit: 10,
+      returnToSearch: true,
+      items: [
+        {
+          index: 1,
+          vacancyId: '134785168',
+          title: 'QA manual',
+          url: 'https://hh.ru/vacancy/134785168',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=134785168',
+          testDetected: true
+        }
+      ],
+      counters: {
+        found: 19,
+        processed: 2,
+        applied: 1,
+        skipped: 0,
+        errors: 0
+      },
+      config: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      },
+      processedVacancyIds: ['134798917', '134785168']
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://sochi.hh.ru/resume/64582d4dff10b1c29d0039ed1f6b56307a4652',
+    pathname: '/resume/64582d4dff10b1c29d0039ed1f6b56307a4652'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH resume page',
+    body: new FakeElement({ text: 'Resume text' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#resume-parser-queue-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.deepEqual(navigations, []);
+  assert.deepEqual(states, []);
+  assert.equal(localStore.autoApplyQueue.active, true);
+  assert.equal(localStore.autoApplyQueue.recoveredFromUrl, undefined);
+  assert.equal(localStore.autoApplySearchQueue, undefined);
+});
+
 test('auto apply does not recover queued response pages back to a response form url', async () => {
   const source = await readContentScriptSource();
   const navigations = [];

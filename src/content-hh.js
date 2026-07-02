@@ -371,6 +371,10 @@ function isVacancyDetailPage() {
   return /\/vacancy\/\d+/.test(location.pathname);
 }
 
+function isResumePage() {
+  return /^\/resume\/[^/?#]+/.test(location.pathname);
+}
+
 function getCurrentVacancyId() {
   return getVacancyId(location.href);
 }
@@ -2935,6 +2939,9 @@ async function continueQueuedAutoApply() {
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
     return false;
   }
+  if (isResumePage()) {
+    return false;
+  }
   if (stopRequested) {
     await markStopped(autoApplyQueue.counters || {});
     return true;
@@ -2964,8 +2971,21 @@ async function continueQueuedAutoApply() {
       return true;
     }
     if (isHhSearchPageUrl(sourceUrl)) {
-      await saveSearchQueue({ active: false });
-      await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+      if (autoApplyQueue.returnToSearch) {
+        await saveSearchQueue({
+          active: true,
+          runId: autoApplyQueue.runId || activeRunId,
+          limit: autoApplyQueue.limit || 20,
+          counters,
+          config: autoApplyQueue.config || null,
+          maxProcessed: autoApplyQueue.maxProcessed || null,
+          processedVacancyIds: autoApplyQueue.processedVacancyIds || []
+        });
+        await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+      } else {
+        await saveSearchQueue({ active: false });
+        await setRunState({ state: 'complete', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: '' });
+      }
       navigateTo(sourceUrl);
       return true;
     }
