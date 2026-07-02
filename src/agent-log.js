@@ -5,9 +5,20 @@
   const ENABLED_KEY = 'agentDebugLogsEnabled';
   const MAX_ENTRIES = 500;
   const SECRET_KEY_PATTERN = /api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|bearer/i;
+  const SECRET_QUERY_PATTERN = /([?&](?:api[_-]?key|key|token|access[_-]?token|refresh[_-]?token|secret|password|authorization)=)[^&#\s]+/gi;
+  const SECRET_ASSIGNMENT_PATTERN = /\b((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|authorization)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,}]+)/gi;
+  const BEARER_VALUE_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+
+  function redactSecretString(value) {
+    return String(value)
+      .replace(BEARER_VALUE_PATTERN, 'Bearer [redacted]')
+      .replace(SECRET_QUERY_PATTERN, '$1[redacted]')
+      .replace(SECRET_ASSIGNMENT_PATTERN, '$1[redacted]');
+  }
 
   function sanitize(value, depth = 0) {
     if (depth > 8) return '[max-depth]';
+    if (typeof value === 'string') return redactSecretString(value);
     if (value == null || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitize(item, depth + 1));
 

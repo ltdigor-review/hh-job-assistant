@@ -1292,8 +1292,10 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
   assert.equal(result.groqRequests.at(-1).task, 'cover_letter');
   assert.equal(result.textareaValue, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
   const coverLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'cover_letter_applied');
-  assert.equal(coverLog.details.insertedText, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
-  assert.equal(coverLog.details.sourceText, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  assert.equal(coverLog.details.insertedText, undefined);
+  assert.equal(coverLog.details.sourceText, undefined);
+  assert.equal(coverLog.details.fieldLength, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.'.length);
+  assert.equal(coverLog.details.letterLength, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.'.length);
   assert.match(coverLog.details.field.marker, /Сопроводительное письмо/);
   assert.equal(result.appended.at(-1).status, 'applied');
 });
@@ -2223,8 +2225,9 @@ test('queued response form processed cap completes without returning to search',
   assert.equal(result.localStore.autoApplyQueue.active, false);
   assert.equal(result.localStore.autoApplySearchQueue.active, false);
   assert.equal(result.localStore.autoApplyQueue.counters.processed, 1);
-  assert.equal(result.localStore.autoApplyQueue.counters.applied, 1);
-  assert.equal(result.localStore.autoApplyQueue.counters.skipped, 0);
+  assert.equal(result.localStore.autoApplyQueue.counters.applied, 0);
+  assert.equal(result.localStore.autoApplyQueue.counters.skipped, 1);
+  assert.equal(result.appended.at(-1).status, 'skipped_no_response_button');
   assert.equal(result.navigateUrl, '');
   assert.equal(result.states.at(-1).state, 'complete');
 });

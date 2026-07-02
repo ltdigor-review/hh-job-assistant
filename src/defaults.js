@@ -5,6 +5,7 @@
     resumeUrl: '',
     resumeParsedText: '',
     resumeParsedAt: '',
+    resumeParsedUrl: '',
     resumeCacheTtlHours: 1,
     resumeGroqBriefText: '',
     resumeGroqBriefSourceHash: '',

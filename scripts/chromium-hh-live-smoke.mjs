@@ -151,9 +151,13 @@ try {
 
   const devToolsUrl = await waitForDevToolsUrl(browser);
   cdpUrl = devToolsHttpOrigin(devToolsUrl);
-  await closePageTargets(cdpUrl);
+  if (!keepOpen) {
+    await closePageTargets(cdpUrl);
+  }
   const result = await runSmoke(cdpUrl);
-  await closePageTargets(cdpUrl);
+  if (!keepOpen) {
+    await closePageTargets(cdpUrl);
+  }
 
   if (result.code !== 0) {
     throw new Error(
@@ -169,7 +173,7 @@ try {
   ].filter(Boolean).join('\n');
   fail(details);
 } finally {
-  if (cdpUrl) {
+  if (cdpUrl && !keepOpen) {
     await closePageTargets(cdpUrl).catch(() => {});
   }
   if (browser && !browser.killed && !keepOpen) {

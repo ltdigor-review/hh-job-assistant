@@ -134,6 +134,7 @@ async function saveOptions() {
   if ((current.resumeUrl || '') !== patch.resumeUrl) {
     patch.resumeParsedText = '';
     patch.resumeParsedAt = '';
+    patch.resumeParsedUrl = '';
     patch.resumeGroqBriefText = '';
     patch.resumeGroqBriefSourceHash = '';
     patch.resumeGroqBriefBuiltAt = '';

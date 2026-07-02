@@ -14,6 +14,7 @@ const LEGACY_DEFAULT_DELAYS = [
 ];
 const GROQ_REQUEST_TIMEOUT_MS = 35000;
 const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
+const RESPONSE_NAVIGATION_WATCHDOG_ALARM = 'hhja-response-navigation-watchdog';
 const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
 const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
 const RESUME_GROQ_RETRY_BRIEF_MAX_CHARS = 800;
@@ -500,9 +501,10 @@ async function getResumeContext() {
     resumeUrl = '',
     resumeParsedText = '',
     resumeParsedAt = '',
+    resumeParsedUrl = '',
     resumeCacheTtlHours = DEFAULTS.resumeCacheTtlHours,
     resumeText = ''
-  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeCacheTtlHours', 'resumeText']);
+  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeParsedUrl', 'resumeCacheTtlHours', 'resumeText']);
   const normalizedUrl = normalizeResumeUrl(resumeUrl);
   if (!normalizedUrl) {
     return String(resumeText || '').slice(0, 12000);
@@ -510,7 +512,12 @@ async function getResumeContext() {
 
   const ttlHours = Math.max(0.1, Math.min(Number(resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
   const cacheAgeMs = Date.now() - Date.parse(resumeParsedAt || 0);
-  if (resumeParsedText && Number.isFinite(cacheAgeMs) && cacheAgeMs < ttlHours * 60 * 60 * 1000) {
+  if (
+    resumeParsedText &&
+    resumeParsedUrl === normalizedUrl &&
+    Number.isFinite(cacheAgeMs) &&
+    cacheAgeMs < ttlHours * 60 * 60 * 1000
+  ) {
     return String(resumeParsedText).slice(0, 12000);
   }
 
@@ -529,6 +536,7 @@ async function getResumeContext() {
     await storageSet({
       resumeParsedText: text,
       resumeParsedAt: nowIso(),
+      resumeParsedUrl: normalizedUrl,
       resumeGroqBriefText: '',
       resumeGroqBriefSourceHash: '',
       resumeGroqBriefBuiltAt: '',
@@ -614,6 +622,25 @@ function normalizeUsage(usage = {}) {
   };
 }
 
+function summarizeGroqResponse(data = {}) {
+  const choices = Array.isArray(data?.choices) ? data.choices : [];
+  return {
+    id: data?.id || '',
+    model: data?.model || '',
+    choiceCount: choices.length,
+    choices: choices.map((choice, index) => {
+      const content = String(choice?.message?.content || '');
+      return {
+        index,
+        finishReason: choice?.finish_reason || '',
+        contentLength: content.length,
+        contentHash: content ? hashText(content) : ''
+      };
+    }),
+    usage: normalizeUsage(data?.usage)
+  };
+}
+
 function formatGroqEmptyResponseError({ task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
   const normalizedUsage = normalizeUsage(usage);
   const parts = [
@@ -694,7 +721,6 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
     method: 'POST',
     model: requestBody.model,
-    requestBody,
     messageCount: requestBody.messages.length,
     messageLengths: requestBody.messages.map((message) => ({
       role: message.role,
@@ -757,14 +783,16 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       await appendAgentLog('groq_request_error', {
         task,
         status: response.status,
-        responseText: text,
+        responseTextLength: text.length,
+        responseTextHash: hashText(text),
         attempt,
         maxAttempts
       });
       await appendAgentLog('groq_error_payload', {
         task,
         status: response.status,
-        responseText: text,
+        responseTextLength: text.length,
+        responseTextHash: hashText(text),
         attempt,
         maxAttempts
       });
@@ -786,7 +814,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         maxTokens: requestBody.max_tokens,
         model: data?.model || requestBody.model,
         usage: normalizeUsage(data?.usage),
-        responseBody: data
+        responseSummary: summarizeGroqResponse(data)
       });
       if (attempt < maxAttempts) {
         if (finishReason === 'length') {
@@ -808,8 +836,6 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     const finishReason = data?.choices?.[0]?.finish_reason || '';
     await appendAgentLog('groq_response_payload', {
       task,
-      content,
-      responseBody: data,
       responseLength: content.length,
       responseHash: hashText(content),
       finishReason,
@@ -1258,7 +1284,7 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
     errors: 0,
     ...(autoApplyQueue.counters || autoApplySearchQueue?.counters || {})
   };
-  counters.processed = Math.max(Number(counters.processed) || 0, Number(runState.processed) || 0);
+  counters.processed = Math.max(Number(counters.processed) || 0, Number(runState.processed) || 0) + 1;
   counters.applied = Math.max(Number(counters.applied) || 0, Number(runState.applied) || 0);
   counters.skipped = Math.max(Number(counters.skipped) || 0, Number(runState.skipped) || 0) + 1;
   counters.errors = Math.max(Number(counters.errors) || 0, Number(runState.errors) || 0);
@@ -1266,6 +1292,13 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
 
   const item = autoApplyQueue.items?.[autoApplyQueue.index || 0] || {};
   const vacancyId = item.vacancyId || getVacancyIdFromUrl(expectedUrl);
+  const processedVacancyIds = [
+    ...new Set([
+      ...(autoApplyQueue.processedVacancyIds || []),
+      ...(autoApplySearchQueue?.processedVacancyIds || []),
+      vacancyId
+    ].filter(Boolean))
+  ];
   const message = 'Пропущено: страница отклика HH не загрузилась вовремя.';
   await appendRunResult({
     index: item.index || Number(autoApplyQueue.index || 0) + 1,
@@ -1285,7 +1318,7 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
       limit: autoApplyQueue.limit || autoApplySearchQueue?.limit || 20,
       counters,
       config: autoApplyQueue.config || autoApplySearchQueue?.config,
-      processedVacancyIds: autoApplyQueue.processedVacancyIds || autoApplySearchQueue?.processedVacancyIds || []
+      processedVacancyIds
     }
   });
   await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: message });
@@ -1298,11 +1331,62 @@ async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt)
   await chrome.tabs.update(tabId, { url: autoApplyQueue.sourceUrl }).catch(() => {});
 }
 
-function scheduleResponseNavigationWatchdog(tabId, url) {
+async function handleResponseNavigationWatchdogAlarm() {
+  const { responseNavigationWatchdog = null } = await storageGet(['responseNavigationWatchdog']);
+  if (!responseNavigationWatchdog?.tabId || !responseNavigationWatchdog?.url) return;
+  const handledWatchdog = { ...responseNavigationWatchdog };
+  try {
+    await recoverStalledResponseNavigation(
+      handledWatchdog.tabId,
+      handledWatchdog.url,
+      Number(handledWatchdog.scheduledAt) || 0
+    );
+  } finally {
+    const { responseNavigationWatchdog: currentWatchdog = null } = await storageGet(['responseNavigationWatchdog']);
+    if (
+      currentWatchdog?.tabId === handledWatchdog.tabId &&
+      currentWatchdog?.url === handledWatchdog.url &&
+      Number(currentWatchdog?.scheduledAt) === Number(handledWatchdog.scheduledAt)
+    ) {
+      await storageSet({ responseNavigationWatchdog: null });
+    }
+  }
+}
+
+async function restoreResponseNavigationWatchdogAlarm() {
+  if (!chrome.alarms?.create) return;
+  const { responseNavigationWatchdog = null } = await storageGet(['responseNavigationWatchdog']);
+  if (!responseNavigationWatchdog?.tabId || !responseNavigationWatchdog?.url) return;
+  const scheduledAt = Number(responseNavigationWatchdog.scheduledAt) || Date.now();
+  const deadline = scheduledAt + getResponseNavigationWatchdogMs();
+  if (deadline <= Date.now()) {
+    await handleResponseNavigationWatchdogAlarm();
+    return;
+  }
+  chrome.alarms.create(RESPONSE_NAVIGATION_WATCHDOG_ALARM, { when: deadline });
+}
+
+async function scheduleResponseNavigationWatchdog(tabId, url) {
   if (!tabId || !isHhResponseFormUrl(url)) return;
   const scheduledAt = Date.now();
+  try {
+    await storageSet({ responseNavigationWatchdog: { tabId, url, scheduledAt } });
+  } catch (error) {
+    appendAgentLog('response_navigation_watchdog_error', {
+      tabId,
+      url,
+      error: localizeError(error)
+    }).catch(() => {});
+    return;
+  }
+  if (chrome.alarms?.create) {
+    chrome.alarms.create(RESPONSE_NAVIGATION_WATCHDOG_ALARM, {
+      when: scheduledAt + getResponseNavigationWatchdogMs()
+    });
+    return;
+  }
   setTimeout(() => {
-    recoverStalledResponseNavigation(tabId, url, scheduledAt).catch((error) => {
+    handleResponseNavigationWatchdogAlarm().catch((error) => {
       appendAgentLog('response_navigation_watchdog_error', {
         tabId,
         url,
@@ -1327,6 +1411,17 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureDefaults();
+  await restoreResponseNavigationWatchdogAlarm();
+});
+
+chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (alarm?.name !== RESPONSE_NAVIGATION_WATCHDOG_ALARM) return;
+  handleResponseNavigationWatchdogAlarm().catch((error) => {
+    appendAgentLog('response_navigation_watchdog_error', {
+      alarm: alarm.name,
+      error: localizeError(error)
+    }).catch(() => {});
+  });
 });
 
 chrome.commands?.onCommand?.addListener((command) => {
@@ -1346,7 +1441,13 @@ chrome.commands?.onCommand?.addListener((command) => {
 
 chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   const url = changeInfo.url || tab?.url || '';
-  scheduleResponseNavigationWatchdog(tabId, url);
+  return scheduleResponseNavigationWatchdog(tabId, url).catch((error) => {
+    appendAgentLog('response_navigation_watchdog_error', {
+      tabId,
+      url,
+      error: localizeError(error)
+    }).catch(() => {});
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

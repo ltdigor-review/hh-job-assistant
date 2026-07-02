@@ -20,6 +20,11 @@ function fail(message) {
   process.exit(1);
 }
 
+function markFailure(message) {
+  console.error(`Chromium extension configure failed: ${message}`);
+  process.exitCode = 1;
+}
+
 async function findBrowserPath() {
   const candidates = [
     ...await findPlaywrightChromeForTestingPaths(),
@@ -106,8 +111,17 @@ function pickConfig(fileEnv) {
   if (resumeUrl) patch.resumeUrl = resumeUrl;
   if (expectedSalary) patch.expectedSalary = expectedSalary;
   if (dailyLimit) patch.dailyLimit = Math.max(1, Math.min(Number(dailyLimit) || 20, 100));
-  if (delayMinMs) patch.delayMinMs = Math.max(500, Number(delayMinMs) || 2500);
-  if (delayMaxMs) patch.delayMaxMs = Math.max(500, Number(delayMaxMs) || 5000);
+  const parsedDelayMinMs = delayMinMs ? Math.max(500, Number(delayMinMs) || 2500) : undefined;
+  const parsedDelayMaxMs = delayMaxMs ? Math.max(500, Number(delayMaxMs) || 5000) : undefined;
+  if (
+    parsedDelayMinMs !== undefined &&
+    parsedDelayMaxMs !== undefined &&
+    parsedDelayMaxMs < parsedDelayMinMs
+  ) {
+    throw new Error('HHJA_DELAY_MAX_MS must be greater than or equal to HHJA_DELAY_MIN_MS.');
+  }
+  if (parsedDelayMinMs !== undefined) patch.delayMinMs = parsedDelayMinMs;
+  if (parsedDelayMaxMs !== undefined) patch.delayMaxMs = parsedDelayMaxMs;
 
   return patch;
 }
@@ -126,6 +140,12 @@ async function createCdpSession(wsUrl) {
   const socket = await connectWebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
+  const rejectPending = (error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
 
   socket.addEventListener('message', (event) => {
     const data = JSON.parse(event.data);
@@ -138,14 +158,21 @@ async function createCdpSession(wsUrl) {
       resolvePending(data.result);
     }
   });
+  socket.addEventListener('close', () => rejectPending(new Error('Chrome DevTools websocket closed')));
+  socket.addEventListener('error', () => rejectPending(new Error('Chrome DevTools websocket error')));
 
   return {
     send(method, params = {}, options = {}) {
       const id = nextId;
       nextId += 1;
-      socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
       return new Promise((resolvePending, reject) => {
         pending.set(id, { resolve: resolvePending, reject });
+        try {
+          socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
       });
     },
     close() {
@@ -280,7 +307,7 @@ try {
     ]))
   }, null, 2));
 } catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+  markFailure(error instanceof Error ? error.message : String(error));
 } finally {
   session?.close();
   if (browser && !browser.killed) {

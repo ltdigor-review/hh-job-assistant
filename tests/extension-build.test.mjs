@@ -33,8 +33,8 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.permissions.includes('unlimitedStorage'));
   assert.ok(manifest.permissions.includes('tabs'));
   assert.ok(manifest.permissions.includes('scripting'));
+  assert.ok(manifest.permissions.includes('alarms'));
   assert.ok(!manifest.permissions.includes('windows'));
-  assert.ok(!manifest.permissions.includes('alarms'));
   assert.ok(manifest.host_permissions.includes('https://hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
@@ -297,6 +297,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.groqModel, 'openai/gpt-oss-120b');
   assert.equal(localData.expectedSalary, '');
   assert.equal(localData.resumeUrl, '');
+  assert.equal(localData.resumeParsedUrl, '');
   assert.equal(localData.resumeCacheTtlHours, 1);
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
@@ -377,6 +378,8 @@ test('background clears stale current action when a run completes', async () => 
 
 test('background response watchdog leaves active form processing alone', async () => {
   let onUpdatedListener = null;
+  let alarmListener = null;
+  let createdAlarm = null;
   let tabUpdateCalls = 0;
   const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&employerId=456';
   const sourceUrl = 'https://hh.ru/search/vacancy?resume=abc';
@@ -430,6 +433,16 @@ test('background response watchdog leaves active form processing alone', async (
     commands: {
       onCommand: { addListener() {} }
     },
+    alarms: {
+      create(name, config) {
+        createdAlarm = { name, config };
+      },
+      onAlarm: {
+        addListener(fn) {
+          alarmListener = fn;
+        }
+      }
+    },
     tabs: {
       async get(tabId) {
         return { id: tabId, url: responseUrl, status: 'complete' };
@@ -448,8 +461,10 @@ test('background response watchdog leaves active form processing alone', async (
 
   try {
     await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
-    onUpdatedListener(7, { url: responseUrl }, { id: 7, url: responseUrl });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await onUpdatedListener(7, { url: responseUrl }, { id: 7, url: responseUrl });
+    assert.equal(createdAlarm.name, 'hhja-response-navigation-watchdog');
+    assert.equal(localData.responseNavigationWatchdog.tabId, 7);
+    await alarmListener({ name: 'hhja-response-navigation-watchdog' });
 
     assert.equal(tabUpdateCalls, 0);
     assert.equal(localData.autoApplyQueue.active, true);
@@ -571,17 +586,16 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, 'custom employer question prompt: use adjacent experience and draft a relevant case'.length);
   assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: роль со смежными требованиями'.length);
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Relevant profile with adjacent experience and delivery tools/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /250 000 руб\. на руки/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Оформление: предпочтение не выбрано/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Формат работы: предпочтение не выбрано/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /custom employer question prompt/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Вакансия: роль со смежными требованиями/);
-  assert.match(JSON.stringify(groqPayloadLog.details.requestBody), /Какую зарплату ожидаете\?/);
+  assert.equal(groqPayloadLog.details.requestBody, undefined);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Relevant profile with adjacent experience and delivery tools/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /250 000 руб\. на руки/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /custom employer question prompt/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Вакансия: роль со смежными требованиями/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
-  assert.equal(groqResponseLog.details.content, 'Ответ');
-  assert.equal(groqResponseLog.details.responseBody.choices[0].message.content, 'Ответ');
+  assert.equal(groqResponseLog.details.content, undefined);
+  assert.equal(groqResponseLog.details.responseBody, undefined);
   assert.match(groqResponseLog.details.responseHash, /^[0-9a-f]{8}$/);
   assert.equal(groqResponseLog.details.finishReason, 'stop');
   assert.equal(groqResponseLog.details.choiceCount, 1);
@@ -832,7 +846,9 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
   assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.usage.completionTokens, 300);
-  assert.equal(emptyErrorLogs.at(-1).details.responseBody.choices[0].finish_reason, 'length');
+  assert.equal(emptyErrorLogs.at(-1).details.responseBody, undefined);
+  assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].finishReason, 'length');
+  assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].contentLength, 0);
 });
 
 test('background reloads extension on explicit reload message', async () => {
@@ -1073,6 +1089,7 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Java developer parsed from hh resume/);
   assert.equal(localData.resumeParsedText, 'Java developer parsed from hh resume');
+  assert.equal(localData.resumeParsedUrl, 'https://ekaterinburg.hh.ru/resume/abc123');
   assert.equal(localData.resumeGroqBriefText, 'Java developer parsed from hh resume');
   assert.equal(localData.resumeGroqBriefVersion, 'resume-brief-v1');
   assert.ok(localData.resumeGroqBriefSourceHash);
@@ -1202,6 +1219,7 @@ test('Groq prompt rebuilds stale resume brief and keeps original parsed resume u
     resumeUrl: 'https://hh.ru/resume/abc123',
     resumeParsedText: sourceResume,
     resumeParsedAt: new Date().toISOString(),
+    resumeParsedUrl: 'https://hh.ru/resume/abc123',
     resumeCacheTtlHours: 1,
     resumeGroqBriefText: 'stale cached brief that should be replaced',
     resumeGroqBriefSourceHash: '',
@@ -1481,6 +1499,8 @@ test('content script registers one message listener', async () => {
   assert.match(source, /unsafe: isUnsafePage\(\)/);
   assert.match(source, /hh-job-assistant:start-auto-apply/);
   assert.match(source, /page_trigger_start_auto_apply/);
+  assert.match(source, /event\?\.detail\?\.mode === 'dry' \? 'dry' : 'live'/);
+  assert.match(source, /mode === 'live' && !await consumeTrustedAutoStartToken/);
   assert.match(source, /hhjaAutoStart/);
   assert.match(source, /hhjaLimit/);
   assert.match(source, /hhjaGroqModel/);
@@ -1584,7 +1604,7 @@ test('repo script can run popup-equivalent actions in the persistent Chromium pr
   assert.match(js, /chrome\.runtime\.sendMessage/);
   assert.doesNotMatch(js, /chatReports/);
   assert.match(js, /resumeUrlPresent/);
-  assert.match(js, /process\.exit\(0\)/);
+  assert.match(js, /process\.exit\(process\.exitCode \|\| 0\)/);
   assert.doesNotMatch(js, /chrome:\/\/extensions/);
 });
 
@@ -1596,6 +1616,8 @@ test('repo script can start auto apply in a persistent Chromium profile', async 
   assert.match(js, /--user-data-dir/);
   assert.match(js, /--load-extension/);
   assert.match(js, /hhjaAutoStart/);
+  assert.match(js, /hhjaAutoStartToken/);
+  assert.match(js, /autoApplyAutoStartToken/);
   assert.match(js, /HHJA_LIMIT/);
   assert.match(js, /HHJA_MAX_PROCESSED/);
   assert.match(js, /HHJA_CHROMIUM_RUN_MS/);
@@ -1608,16 +1630,13 @@ test('repo script can start auto apply in a persistent Chromium profile', async 
   assert.doesNotMatch(js, /profile-directory/);
 });
 
-test('repo script opens hh auto-start URL for extension auto apply', async () => {
+test('repo script opens hh URL for manual extension auto apply start', async () => {
   const js = await readFile(new URL('scripts/start-extension-auto-apply.mjs', root), 'utf8');
 
-  assert.match(js, /hhjaAutoStart/);
+  assert.doesNotMatch(js, /hhjaAutoStart/);
   assert.doesNotMatch(js, /execute targetTab javascript/);
   assert.match(js, /HHJA_CHROME_PROFILE/);
-  assert.match(js, /HHJA_LIMIT/);
-  assert.match(js, /HHJA_GROQ_MODEL/);
-  assert.match(js, /hhjaLimit/);
-  assert.match(js, /hhjaGroqModel/);
+  assert.match(js, /Alt\+Shift\+A/);
   assert.match(js, /--profile-directory/);
   assert.match(js, /URL must be an hh\.ru vacancy search or response form page/);
 });
@@ -1813,11 +1832,20 @@ test('agent debug log writes only when explicitly enabled', async () => {
     assert.equal(storage.agentDebugLogText, undefined);
 
     storage.agentDebugLogsEnabled = true;
-    await globalThis.HHJobAssistantLog.append('test', 'enabled_append', { value: 2 });
+    await globalThis.HHJobAssistantLog.append('test', 'enabled_append', {
+      value: 2,
+      message: 'Authorization: Bearer gsk_value_token',
+      url: 'https://api.example.test/path?key=gsk_query_token&safe=1',
+      nested: { apiKey: 'gsk_key_token' }
+    });
 
     assert.equal(Array.isArray(storage.agentDebugLog), true);
     assert.equal(storage.agentDebugLog[0].event, 'enabled_append');
     assert.match(storage.agentDebugLogText, /enabled_append/);
+    assert.doesNotMatch(storage.agentDebugLogText, /gsk_value_token|gsk_query_token|gsk_key_token/);
+    assert.match(storage.agentDebugLogText, /\[redacted\]/);
+    assert.doesNotMatch(JSON.stringify(storage.agentDebugLog), /gsk_value_token|gsk_query_token|gsk_key_token/);
+    assert.match(JSON.stringify(storage.agentDebugLog), /\[redacted\]/);
   } finally {
     delete globalThis.chrome;
     delete globalThis.HHJobAssistantLog;
@@ -2058,6 +2086,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeUrl: '',
     resumeParsedText: '',
     resumeParsedAt: '',
+    resumeParsedUrl: '',
     resumeCacheTtlHours: 1,
     expectedSalary: '',
     employmentPreference: [],

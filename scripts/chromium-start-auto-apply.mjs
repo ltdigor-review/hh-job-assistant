@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -18,6 +19,7 @@ const keepOpen = process.env.HHJA_CHROMIUM_KEEP_OPEN === '1';
 const timeoutMs = Number(process.env.HHJA_CHROMIUM_TIMEOUT_MS || 30000);
 const outputPath = process.env.HHJA_OUTPUT || '';
 const browserPath = process.env.HHJA_CHROMIUM_PATH || await findBrowserPath();
+const autoStartToken = randomUUID();
 
 function fail(message) {
   console.error(`Chromium auto-apply launcher failed: ${message}`);
@@ -63,7 +65,7 @@ async function findPlaywrightChromeForTestingPaths() {
   }
 }
 
-function buildAutoStartUrl(value) {
+function buildAutoStartUrl(value, token) {
   const parsed = new URL(value);
   if (parsed.hostname !== 'hh.ru' && !parsed.hostname.endsWith('.hh.ru')) {
     throw new Error('URL must be on hh.ru');
@@ -73,6 +75,7 @@ function buildAutoStartUrl(value) {
   }
 
   parsed.searchParams.set('hhjaAutoStart', 'live');
+  parsed.searchParams.set('hhjaAutoStartToken', token);
   const limit = Math.max(1, Math.min(Number(process.env.HHJA_LIMIT || 1) || 1, 100));
   parsed.searchParams.set('hhjaLimit', String(limit));
   if (process.env.HHJA_MAX_PROCESSED) {
@@ -103,6 +106,12 @@ async function createCdpSession(wsUrl) {
   const socket = await connectWebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
+  const rejectPending = (error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
 
   socket.addEventListener('message', (event) => {
     const data = JSON.parse(event.data);
@@ -115,14 +124,21 @@ async function createCdpSession(wsUrl) {
       resolvePending(data.result);
     }
   });
+  socket.addEventListener('close', () => rejectPending(new Error('Chrome DevTools websocket closed')));
+  socket.addEventListener('error', () => rejectPending(new Error('Chrome DevTools websocket error')));
 
   return {
     send(method, params = {}, options = {}) {
       const id = nextId;
       nextId += 1;
-      socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
       return new Promise((resolvePending, reject) => {
         pending.set(id, { resolve: resolvePending, reject });
+        try {
+          socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
       });
     },
     close() {
@@ -241,6 +257,21 @@ async function readExtensionEvidence(session, sessionId) {
   };
 }
 
+async function setAutoStartToken(session, sessionId, token) {
+  const expiresAt = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+  const expression = `new Promise((resolve) => {
+    chrome.storage.local.set({
+      autoApplyAutoStartToken: ${JSON.stringify(token)},
+      autoApplyAutoStartTokenExpiresAt: ${JSON.stringify(expiresAt)}
+    }, () => resolve(true));
+  })`;
+  await session.send('Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true
+  }, { sessionId });
+}
+
 function waitForExit(child, timeoutMs = 5000) {
   if (child.exitCode != null || child.signalCode != null) {
     return Promise.resolve();
@@ -265,7 +296,7 @@ async function closeBrowser(child) {
 
 try {
   await mkdir(profileDir, { recursive: true });
-  const autoStartUrl = buildAutoStartUrl(requestedUrl);
+  const autoStartUrl = buildAutoStartUrl(requestedUrl, autoStartToken);
   const browser = spawn(browserPath, [
     `--user-data-dir=${profileDir}`,
     `--disable-extensions-except=${repoRoot}`,
@@ -274,7 +305,7 @@ try {
     '--no-first-run',
     '--no-default-browser-check',
     '--window-size=1280,900',
-    autoStartUrl
+    'about:blank'
   ], {
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -301,12 +332,11 @@ try {
   browser.stdout?.on('data', (chunk) => {
     stdout = `${stdout}${chunk.toString('utf8')}`.slice(-4000);
   });
-  browser.once('error', (error) => {
-    throw error;
-  });
   const devToolsUrl = await waitForDevToolsUrl(browser);
   const session = await createCdpSession(devToolsUrl);
   const extensionTarget = await waitForExtensionTarget(session);
+  await setAutoStartToken(session, extensionTarget.sessionId, autoStartToken);
+  await session.send('Target.createTarget', { url: autoStartUrl });
 
   console.log(JSON.stringify({
     ok: true,

@@ -8,8 +8,6 @@ const DEFAULT_PROFILE = 'Profile 1';
 const url = process.argv[2] || DEFAULT_URL;
 const chromePath = process.env.HHJA_CHROME_PATH || DEFAULT_CHROME_PATH;
 const chromeProfile = process.env.HHJA_CHROME_PROFILE || DEFAULT_PROFILE;
-const autoLimit = process.env.HHJA_LIMIT || '';
-const groqModel = process.env.HHJA_GROQ_MODEL || '';
 
 function validateUrl(value) {
   const parsed = new URL(value);
@@ -23,27 +21,14 @@ function validateUrl(value) {
 }
 
 const targetUrl = validateUrl(url);
-function withAutoStartParam(value) {
-  const parsed = new URL(value);
-  parsed.searchParams.set('hhjaAutoStart', 'live');
-  if (autoLimit) {
-    parsed.searchParams.set('hhjaLimit', String(Math.max(1, Math.min(Number(autoLimit) || 20, 100))));
-  }
-  if (groqModel) {
-    parsed.searchParams.set('hhjaGroqModel', groqModel);
-  }
-  return parsed.href;
-}
-
-const autoStartUrl = withAutoStartParam(targetUrl);
 
 try {
-  const child = spawn(chromePath, [`--profile-directory=${chromeProfile}`, autoStartUrl], {
+  const child = spawn(chromePath, [`--profile-directory=${chromeProfile}`, targetUrl], {
     detached: true,
     stdio: 'ignore'
   });
   child.unref();
-  console.log(`Opened HH auto-start URL: ${autoStartUrl}`);
+  console.log(`Opened HH URL: ${targetUrl}. Start auto-apply from the extension popup or Alt+Shift+A.`);
 } catch (error) {
   const message = error.stderr || error.message || String(error);
   console.error(message.trim());

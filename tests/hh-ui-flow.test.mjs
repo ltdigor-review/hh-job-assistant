@@ -37,6 +37,23 @@ async function waitForJson(url, timeoutMs = 10000) {
   throw lastError || new Error(`Timed out waiting for ${url}`);
 }
 
+async function waitForDevToolsPort(userDataDir, timeoutMs = 10000) {
+  const activePortPath = join(userDataDir, 'DevToolsActivePort');
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const text = await readFile(activePortPath, 'utf8');
+      const port = Number(text.split(/\r?\n/)[0]);
+      if (Number.isFinite(port) && port > 0) return port;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw lastError || new Error(`Timed out waiting for ${activePortPath}`);
+}
+
 async function cdpFetch(port, path, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, options);
   if (!response.ok) {
@@ -59,6 +76,12 @@ async function createCdpSession(wsUrl) {
   const socket = await connectWebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
+  const rejectPending = (error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
 
   socket.addEventListener('message', (event) => {
     const data = JSON.parse(event.data);
@@ -71,14 +94,21 @@ async function createCdpSession(wsUrl) {
       resolve(data.result);
     }
   });
+  socket.addEventListener('close', () => rejectPending(new Error('Chrome DevTools websocket closed')));
+  socket.addEventListener('error', () => rejectPending(new Error('Chrome DevTools websocket error')));
 
   return {
     send(method, params = {}) {
       const id = nextId;
       nextId += 1;
-      socket.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
+        try {
+          socket.send(JSON.stringify({ id, method, params }));
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
       });
     },
     close() {
@@ -253,13 +283,12 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
   }
 
   const userDataDir = await mkdtemp(join(tmpdir(), 'hh-job-assistant-chrome-'));
-  const port = 9339;
   const chrome = spawn(browser, [
     '--headless=new',
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
-    `--remote-debugging-port=${port}`,
+    '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
     'about:blank'
   ], {
@@ -268,7 +297,9 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
 
   let target;
   let session;
+  let port = 0;
   try {
+    port = await waitForDevToolsPort(userDataDir);
     await waitForJson(`http://127.0.0.1:${port}/json/version`);
     target = await cdpFetch(port, `/json/new?${encodeURIComponent(`data:text/html;charset=utf-8,${encodeURIComponent(hhBlockedFixture())}`)}`, {
       method: 'PUT'
@@ -303,7 +334,7 @@ test('real browser UI closes blocked hh response modal and continues', { timeout
     assert.ok(states.some((state) => state.currentAction === 'Переход на следующую страницу HH'));
   } finally {
     session?.close();
-    if (target?.id) {
+    if (port && target?.id) {
       await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`).catch(() => {});
     }
     if (!chrome.killed) {
@@ -325,13 +356,12 @@ test('real browser UI completes when hh daily response limit snackbar appears', 
   }
 
   const userDataDir = await mkdtemp(join(tmpdir(), 'hh-job-assistant-chrome-'));
-  const port = 9340;
   const chrome = spawn(browser, [
     '--headless=new',
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
-    `--remote-debugging-port=${port}`,
+    '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
     'about:blank'
   ], {
@@ -340,7 +370,9 @@ test('real browser UI completes when hh daily response limit snackbar appears', 
 
   let target;
   let session;
+  let port = 0;
   try {
+    port = await waitForDevToolsPort(userDataDir);
     await waitForJson(`http://127.0.0.1:${port}/json/version`);
     target = await cdpFetch(port, `/json/new?${encodeURIComponent(`data:text/html;charset=utf-8,${encodeURIComponent(hhDailyLimitFixture())}`)}`, {
       method: 'PUT'
@@ -376,7 +408,7 @@ test('real browser UI completes when hh daily response limit snackbar appears', 
     assert.equal(states.at(-1).lastError, '');
   } finally {
     session?.close();
-    if (target?.id) {
+    if (port && target?.id) {
       await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`).catch(() => {});
     }
     if (!chrome.killed) {

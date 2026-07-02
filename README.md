@@ -84,12 +84,6 @@ rules:
   - DOMAIN-SUFFIX,hh.ru,DIRECT
   - DOMAIN-SUFFIX,hhcdn.ru,DIRECT
 
-  # Российские домены напрямую
-  - RULE-SET,geosite-ru,DIRECT
-
-  # Российские IP напрямую
-  - RULE-SET,geoip-ru,DIRECT,no-resolve
-
   # Российские приложения напрямую
   - RULE-SET,ru-app-list,DIRECT
 
@@ -97,4 +91,4 @@ rules:
   - MATCH,VPN
 ```
 
-`geosite-ru` и `geoip-ru` должны быть объявлены в `rule-providers` вашей основной конфигурации или импортированы из готового шаблона провайдера. Если таких провайдеров нет, оставьте только явные правила для `hh.ru`/`hhcdn.ru` и `ru-app-list`, затем добавьте российские rule-set'ы из выбранного шаблона `mihomo-rule-sets`.
+Если в вашей основной конфигурации уже объявлены `geosite-ru` и `geoip-ru`, добавьте их отдельными правилами перед `ru-app-list`. В коротком примере выше используются только явно объявленные правила.

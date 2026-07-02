@@ -52,6 +52,8 @@ const POST_SUBMIT_SETTLE_MS = 5000;
 const SUBMIT_CONFIRM_TIMEOUT_MS = 15000;
 const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
+const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
+const AUTO_START_TOKEN_EXPIRES_AT_KEY = 'autoApplyAutoStartTokenExpiresAt';
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
 const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
@@ -2170,20 +2172,7 @@ async function applyToVacancy(item, counters) {
     } else {
       const fallback = await fallbackToDirectResponse('no_response_button');
       if (fallback) return fallback;
-      if (item.navigationQueue?.returnToSearch && getItemResponseUrl(item)) {
-        await appendAgentLog('no_response_button_assumed_applied', {
-          vacancyId: item.vacancyId,
-          responseUrl: getItemResponseUrl(item),
-          sourceUrl: item.navigationQueue.sourceUrl || ''
-        });
-        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
-        return;
-      }
-      if (getItemResponseUrl(item)) {
-        await appendAgentLog('no_response_button_with_response_url_assumed_applied', {
-          vacancyId: item.vacancyId,
-          responseUrl: getItemResponseUrl(item)
-        });
+      if (isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })) {
         await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
         return;
       }
@@ -2424,7 +2413,7 @@ async function applyToVacancy(item, counters) {
         selected: selectedChoices.selected,
         labels: selectedChoices.labels.slice(0, 20),
         expectedOptions: selectedChoices.selected === 0 ? formatChoiceOptionSummary(questionControlGroups) : '',
-        rejectedAnswer: selectedChoices.selected === 0 ? truncateForStatus(assistance, 240) : '',
+        rejectedAnswerLength: selectedChoices.selected === 0 ? cleanText(assistance).length : 0,
         retryError: selectedChoices.selected === 0 ? choiceRetryError : ''
       });
       if (selectedChoices.selected === 0) {
@@ -2437,7 +2426,7 @@ async function applyToVacancy(item, counters) {
           selected: selectedChoices.selected,
           labels: selectedChoices.labels.slice(0, 20),
           expectedOptions: formatChoiceOptionSummary(questionControlGroups),
-          rejectedAnswer: truncateForStatus(assistance, 240),
+          rejectedAnswerLength: cleanText(assistance).length,
           retryError: choiceRetryError
         });
       }
@@ -2515,8 +2504,8 @@ async function applyToVacancy(item, counters) {
         url: item.url,
         fields: questionFields.length,
         fieldTargets: questionFields.map((field) => getFieldLogTarget(field)),
-        insertedTexts: questionFields.map((field) => cleanText(getFieldValue(field))),
-        sourceAnswers: answers.slice(0, questionFields.length).map((answer) => cleanText(answer)),
+        insertedTextLengths: questionFields.map((field) => cleanText(getFieldValue(field)).length),
+        sourceAnswerLengths: answers.slice(0, questionFields.length).map((answer) => cleanText(answer).length),
         answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
       });
       await sleep(POST_FILL_SETTLE_MS);
@@ -2586,7 +2575,7 @@ async function applyToVacancy(item, counters) {
         await appendAgentLog('mandatory_cover_letter_fallback_after_bad_text', {
           vacancyId: item.vacancyId,
           reason: sanitizedLetter.reason,
-          rejectedText: truncateForStatus(letter, 240)
+          rejectedTextLength: cleanText(letter).length
         });
         letter = sanitizedLetter.text;
       }
@@ -2603,8 +2592,6 @@ async function applyToVacancy(item, counters) {
         title: item.title,
         url: item.url,
         field: getFieldLogTarget(coverLetterTextarea),
-        insertedText: cleanText(getFieldValue(coverLetterTextarea)),
-        sourceText: cleanText(letter),
         fieldLength: cleanText(getFieldValue(coverLetterTextarea)).length,
         letterLength: cleanText(letter).length
       });
@@ -2766,8 +2753,6 @@ async function applyToVacancy(item, counters) {
       title: item.title,
       url: item.url,
       field: getFieldLogTarget(textarea),
-      insertedText: cleanText(getFieldValue(textarea)),
-      sourceText: cleanText(letter),
       fieldLength: cleanText(getFieldValue(textarea)).length,
       letterLength: cleanText(letter).length
     });
@@ -3427,7 +3412,9 @@ function consumeAutoStartParam() {
     const limit = url.searchParams.get('hhjaLimit');
     const maxProcessed = url.searchParams.get('hhjaMaxProcessed');
     const groqModel = url.searchParams.get('hhjaGroqModel') || '';
+    const token = url.searchParams.get('hhjaAutoStartToken') || '';
     url.searchParams.delete('hhjaAutoStart');
+    url.searchParams.delete('hhjaAutoStartToken');
     url.searchParams.delete('hhjaLimit');
     url.searchParams.delete('hhjaMaxProcessed');
     url.searchParams.delete('hhjaGroqModel');
@@ -3436,11 +3423,32 @@ function consumeAutoStartParam() {
       mode,
       limit: limit ? Number(limit) : null,
       maxProcessed: maxProcessed ? Number(maxProcessed) : null,
-      groqModel
+      groqModel,
+      token
     };
   } catch {
     return null;
   }
+}
+
+async function consumeTrustedAutoStartToken(token) {
+  if (!token) return false;
+  const stored = await storageGet([AUTO_START_TOKEN_KEY, AUTO_START_TOKEN_EXPIRES_AT_KEY], { optional: true });
+  const expectedToken = stored?.[AUTO_START_TOKEN_KEY] || '';
+  const expiresAtMs = Date.parse(stored?.[AUTO_START_TOKEN_EXPIRES_AT_KEY] || '');
+  if (!expectedToken || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    await storageSet({
+      [AUTO_START_TOKEN_KEY]: '',
+      [AUTO_START_TOKEN_EXPIRES_AT_KEY]: ''
+    }, { optional: true });
+    return false;
+  }
+  if (expectedToken !== token) return false;
+  await storageSet({
+    [AUTO_START_TOKEN_KEY]: '',
+    [AUTO_START_TOKEN_EXPIRES_AT_KEY]: ''
+  }, { optional: true });
+  return true;
 }
 
 function consumeReloadExtensionParam() {
@@ -3508,9 +3516,12 @@ async function maybeStartFromUrlParam() {
   if (!trigger) {
     return false;
   }
-  const { mode, limit, maxProcessed, groqModel } = trigger;
+  const { mode, limit, maxProcessed, groqModel, token } = trigger;
 
   try {
+    if (mode === 'live' && !await consumeTrustedAutoStartToken(token)) {
+      throw new Error('Live auto-start URL is disabled without an extension-issued token.');
+    }
     if (groqModel) {
       await storageSet({ groqModel });
     }
@@ -3568,10 +3579,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async () => {
+globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async (event) => {
   try {
-    await appendAgentLog('page_trigger_start_auto_apply', { url: location.href });
-    await startRun('live');
+    const mode = event?.detail?.mode === 'dry' ? 'dry' : 'live';
+    const token = event?.detail?.token || '';
+    if (mode === 'live' && !await consumeTrustedAutoStartToken(token)) {
+      throw new Error('Live auto-start DOM event is disabled without an extension-issued token.');
+    }
+    await appendAgentLog('page_trigger_start_auto_apply', { mode, url: location.href });
+    await startRun(mode);
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });

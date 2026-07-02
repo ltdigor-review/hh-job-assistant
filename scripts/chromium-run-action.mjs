@@ -23,6 +23,11 @@ function fail(message) {
   process.exit(1);
 }
 
+function markFailure(message) {
+  console.error(`Chromium action runner failed: ${message}`);
+  process.exitCode = 1;
+}
+
 async function findBrowserPath() {
   const candidates = [
     ...await findPlaywrightChromeForTestingPaths(),
@@ -78,6 +83,12 @@ async function createCdpSession(wsUrl) {
   const socket = await connectWebSocket(wsUrl);
   let nextId = 1;
   const pending = new Map();
+  const rejectPending = (error) => {
+    for (const { reject } of pending.values()) {
+      reject(error);
+    }
+    pending.clear();
+  };
 
   socket.addEventListener('message', (event) => {
     const data = JSON.parse(event.data);
@@ -90,14 +101,21 @@ async function createCdpSession(wsUrl) {
       resolvePending(data.result);
     }
   });
+  socket.addEventListener('close', () => rejectPending(new Error('Chrome DevTools websocket closed')));
+  socket.addEventListener('error', () => rejectPending(new Error('Chrome DevTools websocket error')));
 
   return {
     send(method, params = {}, options = {}) {
       const id = nextId;
       nextId += 1;
-      socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
       return new Promise((resolvePending, reject) => {
         pending.set(id, { resolve: resolvePending, reject });
+        try {
+          socket.send(JSON.stringify({ id, method, params, sessionId: options.sessionId }));
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
       });
     },
     close() {
@@ -154,7 +172,15 @@ async function waitForPageTarget(session) {
   const expected = new URL(startUrl);
   while (Date.now() - started < timeoutMs) {
     const { targetInfos = [] } = await session.send('Target.getTargets');
-    const hhPages = targetInfos.filter((target) => target.type === 'page' && target.url.startsWith('https://hh.ru/'));
+    const hhPages = targetInfos.filter((target) => {
+      if (target.type !== 'page') return false;
+      try {
+        const url = new URL(target.url);
+        return url.protocol === 'https:' && (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru'));
+      } catch {
+        return false;
+      }
+    });
     const page = hhPages.find((target) => {
       try {
         const url = new URL(target.url);
@@ -338,11 +364,14 @@ try {
     await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
   }
   console.log(JSON.stringify(report, null, 2));
+  if (!report.ok) {
+    process.exitCode = 1;
+  }
 } catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+  markFailure(error instanceof Error ? error.message : String(error));
 } finally {
   session?.close();
   await closeBrowser(browser);
 }
 
-process.exit(0);
+process.exit(process.exitCode || 0);
