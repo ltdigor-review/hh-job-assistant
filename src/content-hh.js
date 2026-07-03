@@ -621,6 +621,14 @@ function isAlreadyAppliedPage(root = document) {
   );
 }
 
+function hasNewResponseSuccessText(beforeText, root = document) {
+  const before = cleanText(beforeText);
+  const current = cleanText(textOf(root) || textOf(root?.body) || textOf(document.body));
+  if (!current || current === before) return false;
+  const successPattern = /отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен/i;
+  return successPattern.test(current) && !successPattern.test(before);
+}
+
 function hasActiveResponseControl(root = document, item = null) {
   if (root === item?.card && !item?.responseFormOpen && item?.responseButton && !isDisabled(item.responseButton)) return true;
 
@@ -1324,6 +1332,22 @@ async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = 
     title: item.title,
     url: item.url,
     status: 'applied_already_confirmed',
+    coverLetterUsed,
+    testDetected,
+    error: ''
+  });
+  closeDialog();
+}
+
+async function appendDirectClickResponse(item, counters, { status = 'applied_direct_click', coverLetterUsed = false, testDetected = item.testDetected } = {}) {
+  counters.applied += 1;
+  await clearPendingSubmit();
+  await appendResult({
+    index: item.index,
+    vacancyId: item.vacancyId,
+    title: item.title,
+    url: item.url,
+    status,
     coverLetterUsed,
     testDetected,
     error: ''
@@ -2188,6 +2212,7 @@ async function applyToVacancy(item, counters) {
 
   let root;
   let beforeUrl = location.href;
+  let beforeText = textOf(document.body);
   if (item.responseFormOpen) {
     root = document;
   } else {
@@ -2196,7 +2221,7 @@ async function applyToVacancy(item, counters) {
       ...counters,
       currentAction: `Откликаюсь на: ${item.title || item.vacancyId || 'вакансия'}`
     });
-    const beforeText = textOf(document.body);
+    beforeText = textOf(document.body);
     beforeUrl = location.href;
     if (item.navigationQueue) {
       await saveQueue(item.navigationQueue);
@@ -2231,6 +2256,11 @@ async function applyToVacancy(item, counters) {
   const dailyLimitReason = detectHhDailyResponseLimit(root) || detectHhDailyResponseLimit(document);
   if (dailyLimitReason) {
     return completeHhDailyResponseLimit(item, counters, dailyLimitReason);
+  }
+
+  if (!item.responseFormOpen && root === document && !isResponseFormPage() && hasNewResponseSuccessText(beforeText, document)) {
+    await appendDirectClickResponse(item, counters, { testDetected: item.testDetected });
+    return;
   }
 
   if (isUnsafePage()) {
@@ -2675,17 +2705,7 @@ async function applyToVacancy(item, counters) {
       await appendSkippedResponse(item, counters, 'skipped_submit_not_found', 'Пропущено: форма отклика HH не открылась.');
       return;
     }
-    counters.applied += 1;
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
-      status: 'applied_direct_click',
-      coverLetterUsed: false,
-      testDetected: false,
-      error: ''
-    });
+    await appendDirectClickResponse(item, counters, { testDetected: false });
     return;
   }
 

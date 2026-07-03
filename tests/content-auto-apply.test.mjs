@@ -737,6 +737,24 @@ test('auto apply does not count current card as applied while response button is
   assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
 });
 
+test('auto apply does not click detail response twice when hh confirms direct submit', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseClickOpensDialog: false,
+    bodyText: 'Java Developer\nОткликнуться',
+    bodyTextAfterResponseClick: 'Java Developer\nОткликнуться\nОтклик отправлен'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.length, 1);
+  assert.equal(result.appended.at(-1).status, 'applied_direct_click');
+  assert.equal(result.navigateUrl, '');
+});
+
 test('auto apply opens direct response url instead of skipping when search click does not open form', async () => {
   const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
   const result = await runContentAutoApply({
