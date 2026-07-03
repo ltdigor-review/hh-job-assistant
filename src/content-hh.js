@@ -807,17 +807,14 @@ function getQuestionAnswerInvalidReason(answer, field) {
 }
 
 async function normalizeQuestionAnswers(answers, questionFields) {
-  const { expectedSalary = '', resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
-    ['expectedSalary', 'resumeText', 'resumeParsedText', 'resumeCache'],
+  const { resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
+    ['resumeText', 'resumeParsedText', 'resumeCache'],
     { optional: true }
   );
   const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
   const contact = extractContactFromText(resumeSource);
   return answers.map((answer, index) => {
     const field = questionFields[index];
-    if (isSalaryQuestion(field) && String(expectedSalary || '').trim()) {
-      return String(expectedSalary || '').trim();
-    }
     if (isContactQuestion(field) && contact) {
       return contact;
     }
@@ -827,16 +824,13 @@ async function normalizeQuestionAnswers(answers, questionFields) {
 
 async function buildDeterministicQuestionAssistance(questionFields) {
   if (questionFields.length === 0) return '';
-  const { expectedSalary = '', resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
-    ['expectedSalary', 'resumeText', 'resumeParsedText', 'resumeCache'],
+  const { resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
+    ['resumeText', 'resumeParsedText', 'resumeCache'],
     { optional: true }
   );
   const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
   const contact = extractContactFromText(resumeSource);
   const answers = questionFields.map((field, index) => {
-    if (isSalaryQuestion(field) && String(expectedSalary || '').trim()) {
-      return `Text question ${index + 1}: ${String(expectedSalary || '').trim()}`;
-    }
     if (isContactQuestion(field) && contact) {
       return `Text question ${index + 1}: ${contact}`;
     }
@@ -1757,7 +1751,7 @@ async function sanitizeCoverLetterDraft(value, fallbackFactory = getFallbackCove
 async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
   const expectedSalary = await getExpectedSalary();
   const preferences = await getQuestionPreferences();
-  const textAnswer = expectedSalary || 'Готов обсудить детали и выполнить требования вакансии.';
+  const genericTextAnswer = 'Готов обсудить детали и выполнить требования вакансии.';
   const lines = [];
   questionControlGroups.forEach((group, index) => {
     const preferredOptions = getPreferredChoiceOptions(group, preferences);
@@ -1774,10 +1768,11 @@ async function getFallbackQuestionAssistance(questionFields, questionControlGrou
       lines.push(`Choice group ${index + 1}: ${labels.join('; ')}`);
     }
   });
-  questionFields.forEach((_, index) => {
+  questionFields.forEach((field, index) => {
+    const textAnswer = isSalaryQuestion(field) && expectedSalary ? expectedSalary : genericTextAnswer;
     lines.push(`Text question ${index + 1}: ${textAnswer}`);
   });
-  return lines.join('\n') || textAnswer;
+  return lines.join('\n') || genericTextAnswer;
 }
 
 async function buildNumberedCoverLetterAnswers(questionContext) {

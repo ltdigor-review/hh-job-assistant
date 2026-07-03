@@ -306,12 +306,67 @@ test('background initializes defaults and registers required listeners', async (
   assert.match(localData.coverPrompt, /Не пересказывай резюме или вакансию/);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
   assert.match(localData.employerQuestionPrompt, /близкого опыта/);
+  assert.match(localData.employerQuestionPrompt, /языке вопроса/);
+  assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
+  assert.match(localData.employerQuestionPrompt, /только короткое значение/);
   assert.deepEqual(localData.employmentPreference, []);
   assert.deepEqual(localData.workFormatPreference, []);
   assert.equal(localData.autoApplyStopRequested, false);
   assert.equal(localData.autoApplyStopRequestedAt, '');
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
+});
+
+test('background migrates old default employer question prompt', async () => {
+  const oldEmployerQuestionPrompt = 'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.';
+  const localData = {
+    dailyLimit: 100,
+    delayMinMs: 4000,
+    delayMaxMs: 8000,
+    coverPrompt: 'custom cover prompt',
+    employerQuestionPrompt: oldEmployerQuestionPrompt,
+    agentDebugLogsEnabled: true
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} }
+    },
+    commands: {
+      onCommand: { addListener() {} }
+    },
+    tabs: {
+      async get() {
+        return { status: 'complete' };
+      }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+
+  assert.notEqual(localData.employerQuestionPrompt, oldEmployerQuestionPrompt);
+  assert.match(localData.employerQuestionPrompt, /языке вопроса/);
+  assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
+  assert.match(localData.employerQuestionPrompt, /только короткое значение/);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -569,8 +624,11 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(systemContent, /custom employer question prompt/);
   assert.match(systemContent, /adjacent experience/);
   assert.match(systemContent, /draft a relevant case/);
-  assert.match(systemContent, /avoid generic lists of learning methods\/tools/);
-  assert.match(systemContent, /Avoid first-person pronouns/);
+  assert.match(systemContent, /same language as each question/);
+  assert.match(systemContent, /city\/location, salary, years, team size, contact/);
+  assert.match(systemContent, /return only the value with no pronoun, verb, prefix, or full sentence/);
+  assert.match(systemContent, /write in first person/);
+  assert.match(systemContent, /Avoid generic lists of learning methods\/tools/);
   assert.match(systemContent, /exact option label/);
   assert.doesNotMatch(systemContent, /Do not invent facts/);
   assert.match(systemContent, /Do not end text drafts with a period/);
@@ -692,6 +750,12 @@ test('default employer question prompt tells Groq to synthesize case from adjace
   assert.match(systemContent, /не пиши, что опыта нет/);
   assert.match(systemContent, /придумай уверенный релевантный кейс/);
   assert.match(systemContent, /близкого опыта/);
+  assert.match(systemContent, /языке вопроса/);
+  assert.match(systemContent, /пиши от первого лица/);
+  assert.match(systemContent, /только короткое значение/);
+  assert.match(systemContent, /same language as each question/);
+  assert.match(systemContent, /return only the value/);
+  assert.match(systemContent, /write in first person/);
   assert.doesNotMatch(systemContent, /QA|Selenium|Playwright|игр|игров/i);
   assert.match(systemContent, /Text question N: <draft>/);
   assert.match(userContent, /adjacent tools/);

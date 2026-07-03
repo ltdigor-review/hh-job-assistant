@@ -10,6 +10,7 @@
 - Multiple agents may work in the same branch at the same time and conflict with each other; this is normal.
 - `spark`/subagent delegation is pre-authorized for this repository. When a narrow, low-risk, well-scoped task is useful for `spark`, start it without asking the user for delegation permission. Ask only when the delegated action itself needs approval under higher-priority system/developer/tool policy or could cause meaningful side effects.
 - Increment the project version for code or behavior changes before final verification. Use the repository version sync tooling when available.
+- After making code or behavior changes, if the relevant/full test suite passes and no blocker remains, commit and push the changes to the repository primary branch by default.
 - This repository is public. Never commit credentials, API keys, cookies, tokens, local browser profiles, or other secrets. Keep secrets in local environment/profile storage only.
 - Production/prod-like hh.ru browser checks must use an authorized hh.ru profile. Prefer `.hhja-chromium-profile`; if a fresh profile is opened, wait for the user to sign in before treating the check as valid.
 - Analyze extension logs from local Chrome/Chromium profile storage, not downloads. Use `npm run inspect:logs -- --storage-dir <Local Extension Settings path>` or inspect `chrome.storage.local` keys `agentDebugLogFile`, `agentDebugLogText`, `agentDebugLog`, `runState`, and `runResults`.

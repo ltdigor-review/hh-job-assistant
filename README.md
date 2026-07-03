@@ -34,6 +34,47 @@ HH Job Assistant - Chrome-расширение для кандидатов, ко
 7. Войдите в hh.ru в том же профиле Chrome.
 8. Откройте страницу поиска вакансий hh.ru и запустите нужное действие из расширения.
 
+## Как снять логи для разбора бага
+
+1. В настройках расширения включите диагностические логи.
+2. Повторите баг.
+3. Закройте Chrome, чтобы хранилище расширения точно записалось на диск.
+4. Заархивируйте папку хранилища расширения и отправьте архив разработчику.
+
+Расширение хранит логи в профиле Chrome, в папке `Local Extension Settings/ohcopjcjekbfmlplembcbjocilnginmj`.
+
+Команда для Windows PowerShell, если используется профиль Chrome `Default`:
+
+```powershell
+Compress-Archive -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Local Extension Settings\ohcopjcjekbfmlplembcbjocilnginmj" -DestinationPath "$env:USERPROFILE\Desktop\hhja-extension-log.zip" -Force
+```
+
+Команда для Windows PowerShell, если используется профиль Chrome `Profile 1`:
+
+```powershell
+Compress-Archive -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Profile 1\Local Extension Settings\ohcopjcjekbfmlplembcbjocilnginmj" -DestinationPath "$env:USERPROFILE\Desktop\hhja-extension-log.zip" -Force
+```
+
+После выполнения команды архив будет лежать на рабочем столе:
+
+```text
+hhja-extension-log.zip
+```
+
+Если неизвестно, какой профиль используется, откройте `chrome://version` и посмотрите строку `Profile Path`. К пути из `Profile Path` нужно добавить:
+
+```text
+\Local Extension Settings\ohcopjcjekbfmlplembcbjocilnginmj
+```
+
+Команда для macOS, если используется профиль Chrome `Profile 1`:
+
+```bash
+zip -r "$HOME/Desktop/hhja-extension-log.zip" "$HOME/Library/Application Support/Google/Chrome/Profile 1/Local Extension Settings/ohcopjcjekbfmlplembcbjocilnginmj"
+```
+
+Для локального разбора архива используйте встроенный инструмент разбора логов из репозитория.
+
 ## Если Groq и hh.ru конфликтуют с VPN
 
 Если Groq не работает без VPN, а hh.ru не работает с VPN, настройте раздельное туннелирование: Groq пускайте через VPN, hh.ru и российские домены - напрямую.

@@ -657,14 +657,14 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
     await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#queued-${pageIndex}-${crypto.randomUUID()}`);
     const started = Date.now();
     while (
-      (textarea.value !== expectedSalary ||
+      (textarea.value !== 'Готов обсудить детали и выполнить требования вакансии.' ||
         submitClicks < pageIndex + 1 ||
         localStore.autoApplyQueue.index < pageIndex + 1) &&
       Date.now() - started < 3000
     ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(textarea.value, expectedSalary);
+    assert.equal(textarea.value, 'Готов обсудить детали и выполнить требования вакансии.');
     assert.equal(submitClicks, pageIndex + 1);
     assert.equal(localStore.autoApplyQueue.index, pageIndex + 1);
   }
@@ -1547,7 +1547,7 @@ test('auto apply does not require contact for messenger experience question', as
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply fills salary and messenger fields from settings when Groq returns experience text', async () => {
+test('auto apply asks Groq for salary and messenger fields when salary setting exists', async () => {
   const fullFormText = [
     'Ответьте на вопросы',
     'Был ли у Вас опыт реализации IT проектов в банках или в финтехе?',
@@ -1582,7 +1582,7 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
     groqResponse: {
       ok: true,
       text: [
-        'Text question 1: Руководил 2 кросс-функциональными командами (15 инженеров суммарно) в Альфа-Банке.',
+        'Text question 1: 650000 gross',
         'Text question 2: Опыт управления ИТ-проектами включает координацию процесса декомпозиции монолитного ДБО.'
       ].join('\n')
     }
@@ -1591,8 +1591,47 @@ test('auto apply fills salary and messenger fields from settings when Groq retur
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.submitClicks, 1);
-  assert.deepEqual(result.textareaValues, ['600000', 't.me/example_candidate']);
-  assert.equal(result.groqRequests.length, 0);
+  assert.deepEqual(result.textareaValues, ['650000 gross', 't.me/example_candidate']);
+  assert.equal(result.groqRequests.length, 1);
+  assert.match(result.groqRequests.at(-1).extraText, /зарплатные ожидания/);
+  assert.match(result.groqRequests.at(-1).extraText, /ник для связи/);
+});
+
+test('auto apply does not paste expected salary into non-salary employer questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Ответьте на вопросы',
+      'Был ли у Вас опыт управления командой автоматизации?',
+      'Писать тут',
+      'Опишите опыт построения процессов качества.',
+      'Писать тут'
+    ].join('\n'),
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    questionFieldLabels: [
+      'Был ли у Вас опыт управления командой автоматизации?',
+      'Опишите опыт построения процессов качества.'
+    ],
+    expectedSalary: '350000',
+    groqResponse: {
+      ok: true,
+      text: [
+        'Text question 1: Да, руководил командой автоматизации, распределял задачи, ревьюил тестовую архитектуру и синхронизировал качество релизов с разработкой.',
+        'Text question 2: Выстраивал регрессионные контуры, CI-проверки и прозрачную приоритизацию дефектов для ускорения стабильных релизов.'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.groqRequests.length, 1);
+  assert.deepEqual(result.textareaValues, [
+    'Да, руководил командой автоматизации, распределял задачи, ревьюил тестовую архитектуру и синхронизировал качество релизов с разработкой.',
+    'Выстраивал регрессионные контуры, CI-проверки и прозрачную приоритизацию дефектов для ускорения стабильных релизов.'
+  ]);
+  assert.doesNotMatch(result.textareaValues.join('\n'), /350000/);
 });
 
 test('auto apply fills mixed checkbox radio and open employer questions', async () => {
@@ -2232,12 +2271,13 @@ test('queued response form processed cap completes without returning to search',
   assert.equal(result.states.at(-1).state, 'complete');
 });
 
-test('auto apply uses expected salary for required question when Groq key is missing', async () => {
+test('auto apply uses expected salary for salary question when Groq key is missing', async () => {
   const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
+    dialogText: 'Укажите зарплатные ожидания',
     hasTextarea: true,
     startOnResponseForm: true,
     hasQuestionField: true,
+    questionFieldLabel: 'Укажите зарплатные ожидания',
     expectedSalary: '250 000 руб. на руки'
   });
 
@@ -2249,13 +2289,14 @@ test('auto apply uses expected salary for required question when Groq key is mis
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply fills question and mandatory cover letter without Groq key', async () => {
+test('auto apply uses generic non-salary question fallback without Groq key', async () => {
   const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
+    dialogText: 'Опишите опыт управления тестированием',
     hasTextarea: true,
     startOnResponseForm: true,
     hasQuestionField: true,
     hasCoverLetterField: true,
+    questionFieldLabel: 'Опишите опыт управления тестированием',
     expectedSalary: '250 000 руб. на руки'
   });
 
@@ -2263,7 +2304,7 @@ test('auto apply fills question and mandatory cover letter without Groq key', as
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, '250 000 руб. на руки');
+  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
   assert.match(result.coverTextareaValue, /Здравствуйте!/);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);

@@ -8,6 +8,9 @@ const OLD_DEFAULT_COVER_PROMPTS = new Set([
   'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
   'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.'
 ]);
+const OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS = new Set([
+  'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.'
+]);
 const LEGACY_DEFAULT_DELAYS = [
   [8000, 15000],
   [1500, 3000]
@@ -194,6 +197,10 @@ async function ensureDefaults() {
     patch.coverPrompt = DEFAULTS.coverPrompt;
   }
 
+  if (OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS.has(current.employerQuestionPrompt)) {
+    patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
+  }
+
   if (LEGACY_DEFAULT_DELAYS.some(([min, max]) => current.delayMinMs === min && current.delayMaxMs === max)) {
     patch.delayMinMs = DEFAULTS.delayMinMs;
     patch.delayMaxMs = DEFAULTS.delayMaxMs;
@@ -326,7 +333,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, employmentPrefere
         content: [
           employerQuestionPrompt || DEFAULTS.employerQuestionPrompt,
           '',
-          'Output contract: use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question; avoid generic lists of learning methods/tools unless the question explicitly asks for them. Avoid first-person pronouns. Do not end text drafts with a period.'
+          'Output contract: use the same language as each question. Use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question. Keep open text concise: for city/location, salary, years, team size, contact, or similar factual fields, return only the value with no pronoun, verb, prefix, or full sentence. For narrative/experience answers that need a sentence, write in first person. Avoid generic lists of learning methods/tools unless the question explicitly asks for them. Do not end text drafts with a period.'
         ].join('\n')
       },
       {
