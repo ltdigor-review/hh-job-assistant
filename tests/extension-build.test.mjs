@@ -633,7 +633,9 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.doesNotMatch(systemContent, /Do not invent facts/);
   assert.match(systemContent, /Do not end text drafts with a period/);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
+  const groqTestRequestLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_request');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
+  const groqTestResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_response');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
   assert.equal(groqPayloadLog.details.model, 'test-model');
   assert.deepEqual(groqPayloadLog.details.messageLengths, requestBody.messages.map((message) => ({
@@ -651,6 +653,12 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Вакансия: роль со смежными требованиями/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
+  assert.equal(groqTestRequestLog.details.task, 'test_assist');
+  assert.equal(groqTestRequestLog.details.requestBody.model, 'test-model');
+  assert.deepEqual(groqTestRequestLog.details.requestBody.messages, requestBody.messages);
+  assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Relevant profile with adjacent experience and delivery tools/);
+  assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Какую зарплату ожидаете\?/);
+  assert.doesNotMatch(JSON.stringify(groqTestRequestLog.details), /gsk_test/);
   assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
   assert.equal(groqResponseLog.details.content, undefined);
   assert.equal(groqResponseLog.details.responseBody, undefined);
@@ -664,6 +672,9 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     totalTokens: 1297
   });
   assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|rawResponse|responsePreview/);
+  assert.equal(groqTestResponseLog.details.content, 'Ответ');
+  assert.equal(groqTestResponseLog.details.task, 'test_assist');
+  assert.doesNotMatch(JSON.stringify(groqTestResponseLog.details), /gsk_test/);
 });
 
 test('default employer question prompt tells Groq to synthesize case from adjacent experience', async () => {

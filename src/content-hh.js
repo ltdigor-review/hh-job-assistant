@@ -1032,6 +1032,44 @@ function buildChoiceRetryContext(questionControlGroups) {
   ].join('\n').slice(0, QUESTION_CONTEXT_GROQ_MAX_CHARS);
 }
 
+function summarizeEmployerQuestionInputs(questionFields, questionControlGroups) {
+  return {
+    textQuestions: questionFields.map((field, index) => ({
+      index: index + 1,
+      question: cleanText(field.__hhjaQuestionText || getMeaningfulQuestionText(field) || getFieldMarker(field) || 'question text not found'),
+      target: getFieldLogTarget(field)
+    })),
+    choiceQuestions: questionControlGroups.map((group, index) => ({
+      index: index + 1,
+      type: group.type,
+      question: cleanText(group.question || group.key || 'question text not found'),
+      options: group.options.map((option, optionIndex) => ({
+        index: optionIndex + 1,
+        label: option.label
+      }))
+    }))
+  };
+}
+
+function buildQuestionAnswerAudit(questionFields, questionControlGroups, selectedChoices = { labels: [] }) {
+  const selectedLabels = new Set((selectedChoices?.labels || []).map((label) => cleanText(label)));
+  return {
+    textAnswers: questionFields.map((field, index) => ({
+      index: index + 1,
+      question: cleanText(field.__hhjaQuestionText || getMeaningfulQuestionText(field) || getFieldMarker(field) || 'question text not found'),
+      answer: cleanText(getFieldValue(field))
+    })),
+    choiceAnswers: questionControlGroups.map((group, index) => ({
+      index: index + 1,
+      type: group.type,
+      question: cleanText(group.question || group.key || 'question text not found'),
+      selectedOptions: group.options
+        .filter((option) => option.control?.checked || selectedLabels.has(cleanText(option.label)))
+        .map((option) => option.label)
+    }))
+  };
+}
+
 const SUBMIT_ACTION_PATTERN = /отправить|откликнуться|продолжить|сгенерировать\s+резюме/i;
 
 function findSubmitButton(root = getDialogRoot()) {
@@ -2302,6 +2340,7 @@ async function applyToVacancy(item, counters) {
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
+    const questionAudit = summarizeEmployerQuestionInputs(questionFields, questionControlGroups);
     const deterministicAssistance = await buildDeterministicQuestionAssistance(questionFields);
     let coverLetterUsed = false;
     if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
@@ -2336,6 +2375,14 @@ async function applyToVacancy(item, counters) {
         choiceGroups: questionControlGroups.length,
         contextLength: questionContext.length,
         deterministicTextFields: deterministicAssistance ? questionFields.length : 0
+      });
+      await appendAgentLog('question_test_detected', {
+        vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
+        questions: questionAudit,
+        questionContext,
+        deterministicAssistance: deterministicAssistance || ''
       });
       if (deterministicAssistance && questionControlGroups.length === 0) {
         assistance = deterministicAssistance;
@@ -2380,10 +2427,10 @@ async function applyToVacancy(item, counters) {
 
     if (await stopIfRequested(counters)) return;
 
+    let selectedChoices = { selected: 0, labels: [] };
     if (questionControlGroups.length > 0) {
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю ответы на вопросы работодателя' });
       setBusyCursor(true);
-      let selectedChoices = { selected: 0, labels: [] };
       let choiceRetryError = '';
       try {
         selectedChoices = fillQuestionControls(questionControlGroups, assistance);
@@ -2560,6 +2607,14 @@ async function applyToVacancy(item, counters) {
         return;
       }
     }
+
+    await appendAgentLog('question_test_answers_applied', {
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      assistance,
+      answers: buildQuestionAnswerAudit(questionFields, questionControlGroups, selectedChoices)
+    });
 
     if (coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea))) {
       let letter;

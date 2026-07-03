@@ -1192,6 +1192,10 @@ test('auto apply fills choice and text questions on open response form before su
       { type: 'checkbox', name: 'task_302888680', label: 'да', value: '302888681' },
       { type: 'checkbox', name: 'task_302888680', label: 'нет', value: '302888682' }
     ],
+    initialLocalStore: {
+      agentDebugLogsEnabled: true,
+      agentDebugLog: []
+    },
     groqResponse: {
       ok: true,
       text: 'Choice group 1: нет\nText question 1: Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.'
@@ -1207,6 +1211,14 @@ test('auto apply fills choice and text questions on open response form before su
     result.textareaValue,
     'Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.'
   );
+  const questionDetectedLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'question_test_detected');
+  const answersAppliedLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'question_test_answers_applied');
+  assert.equal(questionDetectedLog.details.questions.textQuestions[0].question, 'Если ответ да, опишите проект');
+  assert.equal(questionDetectedLog.details.questions.choiceQuestions[0].options[1].label, 'нет');
+  assert.match(questionDetectedLog.details.questionContext, /Text question 1: Если ответ да, опишите проект/);
+  assert.match(answersAppliedLog.details.assistance, /Choice group 1: нет/);
+  assert.equal(answersAppliedLog.details.answers.textAnswers[0].answer, 'Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.');
+  assert.deepEqual(answersAppliedLog.details.answers.choiceAnswers[0].selectedOptions, ['нет']);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 

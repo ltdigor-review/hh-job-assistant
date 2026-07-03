@@ -723,6 +723,19 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     temperature: task === 'test_assist' ? 0.2 : 0.35,
     max_tokens: getMaxTokensForTask(task)
   };
+  if (task === 'test_assist') {
+    await appendAgentLog('groq_test_assist_request', {
+      task,
+      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+      method: 'POST',
+      requestBody: {
+        model: requestBody.model,
+        messages: requestBody.messages,
+        temperature: requestBody.temperature,
+        max_tokens: requestBody.max_tokens
+      }
+    });
+  }
   await appendAgentLog('groq_request_payload', {
     task,
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
@@ -851,6 +864,16 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
       usage: normalizeUsage(data?.usage),
       attempt
     });
+    if (task === 'test_assist') {
+      await appendAgentLog('groq_test_assist_response', {
+        task,
+        content,
+        finishReason,
+        model: data?.model || '',
+        usage: normalizeUsage(data?.usage),
+        attempt
+      });
+    }
     await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage: normalizeUsage(data?.usage), attempt });
     return content;
   }
