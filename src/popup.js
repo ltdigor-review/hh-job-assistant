@@ -255,7 +255,8 @@ async function runContentAction(type, label) {
   lastRunState = {
     ...lastRunState,
     state: optimisticState,
-    currentAction: label
+    currentAction: label,
+    lastError: ''
   };
   renderView();
   const response = await sendToActiveTab(type);

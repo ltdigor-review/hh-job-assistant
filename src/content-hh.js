@@ -3456,6 +3456,16 @@ async function startRun(mode, limitOverride = null, options = {}) {
     autoApplySearchQueue: { active: false },
     autoApplyPendingSubmit: null
   });
+  await setRunState({
+    state: 'scanning',
+    found: 0,
+    processed: 0,
+    applied: 0,
+    skipped: 0,
+    errors: 0,
+    currentAction: 'Проверяю страницу HH',
+    lastError: ''
+  });
   await appendAgentLog('start_run', {
     mode,
     limit,

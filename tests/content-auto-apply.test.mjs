@@ -825,6 +825,33 @@ test('auto apply requires hh authorization before scanning vacancies', async () 
   assert.equal(result.states.at(-1).state, 'error');
 });
 
+test('auto apply clears stale auth error before starting an authorized run', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию',
+    hasTextarea: false,
+    initialLocalStore: {
+      runState: {
+        state: 'error',
+        lastError: 'Требуется авторизация HH. Войдите на hh.ru перед использованием HH Job Assistant.'
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.deepEqual(result.states[0], {
+    state: 'scanning',
+    found: 0,
+    processed: 0,
+    applied: 0,
+    skipped: 0,
+    errors: 0,
+    currentAction: 'Проверяю страницу HH',
+    lastError: ''
+  });
+  assert.equal(result.states.some((state) => /Требуется авторизация HH/.test(state.lastError || '')), false);
+  assert.equal(result.states.at(-1).state, 'complete');
+});
+
 test('auto apply shows action cursor while clicking response and submit buttons', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию',

@@ -44,10 +44,26 @@ export function isActiveRun(runState = {}) {
 
 function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
   const lastError = localizeError(runState.lastError);
-  if (runState.state === 'error' || lastError) {
+  if (runState.state === 'error') {
     return {
       tone: 'error',
       title: `Ошибка: ${lastError || 'действие остановлено'}`,
+      detail: 'Проверьте текущую вкладку и повторите запуск'
+    };
+  }
+
+  if (isActiveRun(runState)) {
+    return {
+      tone: 'ok',
+      title: STATE_LABELS[runState.state] || 'В работе',
+      detail: normalizeText(runState.currentAction) || 'Выполняю действие'
+    };
+  }
+
+  if (lastError) {
+    return {
+      tone: 'error',
+      title: `Ошибка: ${lastError}`,
       detail: 'Проверьте текущую вкладку и повторите запуск'
     };
   }

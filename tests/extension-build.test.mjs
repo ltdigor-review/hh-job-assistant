@@ -1991,6 +1991,21 @@ test('popup view model reports exact readiness and blocker text', async () => {
   });
   assert.equal(chromeTransportError.status.title, 'Ошибка: Нет связи с вкладкой hh.ru. Обновите страницу и повторите действие.');
   assert.doesNotMatch(chromeTransportError.status.title, /Could not establish connection|Receiving end/i);
+
+  const activeWithStaleAuthError = derivePopupView({
+    runState: {
+      state: 'applying',
+      currentAction: 'Откликаюсь на: Java Developer',
+      lastError: 'Требуется авторизация HH. Войдите на hh.ru перед использованием HH Job Assistant.'
+    },
+    tabState: { kind: 'ready', canStartAutoApply: true },
+    hasGroqKey: true
+  });
+  assert.deepEqual(activeWithStaleAuthError.status, {
+    tone: 'ok',
+    title: 'Отправка откликов',
+    detail: 'Откликаюсь на: Java Developer'
+  });
 });
 
 test('popup view model disables start and enables stop only during active runs', async () => {
