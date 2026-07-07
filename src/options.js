@@ -28,6 +28,7 @@ const fields = {
 };
 
 const statusNode = document.getElementById('status');
+const groqStatusNode = document.getElementById('groqStatus');
 let savedGroqKeyMasked = false;
 let groqKeyDirty = false;
 
@@ -35,9 +36,13 @@ function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
 }
 
-function setStatus(text, isError = false) {
-  statusNode.textContent = text;
-  statusNode.style.color = isError ? '#b91c1c' : '#475569';
+function setStatus(text, isError = false, node = statusNode) {
+  node.textContent = text;
+  node.style.color = isError ? '#b91c1c' : '#475569';
+}
+
+function setGroqStatus(text, isError = false) {
+  setStatus(text, isError, groqStatusNode);
 }
 
 function normalizeMultiPreference(value, allowedValues) {
@@ -154,13 +159,13 @@ async function saveOptions() {
 }
 
 async function testGroq() {
-  setStatus('Проверяю Groq...');
+  setGroqStatus('Проверяю Groq...');
   const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
   if (!response?.ok) {
-    setStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);
+    setGroqStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);
     return;
   }
-  setStatus('Groq работает.');
+  setGroqStatus('Groq работает.');
 }
 
 fields.groqApiKey.addEventListener('focus', () => {
@@ -179,7 +184,7 @@ document.getElementById('save').addEventListener('click', () => {
 });
 
 document.getElementById('testGroq').addEventListener('click', () => {
-  testGroq().catch((error) => setStatus(localizeError(error), true));
+  testGroq().catch((error) => setGroqStatus(localizeError(error), true));
 });
 
 loadOptions().catch((error) => setStatus(localizeError(error), true));

@@ -2278,7 +2278,9 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /id="coverPrompt"/);
   assert.match(html, /id="employerQuestionPrompt"/);
   assert.match(html, /Логи/);
-  assert.match(html, /<div class="field-action">\s*<button id="testGroq" class="secondary" type="button">Проверить Groq<\/button>\s*<\/div>/);
+  assert.match(html, /<div class="field-action">\s*<button id="testGroq" class="secondary" type="button">Проверить Groq<\/button>\s*<div id="groqStatus" role="status"><\/div>\s*<\/div>/);
+  assert.ok(html.indexOf('id="testGroq"') < html.indexOf('id="groqStatus"'));
+  assert.ok(html.indexOf('id="groqStatus"') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /<div class="actions">\s*<button id="save" type="button">Сохранить<\/button>\s*<\/div>/);
   assert.ok(html.indexOf('id="testGroq"') < html.indexOf('<div class="actions">'));
   assert.match(html, /\.switch-track/);
