@@ -200,6 +200,7 @@ async function readTabState() {
     return {
       kind: 'ready',
       canStartAutoApply: isAutoApplyStartUrl(url),
+      autoApplyInProgress: response.autoApplyInProgress === true,
       canContinueAutoApply: response.canContinueAutoApply === true
     };
   } catch (error) {

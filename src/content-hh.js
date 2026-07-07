@@ -3620,12 +3620,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message?.type) {
       case 'GET_CONTENT_STATUS': {
         const queueStatus = await getAutoApplyQueueStatus();
+        const { runState = {} } = await storageGet(['runState'], { optional: true });
+        const activeState = /^(scanning|applying|waiting_for_dialog|generating_cover_letter|filling_cover_letter|submitting|refreshing_resumes)$/.test(runState?.state || '');
         sendResponse({
           ok: true,
           authenticated: hasAuthenticatedHhSignal(),
           unsafe: isUnsafePage(),
           activeRunId,
           stopRequested,
+          autoApplyInProgress: activeState || queueStatus.hasResponseQueue || queueStatus.hasSearchQueue,
           canContinueAutoApply: queueStatus.canContinueAutoApply,
           url: location.href
         });

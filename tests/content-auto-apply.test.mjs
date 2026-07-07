@@ -4008,12 +4008,14 @@ test('content status reports resumable auto-apply queue', async () => {
     startOnResponseForm: true,
     message: { type: 'GET_CONTENT_STATUS' },
     initialLocalStore: {
-      autoApplySearchQueue: { active: true }
+      autoApplySearchQueue: { active: true },
+      runState: { state: 'idle' }
     }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.canContinueAutoApply, true);
+  assert.equal(result.response.autoApplyInProgress, true);
 });
 
 test('continue auto apply reports missing saved queue', async () => {

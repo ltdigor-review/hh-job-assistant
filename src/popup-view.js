@@ -42,6 +42,10 @@ export function isActiveRun(runState = {}) {
   return ACTIVE_RUN_STATES.has(runState.state);
 }
 
+function isAutoApplyInProgress(runState = {}, tabState = {}) {
+  return isActiveRun(runState) || tabState.autoApplyInProgress === true;
+}
+
 function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
   const lastError = localizeError(runState.lastError);
   if (runState.state === 'error') {
@@ -52,11 +56,11 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
     };
   }
 
-  if (isActiveRun(runState)) {
+  if (isAutoApplyInProgress(runState, tabState)) {
     return {
       tone: 'ok',
-      title: STATE_LABELS[runState.state] || 'В работе',
-      detail: normalizeText(runState.currentAction) || 'Выполняю действие'
+      title: isActiveRun(runState) ? STATE_LABELS[runState.state] : 'Отправка откликов',
+      detail: normalizeText(runState.currentAction) || 'Отклики запущены'
     };
   }
 
@@ -153,7 +157,7 @@ export function derivePopupView({
   tabState = {},
   hasGroqKey = false
 } = {}) {
-  const activeRun = isActiveRun(runState);
+  const activeRun = isAutoApplyInProgress(runState, tabState);
   const tabReady = tabState.kind === 'ready';
   const canContinue = tabReady && tabState.canContinueAutoApply === true;
   const restartLabel = RESTART_LABEL_STATES.has(runState.state);

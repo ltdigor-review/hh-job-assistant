@@ -1963,6 +1963,19 @@ test('popup view model reports exact readiness and blocker text', async () => {
   assert.equal(wrongHhPage.buttons.autoApplyDisabled, true);
   assert.equal(wrongHhPage.buttons.stopDisabled, true);
 
+  const runningOffSearchPage = derivePopupView({
+    runState: { state: 'idle' },
+    tabState: { kind: 'ready', canStartAutoApply: false, autoApplyInProgress: true },
+    hasGroqKey: true
+  });
+  assert.deepEqual(runningOffSearchPage.status, {
+    tone: 'ok',
+    title: 'Отправка откликов',
+    detail: 'Отклики запущены'
+  });
+  assert.equal(runningOffSearchPage.buttons.autoApplyDisabled, true);
+  assert.equal(runningOffSearchPage.buttons.stopDisabled, false);
+
   assert.equal(
     derivePopupView({
       runState: { state: 'idle' },
