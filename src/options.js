@@ -17,6 +17,7 @@ const fields = {
   resumeUrl: document.getElementById('resumeUrl'),
   resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   expectedSalary: document.getElementById('expectedSalary'),
+  telegramUsername: document.getElementById('telegramUsername'),
   employmentPreference: document.getElementById('employmentPreference'),
   workFormatPreference: document.getElementById('workFormatPreference'),
   coverPrompt: document.getElementById('coverPrompt'),
@@ -88,6 +89,7 @@ async function loadOptions() {
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
+  fields.telegramUsername.value = values.telegramUsername || DEFAULTS.telegramUsername;
   setMultiCheckboxValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
   setMultiCheckboxValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
   fields.coverPrompt.value = values.coverPrompt === OLD_DEFAULT_COVER_PROMPT
@@ -122,6 +124,7 @@ async function saveOptions() {
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     expectedSalary: fields.expectedSalary.value.trim(),
+    telegramUsername: fields.telegramUsername.value.trim(),
     employmentPreference: getMultiCheckboxValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: getMultiCheckboxValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,

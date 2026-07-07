@@ -304,8 +304,14 @@ function formatRussianList(values) {
   return `${cleanValues.slice(0, -1).join(', ')} или ${cleanValues.at(-1)}`;
 }
 
-function buildGroqMessages({ task, resumeText, expectedSalary, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, extraText }) {
+function formatContactContext({ telegramUsername }) {
+  const telegram = String(telegramUsername || '').trim();
+  return telegram ? `Telegram: ${telegram}` : 'Telegram: не указан';
+}
+
+function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, extraText }) {
   const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
+  const contactContext = formatContactContext({ telegramUsername });
   if (task === 'choice_retry') {
     return [
       {
@@ -333,7 +339,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, employmentPrefere
         content: [
           employerQuestionPrompt || DEFAULTS.employerQuestionPrompt,
           '',
-          'Output contract: use the same language as each question. Use salary and exact options. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question. Keep open text concise: for city/location, salary, years, team size, contact, or similar factual fields, return only the value with no pronoun, verb, prefix, or full sentence. For narrative/experience answers that need a sentence, write in first person. Avoid generic lists of learning methods/tools unless the question explicitly asks for them. Do not end text drafts with a period.'
+          'Output contract: use the same language as each question. Use salary, contacts, and exact options from the candidate context. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question. Keep open text concise: for city/location, salary, years, team size, contact, messenger handle, Telegram username, or similar factual fields, return only the exact value with no pronoun, verb, prefix, or full sentence. For narrative/experience answers that need a sentence, write in first person. Avoid generic lists of learning methods/tools unless the question explicitly asks for them. Do not end text drafts with a period.'
         ].join('\n')
       },
       {
@@ -344,6 +350,9 @@ function buildGroqMessages({ task, resumeText, expectedSalary, employmentPrefere
           '',
           'Ожидаемая зарплата кандидата:',
           expectedSalary || '(зарплата не указана)',
+          '',
+          'Контакты кандидата:',
+          contactContext,
           '',
           'Предпочтения кандидата:',
           preferenceContext,
@@ -670,10 +679,11 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     expectedSalary = '',
     employmentPreference = DEFAULTS.employmentPreference,
     workFormatPreference = DEFAULTS.workFormatPreference,
+    telegramUsername = DEFAULTS.telegramUsername,
     coverPrompt = DEFAULTS.coverPrompt,
     employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
     groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
@@ -697,6 +707,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   const payloadParts = {
     resumeText: resumeContext.text,
     expectedSalary: String(expectedSalary).slice(0, 1000),
+    telegramUsername: String(telegramUsername).slice(0, 200),
     employmentPreference,
     workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),

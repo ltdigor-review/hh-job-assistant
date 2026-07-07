@@ -13,6 +13,7 @@
     resumeGroqBriefVersion: '',
     groqCooldownUntil: '',
     expectedSalary: '',
+    telegramUsername: '',
     employmentPreference: [],
     workFormatPreference: [],
     coverPrompt: 'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.',

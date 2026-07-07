@@ -538,6 +538,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     groqModel: 'test-model',
     resumeText: 'Relevant profile with adjacent experience and delivery tools',
     expectedSalary: '250 000 руб. на руки',
+    telegramUsername: '@candidate_tg',
     employmentPreference: [],
     workFormatPreference: [],
     coverPrompt: 'cover prompt',
@@ -616,6 +617,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
   assert.match(userContent, /Relevant profile with adjacent experience and delivery tools/);
   assert.match(userContent, /250 000 руб\. на руки/);
+  assert.match(userContent, /Контакты кандидата:\nTelegram: @candidate_tg/);
   assert.match(userContent, /Оформление: предпочтение не выбрано/);
   assert.match(userContent, /Формат работы: предпочтение не выбрано/);
   assert.match(userContent, /Вакансия: роль со смежными требованиями/);
@@ -623,10 +625,12 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
   assert.match(systemContent, /custom employer question prompt/);
   assert.match(systemContent, /adjacent experience/);
+  assert.match(systemContent, /Telegram username/);
+  assert.match(systemContent, /return only the exact value/);
   assert.match(systemContent, /draft a relevant case/);
   assert.match(systemContent, /same language as each question/);
   assert.match(systemContent, /city\/location, salary, years, team size, contact/);
-  assert.match(systemContent, /return only the value with no pronoun, verb, prefix, or full sentence/);
+  assert.match(systemContent, /return only the exact value with no pronoun, verb, prefix, or full sentence/);
   assert.match(systemContent, /write in first person/);
   assert.match(systemContent, /Avoid generic lists of learning methods\/tools/);
   assert.match(systemContent, /exact option label/);
@@ -765,7 +769,7 @@ test('default employer question prompt tells Groq to synthesize case from adjace
   assert.match(systemContent, /пиши от первого лица/);
   assert.match(systemContent, /только короткое значение/);
   assert.match(systemContent, /same language as each question/);
-  assert.match(systemContent, /return only the value/);
+  assert.match(systemContent, /return only the exact value/);
   assert.match(systemContent, /write in first person/);
   assert.doesNotMatch(systemContent, /QA|Selenium|Playwright|игр|игров/i);
   assert.match(systemContent, /Text question N: <draft>/);
@@ -1389,6 +1393,7 @@ test('Groq prompt caps large payload components', async () => {
     groqModel: 'test-model',
     resumeText: longResume,
     expectedSalary: '250000',
+    telegramUsername: `@${'x'.repeat(300)}`,
     coverPrompt: 'cover prompt',
     agentDebugLog: [],
     agentDebugLogsEnabled: true
@@ -1459,6 +1464,7 @@ test('Groq prompt caps large payload components', async () => {
   assert.equal(requestBody.max_tokens, 700);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 1800);
+  assert.ok(requestBody.messages.find((message) => message.role === 'user').content.includes(`Telegram: @${'x'.repeat(199)}`));
   assert.ok(groqPayloadLog.details.componentLengths.vacancy <= 2200);
   assert.ok(groqPayloadLog.details.componentLengths.extra <= 2200);
   assert.ok(requestBody.messages.reduce((sum, message) => sum + message.content.length, 0) < longResume.length + longVacancy.length + longExtra.length);
@@ -2133,6 +2139,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeUrl: '',
     resumeCacheTtlHours: 1,
     expectedSalary: '',
+    telegramUsername: '',
     employmentPreference: '',
     workFormatPreference: '',
     coverPrompt: '',
@@ -2180,7 +2187,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     return element;
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
 
   globalThis.HHJA_DEFAULTS = {
@@ -2192,6 +2199,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeParsedUrl: '',
     resumeCacheTtlHours: 1,
     expectedSalary: '',
+    telegramUsername: '',
     employmentPreference: [],
     workFormatPreference: [],
     coverPrompt: 'default prompt',
@@ -2246,6 +2254,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
     assert.equal(storage.dailyLimit, 100);
+    assert.equal(storage.telegramUsername, '');
     assert.deepEqual(storage.employmentPreference, []);
     assert.deepEqual(storage.workFormatPreference, []);
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
@@ -2259,11 +2268,13 @@ test('options preserve masked Groq key unless user edits the key field', async (
     elements.workFormatPreference.inputs[0].checked = true;
     elements.workFormatPreference.inputs[1].checked = true;
     elements.employerQuestionPrompt.value = 'custom employer prompt';
+    elements.telegramUsername.value = '@candidate_tg';
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(storage.employmentPreference, ['labor_contract']);
     assert.deepEqual(storage.workFormatPreference, ['remote', 'hybrid']);
     assert.equal(storage.employerQuestionPrompt, 'custom employer prompt');
+    assert.equal(storage.telegramUsername, '@candidate_tg');
 
     handlers.get('groqApiKey:focus')();
     elements.groqApiKey.value = 'gsk_new';
@@ -2304,6 +2315,9 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /<h2>Промпты<\/h2>/);
   assert.ok(html.indexOf('<h2>Groq API</h2>') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /id="coverPrompt"/);
+  assert.match(html, /<label for="telegramUsername">Ник в Telegram для ответов<\/label>\s*<input id="telegramUsername" type="text" placeholder="@username">/);
+  assert.match(js, /telegramUsername: document\.getElementById\('telegramUsername'\)/);
+  assert.match(js, /telegramUsername: fields\.telegramUsername\.value\.trim\(\)/);
   assert.match(html, /id="employerQuestionPrompt"/);
   assert.match(html, /Логи/);
   assert.match(html, /<div class="field-action">\s*<button id="testGroq" class="secondary" type="button">Проверить Groq<\/button>\s*<div id="groqStatus" role="status"><\/div>\s*<\/div>/);
