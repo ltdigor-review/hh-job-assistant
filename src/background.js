@@ -1277,8 +1277,10 @@ function isAutoApplyStartUrl(value) {
     const url = new URL(String(value || ''));
     return url.protocol === 'https:' &&
       (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
-      url.pathname === '/search/vacancy' &&
-      url.search.length > 0;
+      (
+        (url.pathname === '/search/vacancy' && url.search.length > 0) ||
+        (url.pathname === '/applicant/vacancy_response' && url.searchParams.has('vacancyId'))
+      );
   } catch {
     return false;
   }
@@ -1463,7 +1465,7 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
 async function startAutoApplyFromActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
-    throw new Error('Перед запуском откликов откройте https://hh.ru/search/vacancy?...');
+    throw new Error('Перед запуском откликов откройте поиск вакансий hh.ru или форму отклика HH.');
   }
   await appendAgentLog('command_start_auto_apply', { tabId: tab.id, url: tab.url });
   return chrome.tabs.sendMessage(tab.id, { type: 'START_AUTO_APPLY' });

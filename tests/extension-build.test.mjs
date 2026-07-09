@@ -1882,6 +1882,8 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /url\.hostname === 'hh\.ru' \|\| url\.hostname\.endsWith\('\.hh\.ru'\)/);
   assert.match(js, /url\.pathname === '\/search\/vacancy'/);
   assert.match(js, /url\.search\.length > 0/);
+  assert.match(js, /url\.pathname === '\/applicant\/vacancy_response'/);
+  assert.match(js, /url\.searchParams\.has\('vacancyId'\)/);
 });
 
 test('agent debug log is a timestamped local profile artifact outside the popup', async () => {
@@ -1987,8 +1989,8 @@ test('popup view model reports exact readiness and blocker text', async () => {
   });
   assert.deepEqual(wrongHhPage.status, {
     tone: 'warn',
-    title: 'Откройте поиск вакансий',
-    detail: 'Запуск откликов доступен со страницы https://hh.ru/search/vacancy?...'
+    title: 'Откройте поиск или форму отклика',
+    detail: 'Запуск откликов доступен со страницы поиска вакансий или формы отклика HH'
   });
   assert.equal(wrongHhPage.buttons.autoApplyDisabled, true);
   assert.equal(wrongHhPage.buttons.stopDisabled, true);
@@ -2112,7 +2114,7 @@ test('popup buttons expose disabled-state reasons', async () => {
     tabState: { kind: 'ready', canStartAutoApply: false },
     hasGroqKey: true
   });
-  assert.equal(wrongHhPage.buttons.autoApplyTitle, 'Откройте страницу https://hh.ru/search/vacancy?...');
+  assert.equal(wrongHhPage.buttons.autoApplyTitle, 'Откройте поиск вакансий или форму отклика HH');
   assert.equal(wrongHhPage.buttons.continueTitle, 'Нет сохраненного запуска для продолжения');
   assert.equal(wrongHhPage.buttons.stopTitle, 'Нет активного запуска');
 

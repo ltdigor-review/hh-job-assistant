@@ -177,8 +177,10 @@ function isHhUrl(url) {
 function isAutoApplyStartUrl(url) {
   return url?.protocol === 'https:' &&
     (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
-    url.pathname === '/search/vacancy' &&
-    url.search.length > 0;
+    (
+      (url.pathname === '/search/vacancy' && url.search.length > 0) ||
+      (url.pathname === '/applicant/vacancy_response' && url.searchParams.has('vacancyId'))
+    );
 }
 
 async function readTabState() {
@@ -246,7 +248,7 @@ async function sendToActiveTab(type) {
     throw new Error('Сначала откройте вкладку hh.ru');
   }
   if (type === 'START_AUTO_APPLY' && !isAutoApplyStartUrl(url)) {
-    throw new Error('Запуск откликов доступен только со страницы https://hh.ru/search/vacancy?...');
+    throw new Error('Запуск откликов доступен только со страницы поиска вакансий hh.ru или формы отклика HH.');
   }
   return chrome.tabs.sendMessage(tab.id, { type });
 }

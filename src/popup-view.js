@@ -107,8 +107,8 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
   if (tabState.kind === 'ready' && !tabState.canStartAutoApply) {
     return {
       tone: 'warn',
-      title: 'Откройте поиск вакансий',
-      detail: 'Запуск откликов доступен со страницы https://hh.ru/search/vacancy?...'
+      title: 'Откройте поиск или форму отклика',
+      detail: 'Запуск откликов доступен со страницы поиска вакансий или формы отклика HH'
     };
   }
 
@@ -138,8 +138,8 @@ function deriveCurrentAction(runState = {}) {
 function deriveAutoApplyTitle({ activeRun, tabReady, tabState }) {
   if (activeRun) return 'Дождитесь завершения текущего запуска';
   if (!tabReady) return 'Откройте вкладку hh.ru';
-  if (!tabState.canStartAutoApply) return 'Откройте страницу https://hh.ru/search/vacancy?...';
-  return 'Запустить отклики с текущей страницы поиска';
+  if (!tabState.canStartAutoApply) return 'Откройте поиск вакансий или форму отклика HH';
+  return 'Запустить отклики с текущей страницы HH';
 }
 
 function deriveStopTitle(activeRun) {
