@@ -1,6 +1,6 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.200",
+  "version": "0.1.202",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
     "run:hh:chromium": "node scripts/chromium-run-action.mjs",
     "start:hh:chromium": "node scripts/chromium-start-auto-apply.mjs",
     "inspect:logs": "node scripts/inspect-extension-log.mjs",
+    "smoke:groq-cover": "node scripts/groq-cover-smoke.mjs",
     "diff:summary": "bash scripts/diff-summary.sh",
     "context:budget": "bash scripts/context-budget.sh",
     "test:all": "npm test && npm run test:extension && npm run test:hh"

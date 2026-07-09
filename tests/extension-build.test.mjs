@@ -177,6 +177,7 @@ test('javascript files parse', async () => {
     'scripts/chromium-run-action.mjs',
     'scripts/chromium-start-auto-apply.mjs',
     'scripts/sync-hh-auth-to-chromium.mjs',
+    'scripts/groq-cover-smoke.mjs',
     'scripts/start-extension-auto-apply.mjs',
     'scripts/reload-extension.mjs',
     'scripts/hh-live-smoke.mjs'
@@ -302,7 +303,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.match(localData.coverPrompt, /70-150 символов/);
+  assert.match(localData.coverPrompt, /50-150 символов/);
   assert.match(localData.coverPrompt, /одну живую строку/);
   assert.match(localData.coverPrompt, /от первого лица/);
   assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
@@ -372,7 +373,7 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
   assert.match(localData.employerQuestionPrompt, /только короткое значение/);
   assert.notEqual(localData.coverPrompt, oldCoverPrompt);
-  assert.match(localData.coverPrompt, /70-150 символов/);
+  assert.match(localData.coverPrompt, /50-150 символов/);
   assert.match(localData.coverPrompt, /от первого лица/);
   assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
 });
@@ -1742,6 +1743,20 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /agentDebugLogFile/);
 });
 
+test('repo script smoke tests Groq cover-letter output without logging secrets', async () => {
+  const packageJson = await readJson('package.json');
+  const js = await readFile(new URL('scripts/groq-cover-smoke.mjs', root), 'utf8');
+
+  assert.equal(packageJson.scripts['smoke:groq-cover'], 'node scripts/groq-cover-smoke.mjs');
+  assert.match(js, /llama-3\.3-70b-versatile/);
+  assert.match(js, /validateHumanShortCoverLetter/);
+  assert.match(js, /соответствует требованиям/);
+  assert.match(js, /HHJA_GROQ_PROXY/);
+  assert.match(js, /Local Extension Settings/);
+  assert.match(js, /key: \{ length: key\.length, suffix: key\.slice\(-4\) \}/);
+  assert.doesNotMatch(js, /console\.log\([^)]*key/);
+});
+
 test('README describes purpose, features, and installation without config details', async () => {
   const readme = await readFile(new URL('README.md', root), 'utf8');
   const agents = await readFile(new URL('AGENTS.md', root), 'utf8');
@@ -2150,7 +2165,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     telegramUsername: '',
     employmentPreference: '',
     workFormatPreference: '',
-    coverPrompt: '',
+    coverPrompt: 'Напиши одну живую строку для отклика hh.ru: 70-160 символов, по-русски, без приветствия. Используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт". Только текст.',
     employerQuestionPrompt: '',
     dailyLimit: 100,
     delayMinMs: 4000,
@@ -2265,6 +2280,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.equal(storage.telegramUsername, '');
     assert.deepEqual(storage.employmentPreference, []);
     assert.deepEqual(storage.workFormatPreference, []);
+    assert.equal(storage.coverPrompt, 'default prompt');
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
 
     elements.dailyLimit.value = '250';
