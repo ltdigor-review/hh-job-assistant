@@ -401,8 +401,8 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
         vacancyText || '(текст вакансии не найден)',
         '',
         'Примеры стиля:',
-        'Есть близкий опыт со Spring Boot и микросервисами, поэтому откликаюсь.',
-        'Работал с backend API и интеграциями, поэтому вакансия выглядит близко.'
+        'Работал со Spring Boot и микросервисами, поэтому откликаюсь.',
+        'Делал backend API и интеграции, поэтому откликаюсь.'
       ].join('\n')
     }
   ];
