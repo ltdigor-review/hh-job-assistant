@@ -302,8 +302,9 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.match(localData.coverPrompt, /70-160 символов/);
+  assert.match(localData.coverPrompt, /70-150 символов/);
   assert.match(localData.coverPrompt, /одну живую строку/);
+  assert.match(localData.coverPrompt, /от первого лица/);
   assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
   assert.match(localData.coverPrompt, /готов обсудить/);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
@@ -321,7 +322,7 @@ test('background initializes defaults and registers required listeners', async (
 
 test('background migrates old default employer question prompt', async () => {
   const oldEmployerQuestionPrompt = 'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.';
-  const oldCoverPrompt = 'Напиши короткий живой отклик на русском: 1-2 простых предложения, до 220 символов. Без обращения, канцелярита, HR-клише, списков, markdown, выдуманного опыта и пересказа резюме или вакансии. Только готовый текст.';
+  const oldCoverPrompt = 'Напиши одну живую строку для отклика hh.ru: 70-160 символов, по-русски, без приветствия. Используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт". Только текст.';
   const localData = {
     dailyLimit: 100,
     delayMinMs: 4000,
@@ -371,7 +372,8 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
   assert.match(localData.employerQuestionPrompt, /только короткое значение/);
   assert.notEqual(localData.coverPrompt, oldCoverPrompt);
-  assert.match(localData.coverPrompt, /70-160 символов/);
+  assert.match(localData.coverPrompt, /70-150 символов/);
+  assert.match(localData.coverPrompt, /от первого лица/);
   assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
 });
 

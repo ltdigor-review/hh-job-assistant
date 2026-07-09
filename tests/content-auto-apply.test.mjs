@@ -1417,6 +1417,21 @@ test('auto apply falls back when Groq cover letter sounds like corporate templat
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
+test('auto apply falls back when Groq cover letter sounds like formal requirement matching', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nСопроводительное письмо',
+    hasTextarea: true,
+    groqResponse: { ok: true, text: 'Опыт проектирования интеграций и микросервисов на Spring Boot соответствует требованиям вакансии.' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
 test('auto apply counts already-applied cover form update before submit lookup', async () => {
   const coverLetter = 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.';
   const result = await runContentAutoApply({
