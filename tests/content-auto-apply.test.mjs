@@ -1338,7 +1338,7 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
     ].join('\n'),
     hasTextarea: true,
     initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
-    groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.' }
+    groqResponse: { ok: true, text: 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.' }
   });
 
   assert.equal(result.response.ok, true);
@@ -1347,12 +1347,12 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
   assert.equal(result.submitClicks, 1);
   assert.equal(result.groqRequests.length, 1);
   assert.equal(result.groqRequests.at(-1).task, 'cover_letter');
-  assert.equal(result.textareaValue, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.');
+  assert.equal(result.textareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
   const coverLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'cover_letter_applied');
   assert.equal(coverLog.details.insertedText, undefined);
   assert.equal(coverLog.details.sourceText, undefined);
-  assert.equal(coverLog.details.fieldLength, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.'.length);
-  assert.equal(coverLog.details.letterLength, 'Здравствуйте! Готов обсудить, чем мой опыт будет полезен вашей команде.'.length);
+  assert.equal(coverLog.details.fieldLength, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.'.length);
+  assert.equal(coverLog.details.letterLength, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.'.length);
   assert.match(coverLog.details.field.marker, /Сопроводительное письмо/);
   assert.equal(result.appended.at(-1).status, 'applied');
 });
@@ -1379,12 +1379,12 @@ test('auto apply falls back when Groq cover letter looks like prompt leakage', a
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.');
+  assert.equal(result.textareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply accepts short human Groq cover letter', async () => {
-  const letter = 'Здравствуйте! Интересны задачи вакансии, готов обсудить опыт.';
+  const letter = 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -1413,12 +1413,12 @@ test('auto apply falls back when Groq cover letter sounds like corporate templat
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.');
+  assert.equal(result.textareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply counts already-applied cover form update before submit lookup', async () => {
-  const coverLetter = 'Здравствуйте! Заинтересовала вакансия, готов обсудить релевантный опыт и задачи команды.';
+  const coverLetter = 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: [
       'Отклик на вакансию',
@@ -2164,13 +2164,13 @@ test('auto apply handles callback-style Groq runtime response', async () => {
     dailyLimit: 1,
     nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1',
     runtimeCallbackOnly: true,
-    groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить вакансию и пользу для команды.' }
+    groqResponse: { ok: true, text: 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.' }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.errors, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Здравствуйте! Готов обсудить вакансию и пользу для команды.');
+  assert.equal(result.textareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -2396,7 +2396,7 @@ test('auto apply uses generic non-salary question fallback without Groq key', as
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
-  assert.match(result.coverTextareaValue, /Здравствуйте!/);
+  assert.equal(result.coverTextareaValue, 'Задачи с автоматизацией и проверкой backend-систем близки к моему опыту, поэтому откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
@@ -2427,7 +2427,7 @@ test('auto apply falls back when mandatory cover letter sounds like corporate te
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.coverTextareaValue, 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.');
+  assert.equal(result.coverTextareaValue, 'Задачи с автоматизацией и проверкой backend-систем близки к моему опыту, поэтому откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
@@ -2477,7 +2477,7 @@ test('auto apply does not paste question protocol into mandatory cover letter', 
   assert.equal(result.submitClicks, 1);
   assert.deepEqual(result.checkedLabels, ['Да', 'Да', 'B2', 'Гибридный', 'Сразу']);
   assert.match(result.textareaValues.join('\n'), /350000/);
-  assert.equal(result.coverTextareaValue, 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.');
+  assert.equal(result.coverTextareaValue, 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.');
   assert.doesNotMatch(result.coverTextareaValue, /Choice group|Text question/i);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);

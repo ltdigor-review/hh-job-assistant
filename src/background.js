@@ -7,7 +7,8 @@ const DEFAULTS = globalThis.HHJA_DEFAULTS;
 const OLD_DEFAULT_COVER_PROMPTS = new Set([
   'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
   'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
-  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.'
+  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.',
+  'Напиши короткий живой отклик на русском: 1-2 простых предложения, до 220 символов. Без обращения, канцелярита, HR-клише, списков, markdown, выдуманного опыта и пересказа резюме или вакансии. Только готовый текст.'
 ]);
 const OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS = new Set([
   'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.'
@@ -25,8 +26,9 @@ const RESUME_GROQ_RETRY_BRIEF_MAX_CHARS = 800;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
-const GROQ_COVER_LETTER_MAX_TOKENS = 500;
-const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 800;
+const GROQ_COVER_LETTER_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_COVER_LETTER_MAX_TOKENS = 120;
+const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 180;
 const GROQ_CHOICE_RETRY_MAX_TOKENS = 300;
 const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
@@ -371,8 +373,15 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
   return [
     {
       role: 'system',
-      content:
-        'Write one final hh.ru cover letter in Russian as a short human reply. Strict format: 1-2 simple sentences, 220 characters max. No formal opening, corporate or HR cliches, exaggerated motivation, bullets, headings, labels, analysis, markdown, placeholders, unknown names, or invented facts. Do not list resume/vacancy facts. Return only the letter text.'
+      content: [
+        'Ты пишешь одну строку в поле сопроводительного письма hh.ru.',
+        'Нужен обычный человеческий отклик, не письмо и не мотивационный текст.',
+        'Строго: 1 предложение, 70-160 символов, русский язык, без приветствия.',
+        'Используй одно конкретное пересечение резюме и вакансии.',
+        'Запрещено: Уважаемая команда, меня привлекла возможность, инновации, эффективность, масштабные проекты, высокий уровень качества, готов обсудить, готов применять, релевантный опыт, буду рад, чем могу быть полезен.',
+        'Без списков, markdown, заголовков, объяснений, выдуманных фактов и пересказа вакансии.',
+        'Верни только финальный текст.'
+      ].join('\n')
     },
     {
       role: 'user',
@@ -386,7 +395,11 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
         preferenceContext,
         '',
         'Вакансия:',
-        vacancyText || '(текст вакансии не найден)'
+        vacancyText || '(текст вакансии не найден)',
+        '',
+        'Примеры стиля:',
+        'Задачи с backend API близки к моему опыту, поэтому откликаюсь.',
+        'Вижу пересечение по backend и интеграциям, поэтому хочу откликнуться.'
       ].join('\n')
     }
   ];
@@ -618,6 +631,11 @@ function getMaxTokensForTask(task) {
   return GROQ_COVER_LETTER_MAX_TOKENS;
 }
 
+function getGroqModelForTask(task, configuredModel) {
+  if (task === 'cover_letter') return GROQ_COVER_LETTER_MODEL;
+  return configuredModel || DEFAULTS.groqModel;
+}
+
 function getLengthRetryMaxTokensForTask(task, currentMaxTokens) {
   if (task === 'cover_letter') {
     return Math.max(currentMaxTokens, GROQ_COVER_LETTER_RETRY_MAX_TOKENS);
@@ -716,9 +734,10 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
     extraText: compactExtraText(extraText)
   };
+  const model = getGroqModelForTask(task, groqModel);
   await appendAgentLog('groq_request_start', {
     task,
-    model: groqModel || DEFAULTS.groqModel,
+    model,
     vacancyTextLength: String(vacancyText).length,
     extraTextLength: String(extraText).length,
     resumeSourceLength: String(resumeSourceText).length,
@@ -727,7 +746,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
   });
 
   const requestBody = {
-    model: groqModel || DEFAULTS.groqModel,
+    model,
     messages: buildGroqMessages({
       task,
       ...payloadParts

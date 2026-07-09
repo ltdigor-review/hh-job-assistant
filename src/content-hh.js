@@ -1777,19 +1777,26 @@ async function getQuestionPreferences() {
   };
 }
 
-async function getFallbackCoverLetter() {
-  return 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.';
+async function getFallbackCoverLetter(vacancyText = '') {
+  const text = cleanText(vacancyText);
+  if (/(?:kotlin|java|jvm|backend|api|микросервис)/i.test(text)) {
+    return 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.';
+  }
+  if (/(?:qa|тестирован|автоматизац|selenium|playwright|junit)/i.test(text)) {
+    return 'Задачи с автоматизацией и проверкой backend-систем близки к моему опыту, поэтому откликаюсь.';
+  }
+  return 'Вижу пересечение с моим опытом, поэтому откликаюсь.';
 }
 
 function getCoverLetterInvalidReason(value) {
   const text = cleanText(value);
   const genericReason = getGeneratedTextInvalidReason(text, { minLength: 20 });
   if (genericReason) return genericReason;
-  if (text.length > 450) return 'Сопроводительное письмо слишком длинное.';
+  if (text.length > 220) return 'Сопроводительное письмо слишком длинное.';
   if (text.split(/\n+/).filter(Boolean).length > 4) return 'Сопроводительное письмо похоже на список или развернутый отчет.';
   if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'Сопроводительное письмо содержит список вместо готового текста.';
   const sentenceCount = text.split(/[.!?]+/).map(cleanText).filter(Boolean).length;
-  if (sentenceCount > 2 && text.length > 220) {
+  if (sentenceCount > 1 && text.length > 180) {
     return 'Сопроводительное письмо похоже на длинный шаблонный текст.';
   }
   if (hasCoverLetterCliche(text)) {
@@ -1803,7 +1810,7 @@ function getCoverLetterInvalidReason(value) {
 
 function hasCoverLetterCliche(value) {
   const text = cleanText(value);
-  return /(?:уважаем(?:ая|ые)\s+(?:команда|коллеги|работодатель)|меня\s+привлекла\s+возможность|ценятся\s+инновации|инновации\s+и\s+эффективность|масштабн(?:ыми|ые|ых)\s+проект|готов(?:а)?\s+применять\s+свой\s+опыт|ускорять\s+доставку\s+продукта|открытость\s+к\s+удал[её]нному\s+сотрудничеству|быстро\s+включаться\s+в\s+новые\s+задачи|поддерживать\s+высокий\s+уровень\s+качества|буду\s+рад(?:а)?\s+стать\s+частью\s+команды|с\s+энтузиазмом\s+готов(?:а)?|динамично\s+развивающ(?:ейся|аяся)\s+команд|внести\s+вклад\s+в\s+развитие\s+компании)/i.test(text);
+  return /(?:уважаем(?:ая|ые)\s+(?:команда|коллеги|работодатель)|меня\s+привлекла\s+возможность|ценятся\s+инновации|инновации\s+и\s+эффективность|масштабн(?:ыми|ые|ых)\s+проект|готов(?:а)?\s+(?:обсудить|применять)\b|релевантн(?:ый|ого|ом)\s+опыт|ускорять\s+доставку\s+продукта|открытость\s+к\s+удал[её]нному\s+сотрудничеству|быстро\s+включаться\s+в\s+новые\s+задачи|поддерживать\s+высокий\s+уровень\s+качества|буду\s+рад(?:а)?\s+стать\s+частью\s+команды|с\s+энтузиазмом\s+готов(?:а)?|динамично\s+развивающ(?:ейся|аяся)\s+команд|внести\s+вклад\s+в\s+развитие\s+компании|чем\s+могу\s+быть\s+полезен)/i.test(text);
 }
 
 function hasCoverLetterProtocolLeak(value) {
@@ -2357,6 +2364,7 @@ async function applyToVacancy(item, counters) {
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
+    const vacancyText = getVacancyText(item.card) || getVacancyText(document);
     const questionAudit = summarizeEmployerQuestionInputs(questionFields, questionControlGroups);
     const deterministicAssistance = await buildDeterministicQuestionAssistance(questionFields);
     let coverLetterUsed = false;
@@ -2647,7 +2655,7 @@ async function applyToVacancy(item, counters) {
             || assistance
             || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
         } else {
-          letter = await generateCoverLetter(getVacancyText(item.card) || getVacancyText(document));
+          letter = await generateCoverLetter(vacancyText);
         }
       } catch (error) {
         if (isStopRequestedError(error)) {
@@ -2658,16 +2666,18 @@ async function applyToVacancy(item, counters) {
         if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
           throw error;
         }
+        const fallbackContext = [vacancyText, questionContext, assistance].map(cleanText).filter(Boolean).join('\n');
         letter = /скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)
           ? (await buildNumberedCoverLetterAnswers(questionContext) || await getFallbackQuestionAssistance(questionFields, questionControlGroups))
-          : await getFallbackCoverLetter();
+          : await getFallbackCoverLetter(fallbackContext);
       } finally {
         setBusyCursor(false);
       }
 
       if (await stopIfRequested(counters)) return;
 
-      const sanitizedLetter = await sanitizeCoverLetterDraft(letter, getFallbackCoverLetter, { allowStructuredAnswers: true });
+      const fallbackContext = [vacancyText, questionContext, assistance, letter].map(cleanText).filter(Boolean).join('\n');
+      const sanitizedLetter = await sanitizeCoverLetterDraft(letter, () => getFallbackCoverLetter(fallbackContext), { allowStructuredAnswers: true });
       if (sanitizedLetter.fallbackUsed) {
         await appendAgentLog('mandatory_cover_letter_fallback_after_bad_text', {
           vacancyId: item.vacancyId,
@@ -2803,7 +2813,7 @@ async function applyToVacancy(item, counters) {
       }
 
       if (isRecoverableGroqError(error)) {
-        letter = await getFallbackCoverLetter();
+        letter = await getFallbackCoverLetter(vacancyText);
       } else {
         const message = missingGroqMessage('cover');
         counters.skipped += 1;

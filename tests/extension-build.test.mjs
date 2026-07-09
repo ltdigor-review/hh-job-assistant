@@ -302,10 +302,10 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.match(localData.coverPrompt, /до 220 символов/);
-  assert.match(localData.coverPrompt, /короткий живой отклик/);
-  assert.match(localData.coverPrompt, /Без обращения, канцелярита, HR-клише/);
-  assert.match(localData.coverPrompt, /пересказа резюме или вакансии/);
+  assert.match(localData.coverPrompt, /70-160 символов/);
+  assert.match(localData.coverPrompt, /одну живую строку/);
+  assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
+  assert.match(localData.coverPrompt, /готов обсудить/);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
   assert.match(localData.employerQuestionPrompt, /близкого опыта/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
@@ -321,11 +321,12 @@ test('background initializes defaults and registers required listeners', async (
 
 test('background migrates old default employer question prompt', async () => {
   const oldEmployerQuestionPrompt = 'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.';
+  const oldCoverPrompt = 'Напиши короткий живой отклик на русском: 1-2 простых предложения, до 220 символов. Без обращения, канцелярита, HR-клише, списков, markdown, выдуманного опыта и пересказа резюме или вакансии. Только готовый текст.';
   const localData = {
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
-    coverPrompt: 'custom cover prompt',
+    coverPrompt: oldCoverPrompt,
     employerQuestionPrompt: oldEmployerQuestionPrompt,
     agentDebugLogsEnabled: true
   };
@@ -369,6 +370,9 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
   assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
   assert.match(localData.employerQuestionPrompt, /только короткое значение/);
+  assert.notEqual(localData.coverPrompt, oldCoverPrompt);
+  assert.match(localData.coverPrompt, /70-160 символов/);
+  assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -844,11 +848,11 @@ test('Groq empty 200 response is retried once before returning text', async () =
   assert.equal(response.ok, true);
   assert.equal(response.text, 'Ответ после повтора');
   assert.equal(calls, 2);
-  assert.deepEqual(maxTokensByCall, [500, 800]);
+  assert.deepEqual(maxTokensByCall, [120, 180]);
   const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
   const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(emptyErrorLog.details.attempt, 1);
-  assert.equal(emptyErrorLog.details.maxTokens, 500);
+  assert.equal(emptyErrorLog.details.maxTokens, 120);
   assert.equal(emptyErrorLog.details.maxAttempts, 2);
   assert.equal(responseLog.details.finishReason, 'stop');
   assert.equal(responseLog.details.attempt, 2);
