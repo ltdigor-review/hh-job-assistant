@@ -317,6 +317,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.deepEqual(localData.workFormatPreference, []);
   assert.equal(localData.autoApplyStopRequested, false);
   assert.equal(localData.autoApplyStopRequestedAt, '');
+  assert.equal(localData.autoApplyStopBeforeSubmit, false);
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
@@ -2234,6 +2235,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     runState: {},
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
+    autoApplyStopBeforeSubmit: false,
     runResults: []
   };
   globalThis.HHJA_LOCALIZE_ERROR = (error, fallback) => fallback || String(error);

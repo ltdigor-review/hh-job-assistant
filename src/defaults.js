@@ -35,6 +35,7 @@
     },
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
+    autoApplyStopBeforeSubmit: false,
     runResults: []
   };
 })();

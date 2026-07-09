@@ -1422,7 +1422,14 @@ async function completeHhDailyResponseLimit(item, counters, reason = '') {
 }
 
 async function stopBeforeSubmitIfRequested(counters) {
-  return stopIfRequested(counters);
+  if (await stopIfRequested(counters)) return true;
+  const { autoApplyStopBeforeSubmit = false } = await storageGet(['autoApplyStopBeforeSubmit'], { optional: true });
+  if (autoApplyStopBeforeSubmit !== true) return false;
+  await storageSet({ autoApplyStopBeforeSubmit: false }, { optional: true });
+  await setStopRequested('stop_before_submit');
+  await appendAgentLog('stop_before_submit', { url: location.href });
+  await markStopped(counters);
+  return true;
 }
 
 async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, testDetected }) {
@@ -3586,6 +3593,20 @@ function consumeStopRunParam() {
   }
 }
 
+function consumeStopBeforeSubmitParam() {
+  try {
+    const url = new URL(location.href);
+    if (url.searchParams.get('hhjaStopBeforeSubmit') !== '1') {
+      return false;
+    }
+    url.searchParams.delete('hhjaStopBeforeSubmit');
+    window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function maybeReloadExtensionFromUrlParam() {
   if (!consumeReloadExtensionParam()) {
     return false;
@@ -3596,6 +3617,16 @@ async function maybeReloadExtensionFromUrlParam() {
     () => chrome.runtime.sendMessage({ type: 'RELOAD_EXTENSION', reason: 'hhjaReloadExtension', url: location.href }),
     { optional: true }
   );
+  return true;
+}
+
+async function maybeEnableStopBeforeSubmitFromUrlParam() {
+  if (!consumeStopBeforeSubmitParam()) {
+    return false;
+  }
+
+  await storageSet({ autoApplyStopBeforeSubmit: true }, { optional: true });
+  await appendAgentLog('url_trigger_stop_before_submit', { url: location.href });
   return true;
 }
 
@@ -3710,6 +3741,7 @@ async function initializeContentScript() {
   if (reloadedFromUrl) {
     return;
   }
+  await maybeEnableStopBeforeSubmitFromUrlParam();
   const stoppedFromUrl = await maybeStopFromUrlParam();
   if (stoppedFromUrl) {
     return;

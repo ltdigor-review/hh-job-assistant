@@ -1473,6 +1473,30 @@ test('stop before submit preserves generated answers and prevents application su
   assert.equal(result.states.at(-1).state, 'stopped');
 });
 
+test('stop-before-submit flag preserves generated cover letter and prevents submit', async () => {
+  const letter = 'Работал со Spring Boot и микросервисами, поэтому откликаюсь.';
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться\nСопроводительное письмо',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    initialLocalStore: {
+      autoApplyStopBeforeSubmit: true,
+      agentDebugLog: [],
+      agentDebugLogsEnabled: true
+    },
+    groqResponse: { ok: true, text: letter }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, letter);
+  assert.equal(result.appended.some((item) => /^applied/.test(item.status)), false);
+  assert.equal(result.localStore.autoApplyStopBeforeSubmit, false);
+  assert.equal(result.localStore.autoApplyStopRequested, true);
+  assert.equal(result.states.at(-1).state, 'stopped');
+  assert.equal(result.localStore.agentDebugLog.at(-1).event, 'stop_before_submit');
+});
+
 test('auto apply strips markdown from generated question answers before submit', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nНа какой уровень дохода вы ориентируетесь?',
@@ -4081,6 +4105,95 @@ test('stop run clears queues, reports stopped state, and appends debug log event
   assert.equal(states.at(-1).state, 'stopped');
   assert.equal(logs.at(-1).event, 'stop_run');
   assert.equal(logs.at(-1).details.url, 'https://hh.ru/search/vacancy?text=java');
+});
+
+test('content script enables stop-before-submit from hh url parameter', async () => {
+  const source = await readContentScriptSource();
+  const logs = [];
+  const localStore = {};
+  let listener = null;
+  const historyUrls = [];
+
+  globalThis.location = {
+    href: 'https://hh.ru/?hhjaStopBeforeSubmit=1',
+    pathname: '/',
+    search: '?hhjaStopBeforeSubmit=1',
+    hash: ''
+  };
+  globalThis.window = {
+    history: {
+      replaceState(_state, _title, url) {
+        historyUrls.push(url);
+        globalThis.location.href = `https://hh.ru${url}`;
+        const parsed = new URL(globalThis.location.href);
+        globalThis.location.pathname = parsed.pathname;
+        globalThis.location.search = parsed.search;
+        globalThis.location.hash = parsed.hash;
+      }
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH test page',
+    body: new FakeElement({ text: 'HH вакансии' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    addEventListener() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      },
+      sendMessage() {
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+  globalThis.HHJobAssistantLog = {
+    async append(scope, event, details = {}) {
+      logs.push({ scope, event, details });
+    }
+  };
+
+  try {
+    await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stop-before-submit-${crypto.randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.ok(listener, 'content script should register a listener');
+    assert.equal(localStore.autoApplyStopBeforeSubmit, true);
+    assert.equal(logs.at(-1).event, 'url_trigger_stop_before_submit');
+    assert.deepEqual(historyUrls, ['/']);
+  } finally {
+    delete globalThis.location;
+    delete globalThis.window;
+    delete globalThis.getComputedStyle;
+    delete globalThis.document;
+    delete globalThis.chrome;
+    delete globalThis.HHJobAssistantLog;
+  }
 });
 
 test('content status reports resumable auto-apply queue', async () => {
