@@ -302,8 +302,10 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.match(localData.coverPrompt, /до 450 символов/);
-  assert.match(localData.coverPrompt, /Не пересказывай резюме или вакансию/);
+  assert.match(localData.coverPrompt, /до 220 символов/);
+  assert.match(localData.coverPrompt, /короткий живой отклик/);
+  assert.match(localData.coverPrompt, /Без обращения, канцелярита, HR-клише/);
+  assert.match(localData.coverPrompt, /пересказа резюме или вакансии/);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
   assert.match(localData.employerQuestionPrompt, /близкого опыта/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);

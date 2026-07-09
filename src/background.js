@@ -6,7 +6,8 @@ const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const OLD_DEFAULT_COVER_PROMPTS = new Set([
   'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
-  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.'
+  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
+  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.'
 ]);
 const OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS = new Set([
   'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.'
@@ -371,7 +372,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
     {
       role: 'system',
       content:
-        'Write one final hh.ru cover letter in Russian. Strict format: 3-4 short sentences, 450 characters max. No bullets, headings, labels, analysis, markdown, placeholders, unknown names, or invented facts. Do not list resume/vacancy facts. Return only the letter text.'
+        'Write one final hh.ru cover letter in Russian as a short human reply. Strict format: 1-2 simple sentences, 220 characters max. No formal opening, corporate or HR cliches, exaggerated motivation, bullets, headings, labels, analysis, markdown, placeholders, unknown names, or invented facts. Do not list resume/vacancy facts. Return only the letter text.'
     },
     {
       role: 'user',

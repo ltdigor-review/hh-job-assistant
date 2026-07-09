@@ -1778,20 +1778,32 @@ async function getQuestionPreferences() {
 }
 
 async function getFallbackCoverLetter() {
-  return 'Здравствуйте! Заинтересовала ваша вакансия. Имею релевантный опыт в разработке и управлении IT-продуктами, готов обсудить задачи и пользу для команды.';
+  return 'Здравствуйте! Вакансия интересна, готов обсудить задачи и чем могу быть полезен.';
 }
 
 function getCoverLetterInvalidReason(value) {
   const text = cleanText(value);
   const genericReason = getGeneratedTextInvalidReason(text, { minLength: 20 });
   if (genericReason) return genericReason;
-  if (text.length > 900) return 'Сопроводительное письмо слишком длинное.';
+  if (text.length > 450) return 'Сопроводительное письмо слишком длинное.';
   if (text.split(/\n+/).filter(Boolean).length > 4) return 'Сопроводительное письмо похоже на список или развернутый отчет.';
   if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'Сопроводительное письмо содержит список вместо готового текста.';
+  const sentenceCount = text.split(/[.!?]+/).map(cleanText).filter(Boolean).length;
+  if (sentenceCount > 2 && text.length > 220) {
+    return 'Сопроводительное письмо похоже на длинный шаблонный текст.';
+  }
+  if (hasCoverLetterCliche(text)) {
+    return 'Сопроводительное письмо похоже на шаблонный HR-текст.';
+  }
   if (hasCoverLetterProtocolLeak(text)) {
     return 'Сопроводительное письмо содержит служебный контекст промпта.';
   }
   return '';
+}
+
+function hasCoverLetterCliche(value) {
+  const text = cleanText(value);
+  return /(?:уважаем(?:ая|ые)\s+(?:команда|коллеги|работодатель)|меня\s+привлекла\s+возможность|ценятся\s+инновации|инновации\s+и\s+эффективность|масштабн(?:ыми|ые|ых)\s+проект|готов(?:а)?\s+применять\s+свой\s+опыт|ускорять\s+доставку\s+продукта|открытость\s+к\s+удал[её]нному\s+сотрудничеству|быстро\s+включаться\s+в\s+новые\s+задачи|поддерживать\s+высокий\s+уровень\s+качества|буду\s+рад(?:а)?\s+стать\s+частью\s+команды|с\s+энтузиазмом\s+готов(?:а)?|динамично\s+развивающ(?:ейся|аяся)\s+команд|внести\s+вклад\s+в\s+развитие\s+компании)/i.test(text);
 }
 
 function hasCoverLetterProtocolLeak(value) {
@@ -1799,7 +1811,7 @@ function hasCoverLetterProtocolLeak(value) {
 }
 
 async function sanitizeCoverLetterDraft(value, fallbackFactory = getFallbackCoverLetter, { allowStructuredAnswers = false } = {}) {
-  const reason = allowStructuredAnswers && !hasCoverLetterProtocolLeak(value)
+  const reason = allowStructuredAnswers && isStructuredCoverLetterAnswer(value) && !hasCoverLetterProtocolLeak(value)
     ? ''
     : getCoverLetterInvalidReason(value);
   if (!reason) return { text: value, fallbackUsed: false, reason: '' };
@@ -1808,6 +1820,11 @@ async function sanitizeCoverLetterDraft(value, fallbackFactory = getFallbackCove
     fallbackUsed: true,
     reason
   };
+}
+
+function isStructuredCoverLetterAnswer(value) {
+  const lines = cleanText(value).split(/\n+/).map(cleanText).filter(Boolean);
+  return lines.length > 0 && lines.every((line) => /^\d+[.)]\s+/.test(line));
 }
 
 async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
