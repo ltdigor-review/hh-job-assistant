@@ -1316,14 +1316,14 @@ test('auto apply fills required contenteditable cover letter before submit', asy
     hasContentEditableCoverLetter: true,
     disabledSubmit: true,
     initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
-    groqResponse: { ok: true, text: 'Здравствуйте! Готов обсудить задачи и опыт.' }
+    groqResponse: { ok: true, text: 'Занимался backend API и интеграциями. Откликаюсь.' }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.contentEditableCoverLetterText, 'Здравствуйте! Готов обсудить задачи и опыт.');
+  assert.equal(result.contentEditableCoverLetterText, 'Занимался backend API и интеграциями. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -1338,7 +1338,7 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
     ].join('\n'),
     hasTextarea: true,
     initialLocalStore: { agentDebugLog: [], agentDebugLogsEnabled: true },
-    groqResponse: { ok: true, text: 'Работал с JVM backend и API, поэтому откликаюсь.' }
+    groqResponse: { ok: true, text: 'Занимался JVM backend и API. Откликаюсь.' }
   });
 
   assert.equal(result.response.ok, true);
@@ -1347,12 +1347,12 @@ test('auto apply treats hh attach-cover-letter modal as cover letter, not questi
   assert.equal(result.submitClicks, 1);
   assert.equal(result.groqRequests.length, 1);
   assert.equal(result.groqRequests.at(-1).task, 'cover_letter');
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   const coverLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'cover_letter_applied');
   assert.equal(coverLog.details.insertedText, undefined);
   assert.equal(coverLog.details.sourceText, undefined);
-  assert.equal(coverLog.details.fieldLength, 'Работал с JVM backend и API, поэтому откликаюсь.'.length);
-  assert.equal(coverLog.details.letterLength, 'Работал с JVM backend и API, поэтому откликаюсь.'.length);
+  assert.equal(coverLog.details.fieldLength, 'Занимался JVM backend и API. Откликаюсь.'.length);
+  assert.equal(coverLog.details.letterLength, 'Занимался JVM backend и API. Откликаюсь.'.length);
   assert.match(coverLog.details.field.marker, /Сопроводительное письмо/);
   assert.equal(result.appended.at(-1).status, 'applied');
 });
@@ -1379,12 +1379,12 @@ test('auto apply falls back when Groq cover letter looks like prompt leakage', a
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply accepts short human Groq cover letter', async () => {
-  const letter = 'Работал с JVM backend и API, поэтому откликаюсь.';
+  const letter = 'Занимался JVM backend и API. Откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -1413,7 +1413,25 @@ test('auto apply falls back when Groq cover letter sounds like corporate templat
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
+test('auto apply falls back when Groq cover letter is a three sentence template', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nСопроводительное письмо',
+    hasTextarea: true,
+    groqResponse: {
+      ok: true,
+      text: 'Работал с backend-сервисами на Java. Делал интеграции и API. Будет интересно применить этот опыт в ваших задачах.'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -1428,7 +1446,7 @@ test('auto apply falls back when Groq cover letter sounds like formal requiremen
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -1443,12 +1461,12 @@ test('auto apply falls back when Groq cover letter uses stiff overlap wording', 
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply counts already-applied cover form update before submit lookup', async () => {
-  const coverLetter = 'Работал с JVM backend и API, поэтому откликаюсь.';
+  const coverLetter = 'Занимался JVM backend и API. Откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: [
       'Отклик на вакансию',
@@ -1489,7 +1507,7 @@ test('stop before submit preserves generated answers and prevents application su
 });
 
 test('stop-before-submit flag preserves generated cover letter and prevents submit', async () => {
-  const letter = 'Работал со Spring Boot и микросервисами, поэтому откликаюсь.';
+  const letter = 'Работал со Spring Boot и микросервисами. Откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nСопроводительное письмо',
     hasTextarea: true,
@@ -2218,13 +2236,13 @@ test('auto apply handles callback-style Groq runtime response', async () => {
     dailyLimit: 1,
     nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1',
     runtimeCallbackOnly: true,
-    groqResponse: { ok: true, text: 'Работал с JVM backend и API, поэтому откликаюсь.' }
+    groqResponse: { ok: true, text: 'Занимался JVM backend и API. Откликаюсь.' }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.errors, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.textareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
@@ -2450,7 +2468,7 @@ test('auto apply uses generic non-salary question fallback without Groq key', as
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
-  assert.equal(result.coverTextareaValue, 'Работал с автотестами и проверкой backend, поэтому откликаюсь.');
+  assert.equal(result.coverTextareaValue, 'Занимался автотестами backend. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
@@ -2481,7 +2499,7 @@ test('auto apply falls back when mandatory cover letter sounds like corporate te
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
-  assert.equal(result.coverTextareaValue, 'Работал с автотестами и проверкой backend, поэтому откликаюсь.');
+  assert.equal(result.coverTextareaValue, 'Занимался автотестами backend. Откликаюсь.');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
@@ -2531,7 +2549,7 @@ test('auto apply does not paste question protocol into mandatory cover letter', 
   assert.equal(result.submitClicks, 1);
   assert.deepEqual(result.checkedLabels, ['Да', 'Да', 'B2', 'Гибридный', 'Сразу']);
   assert.match(result.textareaValues.join('\n'), /350000/);
-  assert.equal(result.coverTextareaValue, 'Работал с JVM backend и API, поэтому откликаюсь.');
+  assert.equal(result.coverTextareaValue, 'Занимался JVM backend и API. Откликаюсь.');
   assert.doesNotMatch(result.coverTextareaValue, /Choice group|Text question/i);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
   assert.equal(result.appended.at(-1).coverLetterUsed, true);

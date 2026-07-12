@@ -303,11 +303,14 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.match(localData.coverPrompt, /50-150 символов/);
-  assert.match(localData.coverPrompt, /одну живую строку/);
-  assert.match(localData.coverPrompt, /от первого лица/);
-  assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
-  assert.match(localData.coverPrompt, /готов обсудить/);
+  assert.ok(localData.coverPrompt.length <= 220);
+  assert.match(localData.coverPrompt, /1-2 простых предложения/);
+  assert.match(localData.coverPrompt, /до 220 символов/);
+  assert.match(localData.coverPrompt, /без обращения/i);
+  assert.match(localData.coverPrompt, /без канцелярита/i);
+  assert.match(localData.coverPrompt, /разметки/i);
+  assert.match(localData.coverPrompt, /пересказа вакансии или резюме/i);
+  assert.doesNotMatch(localData.coverPrompt, /готов обсудить|конкретное пересечение|масштабные проекты|инновации/i);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
   assert.match(localData.employerQuestionPrompt, /близкого опыта/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
@@ -374,9 +377,12 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
   assert.match(localData.employerQuestionPrompt, /только короткое значение/);
   assert.notEqual(localData.coverPrompt, oldCoverPrompt);
-  assert.match(localData.coverPrompt, /50-150 символов/);
-  assert.match(localData.coverPrompt, /от первого лица/);
-  assert.match(localData.coverPrompt, /конкретное пересечение резюме и вакансии/);
+  assert.ok(localData.coverPrompt.length <= 220);
+  assert.match(localData.coverPrompt, /1-2 простых предложения/);
+  assert.match(localData.coverPrompt, /до 220 символов/);
+  assert.match(localData.coverPrompt, /разметки/i);
+  assert.match(localData.coverPrompt, /пересказа вакансии или резюме/i);
+  assert.doesNotMatch(localData.coverPrompt, /готов обсудить|конкретное пересечение|масштабные проекты|инновации/i);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -1175,7 +1181,14 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
   });
 
   assert.equal(response.ok, true);
+  const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
+  assert.match(systemContent, /обычный человеческий отклик/);
+  assert.match(systemContent, /1-2 простых предложения/);
+  assert.match(systemContent, /без приветствия и обращения/);
+  assert.match(systemContent, /не официальное письмо/);
+  assert.match(systemContent, /готов обсудить/);
+  assert.match(systemContent, /пересказа вакансии или пересказа резюме/);
   assert.match(userContent, /Java developer parsed from hh resume/);
   assert.equal(localData.resumeParsedText, 'Java developer parsed from hh resume');
   assert.equal(localData.resumeParsedUrl, 'https://ekaterinburg.hh.ru/resume/abc123');
@@ -1848,6 +1861,9 @@ test('popup has ordered controls wired to Groq key, version, results, and action
     assert.doesNotMatch(html, new RegExp(`id="${removedId}"`));
   }
   assert.match(html, /\.action-title\s*\{[^}]*font-size:\s*13px/s);
+  assert.match(html, /html\s*\{[^}]*width:\s*380px[^}]*height:\s*600px[^}]*overflow:\s*hidden/s);
+  assert.match(html, /body\s*\{[^}]*width:\s*380px[^}]*height:\s*600px[^}]*overflow-y:\s*auto/s);
+  assert.doesNotMatch(html, /min-height:\s*(?:60[1-9]|6[1-9]\d|[7-9]\d\d|\d{4,})px/);
   assert.doesNotMatch(html, /Технический лог|Технических событий|debug-summary|Расширение выполняет задачу|action-detail/);
   assert.doesNotMatch(js, /GET_AGENT_DEBUG_LOG|CLEAR_AGENT_DEBUG_LOG|renderAgentDebugLog|agentDebugLog|debug-summary|currentActionDetail/);
   assert.doesNotMatch(html, /id="processed"|Обработано/);
