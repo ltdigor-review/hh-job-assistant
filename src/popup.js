@@ -1,4 +1,5 @@
 import { derivePopupView } from './popup-view.js';
+import './config-readiness.js';
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
@@ -25,6 +26,7 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
 let hasGroqKey = false;
+let readiness = { ready: false, missing: [] };
 let copyToastTimeout = null;
 
 async function copyText(text) {
@@ -67,7 +69,8 @@ function renderView() {
   const view = derivePopupView({
     runState: lastRunState,
     tabState: lastTabState,
-    hasGroqKey
+    hasGroqKey,
+    readiness
   });
 
   nodes.appStatus.className = `panel status-panel ${view.status.tone}`;
@@ -88,6 +91,11 @@ function renderView() {
   nodes.autoApply.title = view.buttons.autoApplyTitle;
   nodes.continueApply.title = view.buttons.continueTitle;
   nodes.stop.title = view.buttons.stopTitle;
+  const missingResume = readiness.missing.some((item) => item.code === 'resume_url');
+  if (missingResume) {
+    nodes.refreshResumes.disabled = true;
+    nodes.refreshResumes.title = 'Сначала укажите ссылку на резюме в настройках';
+  }
 }
 
 function resultMessage(item) {
@@ -232,10 +240,11 @@ async function readRuntimeState() {
 
 async function refreshPopup() {
   const [settings, runtimeError] = await Promise.all([
-    chrome.storage.local.get(['groqApiKey']),
+    chrome.storage.local.get(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']),
     readRuntimeState()
   ]);
   hasGroqKey = Boolean(settings.groqApiKey);
+  readiness = globalThis.HHJA_CONFIG_READINESS.evaluate(settings);
   lastTabState = runtimeError || await readTabState();
 
   renderView();

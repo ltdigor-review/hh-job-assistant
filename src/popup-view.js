@@ -46,7 +46,7 @@ function isAutoApplyInProgress(runState = {}, tabState = {}) {
   return isActiveRun(runState) || tabState.autoApplyInProgress === true;
 }
 
-function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
+function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false, readiness = { ready: true, missing: [] } }) {
   const lastError = localizeError(runState.lastError);
   if (runState.state === 'error') {
     return {
@@ -61,6 +61,14 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false }) {
       tone: 'ok',
       title: isActiveRun(runState) ? STATE_LABELS[runState.state] : 'Отправка откликов',
       detail: normalizeText(runState.currentAction) || 'Отклики запущены'
+    };
+  }
+
+  if (!readiness.ready) {
+    return {
+      tone: 'warn',
+      title: 'НЕ НАСТРОЕНО',
+      detail: `Откройте настройки и заполните: ${readiness.missing.map((item) => item.label).join(', ')}.`
     };
   }
 
@@ -155,23 +163,24 @@ function deriveContinueTitle({ activeRun, tabReady, canContinue }) {
 export function derivePopupView({
   runState = {},
   tabState = {},
-  hasGroqKey = false
+  hasGroqKey = false,
+  readiness = { ready: true, missing: [] }
 } = {}) {
   const activeRun = isAutoApplyInProgress(runState, tabState);
   const tabReady = tabState.kind === 'ready';
   const canContinue = tabReady && tabState.canContinueAutoApply === true;
   const restartLabel = RESTART_LABEL_STATES.has(runState.state);
   return {
-    status: deriveStatus({ runState, tabState, hasGroqKey }),
+    status: deriveStatus({ runState, tabState, hasGroqKey, readiness }),
     currentAction: deriveCurrentAction(runState),
     buttons: {
-      autoApplyDisabled: activeRun || !tabReady || !tabState.canStartAutoApply,
+      autoApplyDisabled: activeRun || !readiness.ready || !tabReady || !tabState.canStartAutoApply,
       autoApplyLabel: restartLabel ? 'Запуск' : 'Запуск откликов',
-      continueDisabled: activeRun || !canContinue,
+      continueDisabled: activeRun || !readiness.ready || !canContinue,
       stopDisabled: !activeRun,
-      refreshResumesDisabled: activeRun || !tabReady,
-      autoApplyTitle: deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
-      continueTitle: deriveContinueTitle({ activeRun, tabReady, canContinue }),
+      refreshResumesDisabled: activeRun || !tabReady || readiness.missing.some((item) => item.code === 'resume_url'),
+      autoApplyTitle: !activeRun && !readiness.ready ? 'Сначала заполните обязательные настройки' : deriveAutoApplyTitle({ activeRun, tabReady, tabState }),
+      continueTitle: !activeRun && !readiness.ready ? 'Сначала заполните обязательные настройки' : deriveContinueTitle({ activeRun, tabReady, canContinue }),
       stopTitle: deriveStopTitle(activeRun)
     },
     counters: {

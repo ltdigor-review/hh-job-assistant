@@ -4,6 +4,13 @@ import { readContentScriptSource } from './helpers/content-script-source.mjs';
 import { FakeElement } from './helpers/fake-element.mjs';
 
 const HH_DAILY_RESPONSE_LIMIT_TEXT = 'В течение 24 часов можно совершить не более 200 откликов. Вы исчерпали лимит откликов, попробуйте отправить отклик позднее.';
+const TEST_READY_CONFIG = {
+  groqApiKey: 'gsk_test',
+  resumeUrl: 'https://hh.ru/resume/test-resume',
+  coverPrompt: 'Write a concise cover letter and return only final text.',
+  employerQuestionPrompt: 'Answer each employer question and follow Text question N and Choice group N output markers.',
+  choiceRetryPrompt: 'Choose exact listed labels and follow Choice group N output markers.'
+};
 
 async function runContentAutoApply({
   messageType = 'START_AUTO_APPLY',
@@ -68,7 +75,13 @@ async function runContentAutoApply({
   let bodyOnlyFollowupOpen = false;
   let bodyNode = null;
   let hiddenDialogReads = 0;
-  const localStore = {};
+  const localStore = { ...TEST_READY_CONFIG,
+    groqApiKey: 'gsk_test',
+    resumeUrl: 'https://hh.ru/resume/test-resume',
+    coverPrompt: 'Write a concise cover letter and return only final text.',
+    employerQuestionPrompt: 'Answer each employer question and follow Text question N and Choice group N output markers.',
+    choiceRetryPrompt: 'Choose exact listed labels and follow Choice group N output markers.'
+  };
   Object.assign(localStore, initialLocalStore || {});
   function setDialogAndBodyText(text) {
     if (!text) return;
@@ -499,6 +512,21 @@ async function runContentAutoApply({
   };
 }
 
+test('start and continue reject incomplete configuration before runtime mutations', async () => {
+  for (const messageType of ['START_AUTO_APPLY', 'START_DRY_RUN', 'CONTINUE_AUTO_APPLY']) {
+    const result = await runContentAutoApply({
+      messageType,
+      initialLocalStore: { groqApiKey: '' }
+    });
+    assert.equal(result.response.ok, false);
+    assert.match(result.response.error, /Приложение не настроено/);
+    assert.deepEqual(result.states, []);
+    assert.deepEqual(result.appended, []);
+    assert.equal(result.submitClicks, 0);
+    assert.equal(result.navigateUrl, '');
+  }
+});
+
 async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 руб. на руки' } = {}) {
   const source = await readContentScriptSource();
   const appended = [];
@@ -518,7 +546,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
     };
   });
 
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     expectedSalary,
     autoApplyQueue: {
       active: true,
@@ -1979,8 +2007,53 @@ test('auto apply retries Groq when choice answer does not match options', async 
   assert.equal(result.groqRequests.length, 2);
   assert.equal(result.groqRequests.at(-1).task, 'choice_retry');
   assert.equal(result.groqRequests.at(-1).vacancyText, '');
-  assert.match(result.groqRequests.at(-1).extraText, /Previous answer did not match any available HH choice labels/);
+  assert.match(result.groqRequests.at(-1).extraText, /Previous answer:\nПодходит гибридный формат работы/);
+  assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Return only exact option labels/);
   assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Вакансия/);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply retries and falls back only missing groups after partial AI choice match', async () => {
+  const questionControls = Array.from({ length: 18 }, (_, index) => [
+    { type: 'radio', name: `group_${index + 1}`, label: `Да ${index + 1}`, value: `yes_${index + 1}` },
+    { type: 'radio', name: `group_${index + 1}`, label: `Нет ${index + 1}`, value: `no_${index + 1}` }
+  ]).flat();
+  const initialAnsweredGroups = [1, 2, 3, 4, 5, 6, 8, 9, 18];
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя',
+    hasTextarea: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Ваш город?',
+    startOnResponseForm: true,
+    questionControls,
+    initialLocalStore: { agentDebugLogsEnabled: true },
+    groqResponse: [
+      {
+        ok: true,
+        text: [
+          ...initialAnsweredGroups.map((index) => `Choice group ${index}: Да ${index}`),
+          'Text question 1: Москва'
+        ].join('\n')
+      },
+      { ok: true, text: 'Ответ без точных вариантов.' }
+    ]
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.checkedLabels.length, 18);
+  assert.deepEqual(result.textareaValues, ['Москва']);
+  for (const index of initialAnsweredGroups) {
+    assert.ok(result.checkedLabels.includes(`Да ${index}`));
+  }
+  assert.equal(result.groqRequests.length, 2);
+  assert.equal(result.groqRequests.at(-1).task, 'choice_retry');
+  assert.match(result.groqRequests.at(-1).extraText, /Choice group 7/);
+  assert.match(result.groqRequests.at(-1).extraText, /Choice group 17/);
+  assert.doesNotMatch(result.groqRequests.at(-1).extraText, /Choice group 1 \(/);
+  assert.equal(result.localStore.agentDebugLog.find((entry) => entry.event === 'question_choices_retry')?.details.reason, 'partial_matching_option_labels');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
@@ -2058,6 +2131,26 @@ test('auto apply uses fallback choice when Groq returns no matching option label
   assert.deepEqual(result.checkedLabels, ['Да']);
   assert.equal(result.groqRequests.length, 2);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply fallback prefers exact positive option over misleading negative label', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nГотовы приступить?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'ready', label: 'Никогда', value: 'never' },
+      { type: 'radio', name: 'ready', label: 'Да, готов', value: 'yes' },
+      { type: 'radio', name: 'ready', label: 'Нет', value: 'no' }
+    ],
+    groqResponse: [
+      { ok: true, text: 'Можно обсудить.' },
+      { ok: true, text: 'Без точного варианта.' }
+    ]
+  });
+
+  assert.equal(result.response.applied, 1);
+  assert.deepEqual(result.checkedLabels, ['Да, готов']);
 });
 
 test('auto apply uses fallback choice when Groq choice retry is empty', async () => {
@@ -2753,7 +2846,7 @@ test('auto apply search resume skips already processed vacancy ids', async () =>
   }
 
   const cards = ['111', '222', '333'].map(makeCard);
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     dailyLimit: 3,
     delayMinMs: 1,
     delayMaxMs: 1,
@@ -2899,7 +2992,7 @@ test('auto apply recovers from hh vacancy redirect back to original search page'
   const source = await readContentScriptSource();
   const navigations = [];
   const states = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -2994,7 +3087,7 @@ test('auto apply resumes search queue after hh redirects queued response to root
   const source = await readContentScriptSource();
   const navigations = [];
   const states = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3095,7 +3188,7 @@ test('auto apply ignores hidden resume parser page while response queue is activ
   const source = await readContentScriptSource();
   const navigations = [];
   const states = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3188,7 +3281,7 @@ test('auto apply does not recover queued response pages back to a response form 
   const source = await readContentScriptSource();
   const navigations = [];
   const states = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3279,7 +3372,7 @@ test('auto apply finalizes pending response when hh returns to search page after
   const appended = [];
   const states = [];
   const logs = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3411,7 +3504,7 @@ test('auto apply finalizes pending response on detail confirmation page and retu
   const states = [];
   const logs = [];
   const navigations = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3547,7 +3640,7 @@ test('auto apply resumes search from pending submit when response queue was clea
   const states = [];
   const logs = [];
   const navigations = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: false,
       index: 0,
@@ -3673,7 +3766,7 @@ test('auto apply returns from already applied queued detail page without respons
   const appended = [];
   const states = [];
   const navigations = [];
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3783,7 +3876,7 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
   let responseClicks = 0;
   let submitClicks = 0;
   let dialog = null;
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -3948,7 +4041,7 @@ test('auto apply ignores queued detail flow on non-matching vacancy tab', async 
   const states = [];
   const navigations = [];
   let responseClicks = 0;
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
@@ -4088,7 +4181,7 @@ test('stop run clears queues, reports stopped state, and appends debug log event
   const states = [];
   const logs = [];
   let listener = null;
-  const localStore = {
+  const localStore = { ...TEST_READY_CONFIG,
     autoApplyQueue: { active: true },
     autoApplySearchQueue: { active: true }
   };
@@ -4168,7 +4261,7 @@ test('stop run clears queues, reports stopped state, and appends debug log event
 test('content script enables stop-before-submit from hh url parameter', async () => {
   const source = await readContentScriptSource();
   const logs = [];
-  const localStore = {};
+  const localStore = { ...TEST_READY_CONFIG,};
   let listener = null;
   const historyUrls = [];
 

@@ -249,7 +249,17 @@ function buildInjection(contentScriptSource) {
         storage: {
           local: {
             get() {
-              return Promise.resolve({ dailyLimit: 2, delayMinMs: 1, delayMaxMs: 1, ...storage });
+              return Promise.resolve({
+                dailyLimit: 2,
+                delayMinMs: 1,
+                delayMaxMs: 1,
+                groqApiKey: 'gsk_test',
+                resumeUrl: 'https://hh.ru/resume/test-resume',
+                coverPrompt: 'cover prompt',
+                employerQuestionPrompt: 'question prompt',
+                choiceRetryPrompt: 'choice prompt',
+                ...storage
+              });
             },
             set(value) {
               Object.assign(storage, value);

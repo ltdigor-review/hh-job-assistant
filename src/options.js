@@ -30,6 +30,7 @@ const fields = {
   workFormatPreference: document.getElementById('workFormatPreference'),
   coverPrompt: document.getElementById('coverPrompt'),
   employerQuestionPrompt: document.getElementById('employerQuestionPrompt'),
+  choiceRetryPrompt: document.getElementById('choiceRetryPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
@@ -100,10 +101,9 @@ async function loadOptions() {
   fields.telegramUsername.value = values.telegramUsername || DEFAULTS.telegramUsername;
   setMultiCheckboxValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
   setMultiCheckboxValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
-  fields.coverPrompt.value = OLD_DEFAULT_COVER_PROMPTS.has(values.coverPrompt)
-    ? DEFAULTS.coverPrompt
-    : values.coverPrompt || DEFAULTS.coverPrompt;
-  fields.employerQuestionPrompt.value = values.employerQuestionPrompt || DEFAULTS.employerQuestionPrompt;
+  fields.coverPrompt.value = values.coverPrompt ?? DEFAULTS.coverPrompt;
+  fields.employerQuestionPrompt.value = values.employerQuestionPrompt ?? DEFAULTS.employerQuestionPrompt;
+  fields.choiceRetryPrompt.value = values.choiceRetryPrompt ?? DEFAULTS.choiceRetryPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
@@ -127,6 +127,19 @@ async function saveOptions() {
   }
   fields.resumeUrl.setCustomValidity('');
 
+  for (const [field, label] of [
+    [fields.coverPrompt, 'промпт сопроводительного письма'],
+    [fields.employerQuestionPrompt, 'промпт ответов работодателю'],
+    [fields.choiceRetryPrompt, 'промпт уточнения вариантов']
+  ]) {
+    if (!field.value.trim()) {
+      field.setCustomValidity(`Заполните ${label}.`);
+      field.reportValidity();
+      throw new Error(`Заполните ${label}.`);
+    }
+    field.setCustomValidity('');
+  }
+
   const patch = {
     groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
     resumeUrl: normalizedResumeUrl,
@@ -135,8 +148,10 @@ async function saveOptions() {
     telegramUsername: fields.telegramUsername.value.trim(),
     employmentPreference: getMultiCheckboxValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: getMultiCheckboxValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
-    coverPrompt: fields.coverPrompt.value.trim() || DEFAULTS.coverPrompt,
-    employerQuestionPrompt: fields.employerQuestionPrompt.value.trim() || DEFAULTS.employerQuestionPrompt,
+    coverPrompt: fields.coverPrompt.value.trim(),
+    employerQuestionPrompt: fields.employerQuestionPrompt.value.trim(),
+    choiceRetryPrompt: fields.choiceRetryPrompt.value.trim(),
+    aiPromptsVersion: 1,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 200)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
@@ -171,6 +186,13 @@ async function saveOptions() {
 
 async function testGroq() {
   setGroqStatus('Проверяю Groq...');
+  const patch = {
+    groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel
+  };
+  if (fields.groqApiKey.dataset.masked !== 'true') {
+    patch.groqApiKey = fields.groqApiKey.value.trim();
+  }
+  await chrome.storage.local.set(patch);
   const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
   if (!response?.ok) {
     setGroqStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);

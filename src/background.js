@@ -1,6 +1,7 @@
 import './agent-log.js';
 import './error-text.js';
 import './defaults.js';
+import './config-readiness.js';
 
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
@@ -208,6 +209,21 @@ async function ensureDefaults() {
     patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
   }
 
+  if (current.aiPromptsVersion !== 1) {
+    patch.coverPrompt = current.coverPrompt === undefined
+      ? DEFAULTS.coverPrompt
+      : OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)
+      ? DEFAULTS.coverPrompt
+      : String(current.coverPrompt || '').trim() ? `${current.coverPrompt}\n\n${DEFAULTS.coverPrompt}` : current.coverPrompt;
+    patch.employerQuestionPrompt = current.employerQuestionPrompt === undefined
+      ? DEFAULTS.employerQuestionPrompt
+      : OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS.has(current.employerQuestionPrompt)
+      ? DEFAULTS.employerQuestionPrompt
+      : String(current.employerQuestionPrompt || '').trim() ? `${current.employerQuestionPrompt}\n\n${DEFAULTS.employerQuestionPrompt}` : current.employerQuestionPrompt;
+    patch.choiceRetryPrompt = DEFAULTS.choiceRetryPrompt;
+    patch.aiPromptsVersion = 1;
+  }
+
   if (LEGACY_DEFAULT_DELAYS.some(([min, max]) => current.delayMinMs === min && current.delayMaxMs === max)) {
     patch.delayMinMs = DEFAULTS.delayMinMs;
     patch.delayMaxMs = DEFAULTS.delayMaxMs;
@@ -316,15 +332,14 @@ function formatContactContext({ telegramUsername }) {
   return telegram ? `Telegram: ${telegram}` : 'Telegram: не указан';
 }
 
-function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, extraText }) {
+function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, choiceRetryPrompt, vacancyText, extraText }) {
   const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
   const contactContext = formatContactContext({ telegramUsername });
   if (task === 'choice_retry') {
     return [
       {
         role: 'system',
-        content:
-          'Pick exact hh.ru choice option labels. Use only listed options and resume brief. Return lines: "Choice group N: <exact label>".'
+        content: choiceRetryPrompt
       },
       {
         role: 'user',
@@ -343,11 +358,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
     return [
       {
         role: 'system',
-        content: [
-          employerQuestionPrompt || DEFAULTS.employerQuestionPrompt,
-          '',
-          'Output contract: use the same language as each question. Use salary, contacts, and exact options from the candidate context. Choice: "Choice group N: <exact option label(s)>". Text: "Text question N: <draft>". Open text must directly answer the question. Keep open text concise: for city/location, salary, years, team size, contact, messenger handle, Telegram username, or similar factual fields, return only the exact value with no pronoun, verb, prefix, or full sentence. For narrative/experience answers that need a sentence, write in first person. Avoid generic lists of learning methods/tools unless the question explicitly asks for them. Do not end text drafts with a period.'
-        ].join('\n')
+        content: employerQuestionPrompt
       },
       {
         role: 'user',
@@ -377,22 +388,11 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
   return [
     {
       role: 'system',
-      content: [
-        'Ты пишешь короткий текст в поле сопроводительного письма hh.ru.',
-        'Нужен обычный человеческий отклик, не официальное письмо и не мотивационный шаблон.',
-        'Строго: 1-2 простых предложения, до 220 символов, русский язык, без приветствия и обращения.',
-        'Пиши спокойно от первого лица, без восторга и преувеличенной мотивации.',
-        'Можно упомянуть только один реально релевантный факт из резюме, если он уместен.',
-        'Запрещено: соответствует требованиям вакансии, требования вакансии, проявлял интерес, Уважаемая команда, меня привлекла возможность, инновации, эффективность, масштабные проекты, высокий уровень качества, готов обсудить, готов применять, релевантный опыт, буду рад, чем могу быть полезен.',
-        'Без списков, markdown, заголовков, объяснений, выдуманных фактов, пересказа вакансии или пересказа резюме.',
-        'Верни только финальный текст.'
-      ].join('\n')
+      content: coverPrompt
     },
     {
       role: 'user',
       content: [
-        coverPrompt || DEFAULTS.coverPrompt,
-        '',
         'Резюме:',
         resumeText || '(резюме не указано)',
         '',
@@ -400,11 +400,7 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
         preferenceContext,
         '',
         'Вакансия:',
-        vacancyText || '(текст вакансии не найден)',
-        '',
-        'Примеры стиля:',
-        'Занимался backend API и интеграциями. Откликаюсь.',
-        'Работал со Spring Boot и микросервисами. Откликаюсь.'
+        vacancyText || '(текст вакансии не найден)'
       ].join('\n')
     }
   ];
@@ -709,8 +705,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     telegramUsername = DEFAULTS.telegramUsername,
     coverPrompt = DEFAULTS.coverPrompt,
     employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
+    choiceRetryPrompt = DEFAULTS.choiceRetryPrompt,
     groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
+  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
@@ -739,6 +736,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     employerQuestionPrompt: String(employerQuestionPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
+    choiceRetryPrompt: String(choiceRetryPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
     extraText: compactExtraText(extraText)
   };
@@ -1465,6 +1463,7 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
 }
 
 async function startAutoApplyFromActiveTab() {
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']));
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
     throw new Error('Перед запуском откликов откройте страницу поиска вакансий или форму отклика на hh.ru.');
@@ -1582,6 +1581,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'REFRESH_RESUMES_NOW': {
+        const { resumeUrl } = await storageGet(['resumeUrl']);
+        const resumeMissing = globalThis.HHJA_CONFIG_READINESS
+          .evaluate({ resumeUrl, groqApiKey: 'unused', coverPrompt: 'unused', employerQuestionPrompt: 'unused', choiceRetryPrompt: 'unused' })
+          .missing.some((item) => item.code === 'resume_url');
+        if (resumeMissing) {
+          throw new Error('Укажите ссылку на резюме в настройках');
+        }
         const result = await runResumeRefresh();
         sendResponse(result);
         break;

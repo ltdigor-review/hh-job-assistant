@@ -42,8 +42,9 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.deepEqual(manifest.content_scripts[0].js, [
     'src/agent-log.js',
     'src/error-text.js',
-    'src/action-overlay.js',
-    'src/defaults.js',
+      'src/action-overlay.js',
+      'src/defaults.js',
+      'src/config-readiness.js',
     'src/content-text.js',
     'src/content-dom.js',
     'src/content-hh.js'
@@ -303,14 +304,16 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.dailyLimit, 100);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
-  assert.ok(localData.coverPrompt.length <= 220);
+  assert.ok(localData.coverPrompt.length > 220);
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
   assert.match(localData.coverPrompt, /до 220 символов/);
-  assert.match(localData.coverPrompt, /без обращения/i);
+  assert.match(localData.coverPrompt, /без приветствия и обращения/i);
   assert.match(localData.coverPrompt, /без канцелярита/i);
-  assert.match(localData.coverPrompt, /разметки/i);
-  assert.match(localData.coverPrompt, /пересказа вакансии или резюме/i);
-  assert.doesNotMatch(localData.coverPrompt, /готов обсудить|конкретное пересечение|масштабные проекты|инновации/i);
+  assert.match(localData.coverPrompt, /markdown/i);
+  assert.match(localData.coverPrompt, /пересказа вакансии или пересказа резюме/i);
+  assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
+  assert.ok(localData.choiceRetryPrompt);
+  assert.equal(localData.aiPromptsVersion, 1);
   assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
   assert.match(localData.employerQuestionPrompt, /близкого опыта/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
@@ -377,12 +380,12 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
   assert.match(localData.employerQuestionPrompt, /только короткое значение/);
   assert.notEqual(localData.coverPrompt, oldCoverPrompt);
-  assert.ok(localData.coverPrompt.length <= 220);
+  assert.ok(localData.coverPrompt.length > 220);
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
   assert.match(localData.coverPrompt, /до 220 символов/);
-  assert.match(localData.coverPrompt, /разметки/i);
-  assert.match(localData.coverPrompt, /пересказа вакансии или резюме/i);
-  assert.doesNotMatch(localData.coverPrompt, /готов обсудить|конкретное пересечение|масштабные проекты|инновации/i);
+  assert.match(localData.coverPrompt, /markdown/i);
+  assert.match(localData.coverPrompt, /пересказа вакансии или пересказа резюме/i);
+  assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -559,6 +562,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     workFormatPreference: [],
     coverPrompt: 'cover prompt',
     employerQuestionPrompt: 'custom employer question prompt: use adjacent experience and draft a relevant case',
+    choiceRetryPrompt: 'choose exact labels',
+    aiPromptsVersion: 1,
     agentDebugLog: [],
     agentDebugLogsEnabled: true
   };
@@ -641,17 +646,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
   assert.match(systemContent, /custom employer question prompt/);
   assert.match(systemContent, /adjacent experience/);
-  assert.match(systemContent, /Telegram username/);
-  assert.match(systemContent, /return only the exact value/);
   assert.match(systemContent, /draft a relevant case/);
-  assert.match(systemContent, /same language as each question/);
-  assert.match(systemContent, /city\/location, salary, years, team size, contact/);
-  assert.match(systemContent, /return only the exact value with no pronoun, verb, prefix, or full sentence/);
-  assert.match(systemContent, /write in first person/);
-  assert.match(systemContent, /Avoid generic lists of learning methods\/tools/);
-  assert.match(systemContent, /exact option label/);
-  assert.doesNotMatch(systemContent, /Do not invent facts/);
-  assert.match(systemContent, /Do not end text drafts with a period/);
+  assert.doesNotMatch(systemContent, /Telegram username|Output contract|same language as each question/);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   const groqTestRequestLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_request');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
@@ -663,7 +659,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     contentLength: message.content.length
   })));
   assert.equal(groqPayloadLog.details.componentLengths.resumeBrief, 'Relevant profile with adjacent experience and delivery tools'.length);
-  assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, 'custom employer question prompt: use adjacent experience and draft a relevant case'.length);
+  assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, systemContent.length);
   assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: роль со смежными требованиями'.length);
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
   assert.equal(groqPayloadLog.details.requestBody, undefined);
@@ -708,7 +704,7 @@ test('default employer question prompt tells Groq to synthesize case from adjace
     employmentPreference: '',
     workFormatPreference: '',
     coverPrompt: 'cover prompt',
-    employerQuestionPrompt: '',
+    choiceRetryPrompt: 'choose exact labels',
     agentDebugLog: [],
     agentDebugLogsEnabled: true
   };
@@ -784,11 +780,8 @@ test('default employer question prompt tells Groq to synthesize case from adjace
   assert.match(systemContent, /языке вопроса/);
   assert.match(systemContent, /пиши от первого лица/);
   assert.match(systemContent, /только короткое значение/);
-  assert.match(systemContent, /same language as each question/);
-  assert.match(systemContent, /return only the exact value/);
-  assert.match(systemContent, /write in first person/);
   assert.doesNotMatch(systemContent, /QA|Selenium|Playwright|игр|игров/i);
-  assert.match(systemContent, /Text question N: <draft>/);
+  assert.match(systemContent, /Text question N: <готовый ответ>/);
   assert.match(userContent, /adjacent tools/);
   assert.match(userContent, /релевантный опыт/);
 });
@@ -1093,7 +1086,10 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
     resumeParsedText: '',
     resumeParsedAt: '',
     expectedSalary: '',
-    coverPrompt: 'cover prompt'
+    coverPrompt: 'cover prompt',
+    employerQuestionPrompt: 'question prompt',
+    choiceRetryPrompt: 'choice prompt',
+    aiPromptsVersion: 1
   };
 
   globalThis.fetch = async (url, options) => {
@@ -1183,12 +1179,8 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
   assert.equal(response.ok, true);
   const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
-  assert.match(systemContent, /обычный человеческий отклик/);
-  assert.match(systemContent, /1-2 простых предложения/);
-  assert.match(systemContent, /без приветствия и обращения/);
-  assert.match(systemContent, /не официальное письмо/);
-  assert.match(systemContent, /готов обсудить/);
-  assert.match(systemContent, /пересказа вакансии или пересказа резюме/);
+  assert.equal(systemContent, 'cover prompt');
+  assert.doesNotMatch(userContent, /обычный человеческий отклик|Примеры стиля/);
   assert.match(userContent, /Java developer parsed from hh resume/);
   assert.equal(localData.resumeParsedText, 'Java developer parsed from hh resume');
   assert.equal(localData.resumeParsedUrl, 'https://ekaterinburg.hh.ru/resume/abc123');
@@ -2184,8 +2176,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     telegramUsername: '',
     employmentPreference: '',
     workFormatPreference: '',
-    coverPrompt: 'Напиши одну живую строку для отклика hh.ru: 70-160 символов, по-русски, без приветствия. Используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт". Только текст.',
-    employerQuestionPrompt: '',
+    coverPrompt: 'default prompt',
+    employerQuestionPrompt: 'default employer prompt',
+    choiceRetryPrompt: 'default choice prompt',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
@@ -2229,8 +2222,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     return element;
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'groqStatus', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
+  let groqKeySeenByTest = null;
 
   globalThis.HHJA_DEFAULTS = {
     groqModel: 'llama-3.3-70b-versatile',
@@ -2246,6 +2240,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     workFormatPreference: [],
     coverPrompt: 'default prompt',
     employerQuestionPrompt: 'default employer prompt',
+    choiceRetryPrompt: 'default choice prompt',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
@@ -2282,7 +2277,10 @@ test('options preserve masked Groq key unless user edits the key field', async (
       }
     },
     runtime: {
-      async sendMessage() {
+      async sendMessage(message) {
+        if (message?.type === 'TEST_GROQ') {
+          groqKeySeenByTest = storage.groqApiKey || null;
+        }
         return { ok: true, sampleLength: 2 };
       }
     }
@@ -2291,6 +2289,11 @@ test('options preserve masked Groq key unless user edits the key field', async (
   try {
     await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#options-${crypto.randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await handlers.get('testGroq:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.groqApiKey, 'gsk_saved');
+    assert.equal(groqKeySeenByTest, 'gsk_saved');
 
     handlers.get('groqApiKey:focus')();
     await handlers.get('save:click')();
@@ -2302,6 +2305,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.deepEqual(storage.workFormatPreference, []);
     assert.equal(storage.coverPrompt, 'default prompt');
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
+    assert.equal(storage.choiceRetryPrompt, 'default choice prompt');
 
     elements.dailyLimit.value = '250';
     await handlers.get('save:click')();
@@ -2333,6 +2337,14 @@ test('options preserve masked Groq key unless user edits the key field', async (
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, '');
+
+    elements.groqApiKey.value = '  gsk_test_before_save  ';
+    handlers.get('groqApiKey:input')();
+    await handlers.get('testGroq:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.groqApiKey, 'gsk_test_before_save');
+    assert.equal(groqKeySeenByTest, 'gsk_test_before_save');
+    assert.equal(elements.groqStatus.textContent, 'Groq работает.');
   } finally {
     delete globalThis.HHJA_DEFAULTS;
     delete globalThis.HHJA_LOCALIZE_ERROR;

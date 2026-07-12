@@ -5,6 +5,7 @@ const contentScriptFiles = [
   'src/error-text.js',
   'src/action-overlay.js',
   'src/defaults.js',
+  'src/config-readiness.js',
   'src/content-text.js',
   'src/content-dom.js',
   'src/content-hh.js'

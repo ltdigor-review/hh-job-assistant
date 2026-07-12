@@ -1006,7 +1006,7 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
   if (questionControlGroups.length > 0) {
     sections.push(
       [
-        'Choice questions. Return exact option labels for these groups:',
+        'Choice groups:',
         ...questionControlGroups.map((group, index) => {
           const options = group.options.map((option, optionIndex) => `${optionIndex + 1}. ${option.label}`).join('\n');
           return [
@@ -1024,11 +1024,12 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
 
 function buildChoiceRetryContext(questionControlGroups) {
   return [
-    'Choice questions. Return exact option labels for these groups:',
+    'Choice groups:',
     ...questionControlGroups.map((group, index) => {
+      const groupIndex = Number(group.originalIndex ?? index) + 1;
       const options = group.options.map((option, optionIndex) => `${optionIndex + 1}. ${option.label}`).join('\n');
       return [
-        `Choice group ${index + 1} (${group.type}, ${group.type === 'radio' ? 'choose one' : 'choose all matching'}):`,
+        `Choice group ${groupIndex} (${group.type}, ${group.type === 'radio' ? 'choose one' : 'choose all matching'}):`,
         group.question ? `Question/context: ${group.question}` : 'Question/context: not found',
         options
       ].join('\n');
@@ -1565,6 +1566,12 @@ function validateSelectedQuestionControls(groups) {
     .map((group) => group.index);
 }
 
+function getUnselectedQuestionControlGroups(groups) {
+  return groups
+    .map((group, index) => ({ ...group, originalIndex: Number(group.originalIndex ?? index) }))
+    .filter((group) => !group.options.some((option) => Boolean(option.control?.checked)));
+}
+
 async function finalizePendingSubmit() {
   const { autoApplyPendingSubmit, autoApplyQueue } = await storageGet(['autoApplyPendingSubmit', 'autoApplyQueue']);
   if (!autoApplyPendingSubmit?.item) {
@@ -1664,14 +1671,24 @@ async function getConfig() {
     'delayMinMs',
     'delayMaxMs',
     'employmentPreference',
-    'workFormatPreference'
+    'workFormatPreference',
+    'groqApiKey',
+    'resumeUrl',
+    'coverPrompt',
+    'employerQuestionPrompt',
+    'choiceRetryPrompt'
   ]);
   return {
     dailyLimit: Number(values.dailyLimit) || DEFAULTS.dailyLimit,
     delayMinMs: Number(values.delayMinMs) || DEFAULTS.delayMinMs,
     delayMaxMs: Number(values.delayMaxMs) || DEFAULTS.delayMaxMs,
     employmentPreference: normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
-    workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES)
+    workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
+    groqApiKey: values.groqApiKey,
+    resumeUrl: values.resumeUrl,
+    coverPrompt: values.coverPrompt,
+    employerQuestionPrompt: values.employerQuestionPrompt,
+    choiceRetryPrompt: values.choiceRetryPrompt
   };
 }
 
@@ -1757,7 +1774,6 @@ async function generateChoiceRetryAssistance(vacancyText, questionContext, previ
     extraText: [
       questionContext,
       '',
-      'Previous answer did not match any available HH choice labels. Return only exact option labels from the listed Choice groups.',
       'Previous answer:',
       previousAnswer
     ].join('\n')
@@ -1935,7 +1951,7 @@ function fillQuestionControls(groups, answerText) {
   let selected = 0;
   const labels = [];
   for (const [index, group] of groups.entries()) {
-    const groupAnswer = extractGroupAnswer(answerText, group, index);
+    const groupAnswer = extractGroupAnswer(answerText, group, Number(group.originalIndex ?? index));
     const scored = group.options
       .map((option) => ({ ...option, score: scoreChoice(option.label, groupAnswer) }))
       .filter((option) => option.score >= 0.5);
@@ -1964,8 +1980,9 @@ function findOptionByPattern(options, pattern) {
 }
 
 function findYesNoOption(options, wantYes) {
-  const yesPattern = /^(?:да|yes|готов|готова|согласен|согласна|подходит|могу)\b/i;
-  const noPattern = /^(?:нет|no|не готов|не готова|не могу|не подходит|не рассматриваю)\b/i;
+  const boundary = '[\\s,.;:!?—-]|$';
+  const yesPattern = new RegExp(`^(?:да(?:${boundary})|yes\\b|готов(?:а|ы)?(?:${boundary})|соглас(?:ен|на|ны)(?:${boundary})|подходит(?:${boundary})|могу(?:${boundary}))`, 'i');
+  const noPattern = new RegExp(`^(?:нет(?:${boundary})|no\\b|не\\s+(?:готов|готова|готовы|могу|подходит|рассматриваю)(?:${boundary}))`, 'i');
   return findOptionByPattern(options, wantYes ? yesPattern : noPattern);
 }
 
@@ -2031,7 +2048,8 @@ function getFallbackChoiceOption(group, preferences = {}) {
   if (options.length === 0) return null;
   return (
     getPreferredChoiceOption(group, preferences) ||
-    options.find((option) => /да|готов|готова|могу|соглас|подходит|рассматриваю|yes\b|agree|available/i.test(option.label)) ||
+    findYesNoOption(options, true) ||
+    options.find((option) => /(?:^|\s)(?:соглас|подходит|рассматриваю|agree|available)/i.test(option.label)) ||
     options.find((option) => !/нет|не готов|не готова|не могу|не подходит|не рассматриваю|no\b|not\b|отказ/i.test(option.label)) ||
     options[0]
   );
@@ -2478,11 +2496,13 @@ async function applyToVacancy(item, counters) {
         setBusyCursor(false);
       }
       if (await stopIfRequested(counters)) return;
-      if (selectedChoices.selected === 0) {
+      let missingChoiceGroups = getUnselectedQuestionControlGroups(questionControlGroups);
+      if (missingChoiceGroups.length > 0) {
         await appendAgentLog('question_choices_retry', {
           vacancyId: item.vacancyId,
-          groups: questionControlGroups.length,
-          reason: 'no_matching_option_labels'
+          groups: missingChoiceGroups.length,
+          missingGroups: missingChoiceGroups.map((group) => group.originalIndex + 1),
+          reason: selectedChoices.selected === 0 ? 'no_matching_option_labels' : 'partial_matching_option_labels'
         });
         await setRunState({
           state: 'generating_cover_letter',
@@ -2490,9 +2510,15 @@ async function applyToVacancy(item, counters) {
           currentAction: 'ИИ: уточняю варианты ответов HH'
         });
         setBusyCursor(true);
+        const previousAssistance = assistance;
         try {
-          assistance = await generateChoiceRetryAssistance('', buildChoiceRetryContext(questionControlGroups), assistance);
-          selectedChoices = fillQuestionControls(questionControlGroups, assistance);
+          const choiceRetryAssistance = await generateChoiceRetryAssistance('', buildChoiceRetryContext(missingChoiceGroups), previousAssistance);
+          const retryChoices = fillQuestionControls(missingChoiceGroups, choiceRetryAssistance);
+          assistance = [choiceRetryAssistance, previousAssistance].filter(Boolean).join('\n');
+          selectedChoices = {
+            selected: selectedChoices.selected + retryChoices.selected,
+            labels: [...selectedChoices.labels, ...retryChoices.labels]
+          };
         } catch (error) {
           if (isStopRequestedError(error)) {
             await markStopped(counters);
@@ -2505,12 +2531,17 @@ async function applyToVacancy(item, counters) {
               vacancyId: item.vacancyId,
               error: choiceRetryError
             });
-            selectedChoices = { selected: 0, labels: [] };
+            // Keep choices already selected from the initial AI answer.
           } else if (!isRecoverableGroqError(error)) {
             throw error;
           } else {
-            assistance = await getFallbackQuestionAssistance(questionFields, questionControlGroups);
-            selectedChoices = fillQuestionControls(questionControlGroups, assistance);
+            const fallbackAssistance = await getFallbackQuestionAssistance(questionFields, missingChoiceGroups);
+            const retryChoices = fillQuestionControls(missingChoiceGroups, fallbackAssistance);
+            assistance = [fallbackAssistance, previousAssistance].filter(Boolean).join('\n');
+            selectedChoices = {
+              selected: selectedChoices.selected + retryChoices.selected,
+              labels: [...selectedChoices.labels, ...retryChoices.labels]
+            };
           }
         } finally {
           setBusyCursor(false);
@@ -2528,23 +2559,29 @@ async function applyToVacancy(item, counters) {
         rejectedAnswerLength: selectedChoices.selected === 0 ? cleanText(assistance).length : 0,
         retryError: selectedChoices.selected === 0 ? choiceRetryError : ''
       });
-      if (selectedChoices.selected === 0) {
-        selectedChoices = await fillFallbackQuestionControls(questionControlGroups);
+      missingChoiceGroups = getUnselectedQuestionControlGroups(questionControlGroups);
+      if (missingChoiceGroups.length > 0) {
+        const fallbackChoices = await fillFallbackQuestionControls(missingChoiceGroups);
+        selectedChoices = {
+          selected: selectedChoices.selected + fallbackChoices.selected,
+          labels: [...selectedChoices.labels, ...fallbackChoices.labels]
+        };
         await appendAgentLog('question_choices_fallback_applied', {
           vacancyId: item.vacancyId,
           title: item.title,
           url: item.url,
-          groups: questionControlGroups.length,
-          selected: selectedChoices.selected,
-          labels: selectedChoices.labels.slice(0, 20),
-          expectedOptions: formatChoiceOptionSummary(questionControlGroups),
+          groups: missingChoiceGroups.length,
+          missingGroups: missingChoiceGroups.map((group) => group.originalIndex + 1),
+          selected: fallbackChoices.selected,
+          labels: fallbackChoices.labels.slice(0, 20),
+          expectedOptions: formatChoiceOptionSummary(missingChoiceGroups),
           rejectedAnswerLength: cleanText(assistance).length,
           retryError: choiceRetryError
         });
       }
-      const missingChoiceGroups = validateSelectedQuestionControls(questionControlGroups);
-      if (missingChoiceGroups.length > 0) {
-        const message = `Пропущено: ответы на варианты HH не были выбраны (${missingChoiceGroups.join(', ')}).`;
+      const missingChoiceGroupIndexes = validateSelectedQuestionControls(questionControlGroups);
+      if (missingChoiceGroupIndexes.length > 0) {
+        const message = `Пропущено: ответы на варианты HH не были выбраны (${missingChoiceGroupIndexes.join(', ')}).`;
         counters.skipped += 1;
         await appendResult({
           index: item.index,
@@ -3028,6 +3065,7 @@ async function continueQueuedAutoApply() {
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
     return false;
   }
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   if (isResumePage()) {
     return false;
   }
@@ -3414,6 +3452,7 @@ async function continueSearchAutoApply() {
   if (!autoApplySearchQueue?.active) {
     return false;
   }
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   if (['complete', 'dry_run_complete', 'stopped', 'idle', 'error'].includes(runState?.state)) {
     await saveSearchQueue({ active: false });
     await appendAgentLog('stale_search_queue_cleared', {
@@ -3449,6 +3488,7 @@ async function continueSearchAutoApply() {
 }
 
 async function continueSavedAutoApply() {
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   const status = await getAutoApplyQueueStatus();
   if (!status.canContinueAutoApply) {
     throw new Error('Нет сохраненного запуска для продолжения.');
@@ -3471,6 +3511,7 @@ async function continueSavedAutoApply() {
 
 async function startRun(mode, limitOverride = null, options = {}) {
   const config = await getConfig();
+  globalThis.HHJA_CONFIG_READINESS.assertReady(config);
   const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
   const limit = Math.max(1, Math.min(Number(limitSource) || 20, 200));
   const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
@@ -3712,6 +3753,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   })().catch(async (error) => {
     const messageText = localizeError(error);
+    if (error?.code === 'HHJA_CONFIG_NOT_READY') {
+      sendResponse({ ok: false, error: error.message, missing: error.readiness?.missing || [] });
+      return;
+    }
     await appendAgentLog('content_message_error', { type: message?.type || '', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
     sendResponse({ ok: false, error: messageText });
