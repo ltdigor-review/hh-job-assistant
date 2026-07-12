@@ -637,7 +637,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
             return settle({ ok: true });
           }
           if (message.type === 'GENERATE_COVER_LETTER') {
-            return settle({ ok: false, error: 'Groq API key is not configured' });
+            return settle({ ok: true, text: `Text question 1: Подтвержденный ответ ${pageIndex + 1}` });
           }
           return settle({ ok: true });
         }
@@ -657,14 +657,14 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
     await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#queued-${pageIndex}-${crypto.randomUUID()}`);
     const started = Date.now();
     while (
-      (textarea.value !== 'Готов обсудить детали и выполнить требования вакансии.' ||
+      (textarea.value !== `Подтвержденный ответ ${pageIndex + 1}` ||
         submitClicks < pageIndex + 1 ||
         localStore.autoApplyQueue.index < pageIndex + 1) &&
       Date.now() - started < 3000
     ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(textarea.value, 'Готов обсудить детали и выполнить требования вакансии.');
+    assert.equal(textarea.value, `Подтвержденный ответ ${pageIndex + 1}`);
     assert.equal(submitClicks, pageIndex + 1);
     assert.equal(localStore.autoApplyQueue.index, pageIndex + 1);
   }
@@ -1562,7 +1562,7 @@ test('auto apply fills contenteditable employer question fields', async () => {
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply falls back when generated question answers still look like model garbage', async () => {
+test('auto apply skips when generated question answers still look like model garbage', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1572,11 +1572,11 @@ test('auto apply falls back when generated question answers still look like mode
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
 test('auto apply puts only labeled free-text answer into question field', async () => {
@@ -1618,7 +1618,7 @@ test('auto apply puts only labeled free-text answer into question field', async 
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply falls back when prompt context leaked into generated text answer', async () => {
+test('auto apply skips when prompt context leaked into generated text answer', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1636,11 +1636,11 @@ test('auto apply falls back when prompt context leaked into generated text answe
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
 test('auto apply sends visible messenger question text and skips non-contact answer', async () => {
@@ -1795,6 +1795,31 @@ test('auto apply does not paste expected salary into non-salary employer questio
     'Выстраивал регрессионные контуры, CI-проверки и прозрачную приоритизацию дефектов для ускорения стабильных релизов.'
   ]);
   assert.doesNotMatch(result.textareaValues.join('\n'), /350000/);
+});
+
+test('auto apply keeps distinct valid answers for two employer questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Ответьте на вопросы\nОпыт C/C++\nПисать тут\nУровень английского\nПисать тут',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    questionFieldLabels: ['Расскажите об опыте C/C++.', 'Оцените уровень английского языка.'],
+    groqResponse: {
+      ok: true,
+      text: [
+        'Text question 1: Разрабатывал системные компоненты на C++ и готов перейти на чистый C как основной язык.',
+        'Text question 2: Английский B2: читаю документацию и комфортно участвую в рабочих обсуждениях.'
+      ].join('\n')
+    }
+  });
+
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.textareaValues, [
+    'Разрабатывал системные компоненты на C++ и готов перейти на чистый C как основной язык.',
+    'Английский B2: читаю документацию и комфортно участвую в рабочих обсуждениях.'
+  ]);
 });
 
 test('auto apply fills mixed checkbox radio and open employer questions', async () => {
@@ -2452,7 +2477,7 @@ test('auto apply uses expected salary for salary question when Groq key is missi
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply uses generic non-salary question fallback without Groq key', async () => {
+test('auto apply skips non-salary question without Groq key', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Опишите опыт управления тестированием',
     hasTextarea: true,
@@ -2464,13 +2489,13 @@ test('auto apply uses generic non-salary question fallback without Groq key', as
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов обсудить детали и выполнить требования вакансии.');
-  assert.equal(result.coverTextareaValue, 'Занимался автотестами backend. Откликаюсь.');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.coverTextareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_test_missing_groq_key');
+  assert.equal(result.appended.at(-1).coverLetterUsed, false);
 });
 
 test('auto apply falls back when mandatory cover letter sounds like corporate template', async () => {

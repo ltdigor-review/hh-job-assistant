@@ -34,6 +34,7 @@ const GROQ_COVER_LETTER_MAX_TOKENS = 120;
 const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 180;
 const GROQ_CHOICE_RETRY_MAX_TOKENS = 300;
 const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
+const GROQ_TEST_ASSIST_RETRY_MAX_TOKENS = 1400;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_EMPTY_RESPONSE_RETRIES = 1;
 const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
@@ -641,6 +642,9 @@ function getGroqModelForTask(task, configuredModel) {
 }
 
 function getLengthRetryMaxTokensForTask(task, currentMaxTokens) {
+  if (task === 'test_assist') {
+    return Math.max(currentMaxTokens, GROQ_TEST_ASSIST_RETRY_MAX_TOKENS);
+  }
   if (task === 'cover_letter') {
     return Math.max(currentMaxTokens, GROQ_COVER_LETTER_RETRY_MAX_TOKENS);
   }
@@ -856,12 +860,12 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
 
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) {
-      const finishReason = data?.choices?.[0]?.finish_reason || '';
+    const finishReason = data?.choices?.[0]?.finish_reason || '';
+    if (!content || finishReason === 'length') {
       await appendAgentLog('groq_request_error', {
         task,
         status: response.status,
-        error: 'empty_response',
+        error: content ? 'truncated_response' : 'empty_response',
         attempt,
         maxAttempts,
         choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
@@ -872,9 +876,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         responseSummary: summarizeGroqResponse(data)
       });
       if (attempt < maxAttempts) {
-        if (finishReason === 'length') {
-          requestBody.max_tokens = getLengthRetryMaxTokensForTask(task, requestBody.max_tokens);
-        }
+        if (finishReason === 'length') requestBody.max_tokens = getLengthRetryMaxTokensForTask(task, requestBody.max_tokens);
         await sleep(GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS);
         continue;
       }
@@ -888,7 +890,6 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         usage: data?.usage
       }));
     }
-    const finishReason = data?.choices?.[0]?.finish_reason || '';
     await appendAgentLog('groq_response_payload', {
       task,
       responseLength: content.length,

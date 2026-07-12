@@ -793,7 +793,7 @@ test('default employer question prompt tells Groq to synthesize case from adjace
   assert.match(userContent, /релевантный опыт/);
 });
 
-test('Groq empty 200 response is retried once before returning text', async () => {
+test('Groq truncated test assistance is retried once with a larger token cap', async () => {
   let listener = null;
   let calls = 0;
   const maxTokensByCall = [];
@@ -815,7 +815,7 @@ test('Groq empty 200 response is retried once before returning text', async () =
       status: 200,
       async json() {
         return {
-          choices: [{ message: { content: calls === 1 ? '' : 'Ответ после повтора' }, finish_reason: calls === 1 ? 'length' : 'stop' }]
+          choices: [{ message: { content: calls === 1 ? 'Оборванный ответ' : 'Ответ после повтора' }, finish_reason: calls === 1 ? 'length' : 'stop' }]
         };
       }
     };
@@ -851,18 +851,18 @@ test('Groq empty 200 response is retried once before returning text', async () =
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
 
   const response = await new Promise((resolve) => {
-    const stayedAsync = listener({ type: 'GENERATE_COVER_LETTER', vacancyText: 'Вакансия: Java developer' }, {}, resolve);
+    const stayedAsync = listener({ type: 'GENERATE_COVER_LETTER', task: 'test_assist', vacancyText: 'Вакансия: Java developer' }, {}, resolve);
     assert.equal(stayedAsync, true);
   });
 
   assert.equal(response.ok, true);
   assert.equal(response.text, 'Ответ после повтора');
   assert.equal(calls, 2);
-  assert.deepEqual(maxTokensByCall, [120, 180]);
-  const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
+  assert.deepEqual(maxTokensByCall, [700, 1400]);
+  const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'truncated_response');
   const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   assert.equal(emptyErrorLog.details.attempt, 1);
-  assert.equal(emptyErrorLog.details.maxTokens, 120);
+  assert.equal(emptyErrorLog.details.maxTokens, 700);
   assert.equal(emptyErrorLog.details.maxAttempts, 2);
   assert.equal(responseLog.details.finishReason, 'stop');
   assert.equal(responseLog.details.attempt, 2);

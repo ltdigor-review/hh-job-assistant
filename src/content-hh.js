@@ -830,7 +830,7 @@ async function normalizeQuestionAnswers(answers, questionFields) {
   });
 }
 
-async function buildDeterministicQuestionAssistance(questionFields) {
+async function buildDeterministicQuestionAssistance(questionFields, { includeSalary = false } = {}) {
   if (questionFields.length === 0) return '';
   const { resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
     ['resumeText', 'resumeParsedText', 'resumeCache'],
@@ -838,9 +838,13 @@ async function buildDeterministicQuestionAssistance(questionFields) {
   );
   const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
   const contact = extractContactFromText(resumeSource);
+  const expectedSalary = await getExpectedSalary();
   const answers = questionFields.map((field, index) => {
     if (isContactQuestion(field) && contact) {
       return `Text question ${index + 1}: ${contact}`;
+    }
+    if (includeSalary && isSalaryQuestion(field) && expectedSalary) {
+      return `Text question ${index + 1}: ${expectedSalary}`;
     }
     return '';
   });
@@ -1708,7 +1712,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|groq вернул неподходящее сопроводительное письмо/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|groq вернул (?:пустой ответ|неподходящее сопроводительное письмо)/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isEmptyGroqResponseError(error) {
@@ -1843,9 +1847,7 @@ function isStructuredCoverLetterAnswer(value) {
 }
 
 async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
-  const expectedSalary = await getExpectedSalary();
   const preferences = await getQuestionPreferences();
-  const genericTextAnswer = 'Готов обсудить детали и выполнить требования вакансии.';
   const lines = [];
   questionControlGroups.forEach((group, index) => {
     const preferredOptions = getPreferredChoiceOptions(group, preferences);
@@ -1862,11 +1864,16 @@ async function getFallbackQuestionAssistance(questionFields, questionControlGrou
       lines.push(`Choice group ${index + 1}: ${labels.join('; ')}`);
     }
   });
-  questionFields.forEach((field, index) => {
-    const textAnswer = isSalaryQuestion(field) && expectedSalary ? expectedSalary : genericTextAnswer;
-    lines.push(`Text question ${index + 1}: ${textAnswer}`);
-  });
-  return lines.join('\n') || genericTextAnswer;
+  const deterministicText = await buildDeterministicQuestionAssistance(questionFields, { includeSalary: true });
+  if (deterministicText) lines.push(deterministicText);
+  return lines.join('\n');
+}
+
+function hasCompleteLabeledTextAnswers(value, count) {
+  if (count === 0) return true;
+  const text = String(value || '');
+  return Array.from({ length: count }, (_, index) => new RegExp(`(?:^|\\n)\\s*Text question ${index + 1}\\s*:`, 'i').test(text))
+    .every(Boolean);
 }
 
 async function buildNumberedCoverLetterAnswers(questionContext) {
@@ -2432,20 +2439,20 @@ async function applyToVacancy(item, counters) {
         throw error;
       }
 
-      assistance = isRecoverableGroqError(error)
-        ? await getFallbackQuestionAssistance(questionFields, questionControlGroups)
-        : deterministicAssistance || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
-      if (assistance) {
+      assistance = deterministicAssistance || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
+      if (assistance && hasCompleteLabeledTextAnswers(assistance, questionFields.length)) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
       } else {
-        const message = missingGroqMessage('test');
+        const message = isMissingGroqKeyError(error)
+          ? missingGroqMessage('test')
+          : `Пропущено: Groq не подготовил безопасные ответы на вопросы работодателя: ${localizeError(error)}`;
         counters.skipped += 1;
         await appendResult({
           index: item.index,
           vacancyId: item.vacancyId,
           title: item.title,
           url: item.url,
-          status: 'skipped_test_missing_groq_key',
+          status: isMissingGroqKeyError(error) ? 'skipped_test_missing_groq_key' : 'skipped_test_ai_answer_unavailable',
           coverLetterUsed: false,
           testDetected: true,
           error: message
@@ -2566,33 +2573,26 @@ async function applyToVacancy(item, counters) {
         .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
         .find(Boolean);
       if (invalidReason) {
-        const fallbackAssistance = await getFallbackQuestionAssistance(questionFields, []);
-        answers = await normalizeQuestionAnswers(splitGeneratedAnswers(fallbackAssistance, questionFields.length), questionFields);
-        invalidReason = answers
-          .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
-          .find(Boolean);
-        await appendAgentLog('question_text_fallback_after_bad_answer', {
+        await appendAgentLog('question_text_rejected_bad_answer', {
           vacancyId: item.vacancyId,
-          originalError: invalidReason || '',
+          error: invalidReason,
           fields: questionFields.length
         });
-        if (invalidReason) {
-          setBusyCursor(false);
-          counters.skipped += 1;
-          await appendResult({
-            index: item.index,
-            vacancyId: item.vacancyId,
-            title: item.title,
-            url: item.url,
-            status: 'skipped_bad_generated_answer',
-            coverLetterUsed: false,
-            testDetected: true,
-            error: invalidReason
-          });
-          await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
-          closeDialog();
-          return;
-        }
+        setBusyCursor(false);
+        counters.skipped += 1;
+        await appendResult({
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'skipped_bad_generated_answer',
+          coverLetterUsed: false,
+          testDetected: true,
+          error: invalidReason
+        });
+        await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
+        closeDialog();
+        return;
       }
       if (await stopIfRequested(counters)) return;
       try {
@@ -2660,8 +2660,7 @@ async function applyToVacancy(item, counters) {
       try {
         if (/скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)) {
           letter = await buildNumberedCoverLetterAnswers(questionContext)
-            || assistance
-            || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
+            || assistance;
         } else {
           letter = await generateCoverLetter(vacancyText);
         }
@@ -2676,7 +2675,7 @@ async function applyToVacancy(item, counters) {
         }
         const fallbackContext = [vacancyText, questionContext, assistance].map(cleanText).filter(Boolean).join('\n');
         letter = /скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)
-          ? (await buildNumberedCoverLetterAnswers(questionContext) || await getFallbackQuestionAssistance(questionFields, questionControlGroups))
+          ? (await buildNumberedCoverLetterAnswers(questionContext) || assistance)
           : await getFallbackCoverLetter(fallbackContext);
       } finally {
         setBusyCursor(false);
