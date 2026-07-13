@@ -2028,10 +2028,12 @@ function getPreferredChoiceOptions(group, preferences = {}) {
       if (option) preferred.push(option);
     }
     if (preferred.length === 0 && /гибрид|hybrid/i.test(questionText)) {
-      const option = findYesNoOption(options, preferenceListIncludes(preferences, 'workFormatPreference', 'hybrid'));
+      const configuredFormats = normalizeMultiPreference(preferences.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES);
+      const option = findYesNoOption(options, configuredFormats.length === 0 || configuredFormats.includes('hybrid'));
       if (option) preferred.push(option);
     } else if (preferred.length === 0 && /офис|office/i.test(questionText)) {
-      const option = findYesNoOption(options, preferenceListIncludes(preferences, 'workFormatPreference', 'office'));
+      const configuredFormats = normalizeMultiPreference(preferences.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES);
+      const option = findYesNoOption(options, configuredFormats.length === 0 || configuredFormats.includes('office'));
       if (option) preferred.push(option);
     }
   }
