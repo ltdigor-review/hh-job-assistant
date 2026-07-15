@@ -14,10 +14,7 @@ function readiness() {
 
 const valid = {
   groqApiKey: 'gsk_test',
-  resumeUrl: 'https://hh.ru/resume/abc123',
-  coverPrompt: 'cover',
-  employerQuestionPrompt: 'questions',
-  choiceRetryPrompt: 'choices'
+  resumeUrl: 'https://hh.ru/resume/abc123'
 };
 
 test('readiness requires all launch settings in stable order', () => {
@@ -25,14 +22,15 @@ test('readiness requires all launch settings in stable order', () => {
   assert.equal(result.ready, false);
   assert.deepEqual(Array.from(result.missing, (item) => item.code), [
     'groq_api_key',
-    'resume_url',
-    'cover_prompt',
-    'employer_question_prompt',
-    'choice_retry_prompt'
+    'resume_url'
+  ]);
+  assert.deepEqual(Array.from(result.missing, (item) => item.label), [
+    'ключ Groq API',
+    'ссылка на резюме hh.ru'
   ]);
 });
 
-test('readiness accepts regional https hh resume URLs and all prompts', () => {
+test('readiness accepts regional https hh resume URLs', () => {
   assert.equal(readiness().evaluate({ ...valid, resumeUrl: 'https://ekaterinburg.hh.ru/resume/abc123' }).ready, true);
 });
 
@@ -42,10 +40,9 @@ test('readiness rejects unsafe or non-resume URLs', () => {
   }
 });
 
-test('readiness rejects whitespace-only prompts and key', () => {
-  for (const key of ['groqApiKey', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']) {
-    assert.equal(readiness().evaluate({ ...valid, [key]: '  ' }).ready, false);
-  }
+test('readiness rejects a whitespace-only key but ignores internal prompts', () => {
+  assert.equal(readiness().evaluate({ ...valid, groqApiKey: '  ' }).ready, false);
+  assert.equal(readiness().evaluate({ ...valid, coverPrompt: '  ', employerQuestionPrompt: null, choiceRetryPrompt: '' }).ready, true);
 });
 
 test('popup exposes not configured state and blocks start and continue', () => {

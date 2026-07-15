@@ -101,9 +101,9 @@ async function loadOptions() {
   fields.telegramUsername.value = values.telegramUsername || DEFAULTS.telegramUsername;
   setMultiCheckboxValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
   setMultiCheckboxValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
-  fields.coverPrompt.value = values.coverPrompt ?? DEFAULTS.coverPrompt;
-  fields.employerQuestionPrompt.value = values.employerQuestionPrompt ?? DEFAULTS.employerQuestionPrompt;
-  fields.choiceRetryPrompt.value = values.choiceRetryPrompt ?? DEFAULTS.choiceRetryPrompt;
+  fields.coverPrompt.value = String(values.coverPrompt || '').trim() || DEFAULTS.coverPrompt;
+  fields.employerQuestionPrompt.value = String(values.employerQuestionPrompt || '').trim() || DEFAULTS.employerQuestionPrompt;
+  fields.choiceRetryPrompt.value = String(values.choiceRetryPrompt || '').trim() || DEFAULTS.choiceRetryPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;

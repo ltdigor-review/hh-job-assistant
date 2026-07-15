@@ -190,9 +190,10 @@ async function appendAgentLog(event, details = {}) {
 async function ensureDefaults() {
   const current = await storageGet(Object.keys(DEFAULTS));
   const patch = {};
+  const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']);
 
   for (const [key, value] of Object.entries(DEFAULTS)) {
-    if (current[key] === undefined) {
+    if (current[key] === undefined || (promptKeys.has(key) && !String(current[key] || '').trim())) {
       patch[key] = value;
     }
   }
@@ -210,17 +211,15 @@ async function ensureDefaults() {
   }
 
   if (current.aiPromptsVersion !== 1) {
-    patch.coverPrompt = current.coverPrompt === undefined
-      ? DEFAULTS.coverPrompt
-      : OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)
-      ? DEFAULTS.coverPrompt
-      : String(current.coverPrompt || '').trim() ? `${current.coverPrompt}\n\n${DEFAULTS.coverPrompt}` : current.coverPrompt;
-    patch.employerQuestionPrompt = current.employerQuestionPrompt === undefined
-      ? DEFAULTS.employerQuestionPrompt
-      : OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS.has(current.employerQuestionPrompt)
-      ? DEFAULTS.employerQuestionPrompt
-      : String(current.employerQuestionPrompt || '').trim() ? `${current.employerQuestionPrompt}\n\n${DEFAULTS.employerQuestionPrompt}` : current.employerQuestionPrompt;
-    patch.choiceRetryPrompt = DEFAULTS.choiceRetryPrompt;
+    if (!String(current.coverPrompt || '').trim() || OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)) {
+      patch.coverPrompt = DEFAULTS.coverPrompt;
+    }
+    if (!String(current.employerQuestionPrompt || '').trim() || OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS.has(current.employerQuestionPrompt)) {
+      patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
+    }
+    if (!String(current.choiceRetryPrompt || '').trim()) {
+      patch.choiceRetryPrompt = DEFAULTS.choiceRetryPrompt;
+    }
     patch.aiPromptsVersion = 1;
   }
 

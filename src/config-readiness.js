@@ -1,17 +1,14 @@
 (function installConfigReadiness() {
   const REQUIRED = [
-    ['groq_api_key', 'Groq API key', (value) => Boolean(String(value || '').trim())],
-    ['resume_url', 'HH resume URL', (value) => {
+    ['groq_api_key', 'ключ Groq API', (value) => Boolean(String(value || '').trim())],
+    ['resume_url', 'ссылка на резюме hh.ru', (value) => {
       try {
         const url = new URL(String(value || '').trim());
         return url.protocol === 'https:' && (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) && /^\/resume\/[^/?#]+/.test(url.pathname);
       } catch {
         return false;
       }
-    }],
-    ['cover_prompt', 'cover letter prompt', (value) => Boolean(String(value || '').trim())],
-    ['employer_question_prompt', 'employer question prompt', (value) => Boolean(String(value || '').trim())],
-    ['choice_retry_prompt', 'choice retry prompt', (value) => Boolean(String(value || '').trim())]
+    }]
   ];
 
   function evaluate(config = {}) {

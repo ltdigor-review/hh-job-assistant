@@ -239,10 +239,10 @@ async function readRuntimeState() {
 }
 
 async function refreshPopup() {
-  const [settings, runtimeError] = await Promise.all([
-    chrome.storage.local.get(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']),
-    readRuntimeState()
-  ]);
+  // GET_STATUS waits for background default initialization. Read storage only
+  // afterwards so a cold popup cannot observe an incomplete migration.
+  const runtimeError = await readRuntimeState();
+  const settings = await chrome.storage.local.get(['groqApiKey', 'resumeUrl']);
   hasGroqKey = Boolean(settings.groqApiKey);
   readiness = globalThis.HHJA_CONFIG_READINESS.evaluate(settings);
   lastTabState = runtimeError || await readTabState();

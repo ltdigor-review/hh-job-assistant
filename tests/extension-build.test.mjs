@@ -388,6 +388,59 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
 });
 
+test('background repairs blank prompts and preserves non-empty custom prompts during migration', async () => {
+  const localData = {
+    aiPromptsVersion: 0,
+    coverPrompt: '  ',
+    employerQuestionPrompt: 'Custom employer instructions',
+    choiceRetryPrompt: 'Custom exact-choice instructions',
+    agentDebugLogsEnabled: true
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: { async get() { return { status: 'complete' }; } },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(localData.coverPrompt, /1-2 простых предложения/);
+  assert.equal(localData.employerQuestionPrompt, 'Custom employer instructions');
+  assert.equal(localData.choiceRetryPrompt, 'Custom exact-choice instructions');
+  assert.equal(localData.aiPromptsVersion, 1);
+
+  localData.coverPrompt = null;
+  localData.employerQuestionPrompt = '\n\t';
+  localData.choiceRetryPrompt = '';
+  const installedListenerChrome = globalThis.chrome;
+  let onInstalled;
+  installedListenerChrome.runtime.onInstalled.addListener = (listener) => { onInstalled = listener; };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await onInstalled();
+
+  assert.match(localData.coverPrompt, /1-2 простых предложения/);
+  assert.match(localData.employerQuestionPrompt, /вопросы работодателя/);
+  assert.match(localData.choiceRetryPrompt, /точные подписи/);
+});
+
 test('background clears stale current action when a run completes', async () => {
   let listener = null;
   const localData = {
@@ -2061,6 +2114,20 @@ test('popup view model reports exact readiness and blocker text', async () => {
   });
 });
 
+test('popup waits for background initialization before reading readiness storage', async () => {
+  const source = await readFile(new URL('src/popup.js', root), 'utf8');
+  const refreshBody = source.slice(
+    source.indexOf('async function refreshPopup()'),
+    source.indexOf('async function sendToActiveTab')
+  );
+
+  const runtimeRead = refreshBody.indexOf('await readRuntimeState()');
+  const storageRead = refreshBody.indexOf('await chrome.storage.local.get');
+  assert.ok(runtimeRead >= 0);
+  assert.ok(storageRead > runtimeRead);
+  assert.doesNotMatch(refreshBody, /Promise\.all/);
+});
+
 test('popup view model disables start and enables stop only during active runs', async () => {
   const { derivePopupView } = await import(new URL('src/popup-view.js', root));
 
@@ -2176,9 +2243,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     telegramUsername: '',
     employmentPreference: '',
     workFormatPreference: '',
-    coverPrompt: 'default prompt',
-    employerQuestionPrompt: 'default employer prompt',
-    choiceRetryPrompt: 'default choice prompt',
+    coverPrompt: '   ',
+    employerQuestionPrompt: null,
+    choiceRetryPrompt: '',
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
@@ -2289,6 +2356,10 @@ test('options preserve masked Groq key unless user edits the key field', async (
   try {
     await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#options-${crypto.randomUUID()}`);
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(elements.coverPrompt.value, 'default prompt');
+    assert.equal(elements.employerQuestionPrompt.value, 'default employer prompt');
+    assert.equal(elements.choiceRetryPrompt.value, 'default choice prompt');
 
     await handlers.get('testGroq:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
