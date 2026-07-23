@@ -11,6 +11,10 @@ npm test >"${log_file}" 2>&1
 status=$?
 set -e
 
+if [[ "${status}" -eq 0 ]] && grep -Eq '(^|[[:space:]#])(fail|cancelled)[[:space:]]+[1-9][0-9]*' "${log_file}"; then
+  status=1
+fi
+
 echo
 if [[ "${status}" -eq 0 ]]; then
   echo "npm test: PASS"

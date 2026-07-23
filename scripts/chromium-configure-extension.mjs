@@ -110,7 +110,7 @@ function pickConfig(fileEnv) {
   if (groqModel) patch.groqModel = groqModel;
   if (resumeUrl) patch.resumeUrl = resumeUrl;
   if (expectedSalary) patch.expectedSalary = expectedSalary;
-  if (dailyLimit) patch.dailyLimit = Math.max(1, Math.min(Number(dailyLimit) || 20, 100));
+  if (dailyLimit) patch.dailyLimit = Math.max(1, Math.min(Number(dailyLimit) || 20, 200));
   const parsedDelayMinMs = delayMinMs ? Math.max(500, Number(delayMinMs) || 2500) : undefined;
   const parsedDelayMaxMs = delayMaxMs ? Math.max(500, Number(delayMaxMs) || 5000) : undefined;
   if (

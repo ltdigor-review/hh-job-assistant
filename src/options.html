@@ -185,6 +185,45 @@
         margin-top: 10px;
       }
 
+      .resume-profile-card {
+        margin: 16px 0 20px;
+        padding: 16px;
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .resume-profile-card label:first-child {
+        margin-top: 0;
+      }
+
+      .resume-profile-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .resume-profile-audit {
+        min-height: 56px;
+        margin-top: 8px;
+        padding: 10px 12px;
+        border: 1px solid #f1c27d;
+        border-radius: 6px;
+        background: #fff8e8;
+        white-space: pre-wrap;
+      }
+
+      #resumeProfileStatus {
+        min-height: 20px;
+        margin-top: 10px;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: .6;
+      }
+
       button {
         border: 1px solid #1f5fbf;
         border-radius: 6px;
@@ -249,8 +288,32 @@
       <label for="resumeUrl">Ссылка на резюме hh.ru</label>
       <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">
 
-      <label for="resumeCacheTtlHours">Кэш резюме, часов</label>
-      <input id="resumeCacheTtlHours" type="number" min="0.1" step="0.5">
+      <section class="resume-profile-card" aria-labelledby="resumeProfileLabel">
+        <label id="resumeProfileLabel" for="resumeProfileText">Промпт с резюме</label>
+        <textarea id="resumeProfileText" placeholder="Сначала нажмите «Заполнить промпт с резюме»"></textarea>
+
+        <div class="resume-profile-actions">
+          <button id="buildResumeProfile" class="secondary" type="button">Заполнить промпт с резюме</button>
+        </div>
+
+        <label for="resumeProfileEditComment">Что изменить в промпте</label>
+        <textarea id="resumeProfileEditComment" placeholder="Например: убери неподтвержденные обязанности и подробнее опиши найм и онбординг"></textarea>
+        <div class="resume-profile-actions">
+          <button id="editResumeProfile" class="secondary" type="button">Отредактировать промпт</button>
+        </div>
+
+        <label class="checkbox" for="resumeProfileAutoRefreshEnabled">
+          <input id="resumeProfileAutoRefreshEnabled" type="checkbox">
+          Автоматически обновлять промпт при изменении резюме
+        </label>
+
+        <label for="resumeCacheTtlHours">Проверять обновления резюме каждые, часов</label>
+        <input id="resumeCacheTtlHours" type="number" min="0.1" step="0.5">
+
+        <label for="resumeProfileWeaknesses">Недостатки резюме</label>
+        <div id="resumeProfileWeaknesses" class="resume-profile-audit" role="status">Промпт с резюме ещё не заполнен.</div>
+        <div id="resumeProfileStatus" role="status"></div>
+      </section>
 
       <label for="expectedSalary">Ожидаемая зарплата для ответов</label>
       <input id="expectedSalary" type="text" placeholder="Например: 250 000 руб. на руки">
@@ -307,13 +370,11 @@
       </div>
 
       <h2>Groq API</h2>
-      <label for="groqModel">Модель Groq</label>
-      <select id="groqModel">
-        <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile</option>
-        <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant</option>
+      <label for="groqModel">Модель для вопросов работодателя</label>
+      <select id="groqModel" disabled>
         <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B</option>
-        <option value="openai/gpt-oss-20b">OpenAI GPT-OSS 20B</option>
       </select>
+      <p class="hint">Сопроводительные письма автоматически отправляются в Llama 3.1 8B Instant.</p>
 
       <label for="groqApiKey">Ключ Groq API</label>
       <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
@@ -330,9 +391,6 @@
 
       <label for="employerQuestionPrompt">Промпт для ответов на вопросы работодателя</label>
       <textarea id="employerQuestionPrompt"></textarea>
-
-      <label for="choiceRetryPrompt">Промпт для уточнения вариантов ответа</label>
-      <textarea id="choiceRetryPrompt"></textarea>
 
       <div class="actions">
         <button id="save" type="button">Сохранить</button>

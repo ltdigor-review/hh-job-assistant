@@ -15,7 +15,8 @@ const OLD_DEFAULT_COVER_PROMPTS = new Set([
   'Напиши одну живую строку для отклика hh.ru: 50-150 символов, по-русски, без приветствия. Пиши от первого лица и используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт", "соответствует требованиям". Только текст.'
 ]);
 const OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS = new Set([
-  'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.'
+  'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.',
+  'Отвечай на вопросы работодателя на языке вопроса так, чтобы повысить шанс получить приглашение. Используй зарплату, контакты и точные варианты из контекста кандидата. Если в резюме нет прямого опыта, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Открытый ответ должен прямо отвечать на вопрос. Пиши кратко, естественно и уверенно, без списков. Для развернутого ответа пиши от первого лица. Для города, зарплаты, стажа, размера команды, контакта, мессенджера и других фактических полей возвращай только короткое значение без местоимения, глагола, префикса или полного предложения. Не перечисляй способы обучения и инструменты, если вопрос этого прямо не просит. Не ставь точку в конце. Формат обязателен: Text question N: <готовый ответ>; Choice group N: <точная подпись варианта или вариантов>.'
 ]);
 const LEGACY_DEFAULT_DELAYS = [
   [8000, 15000],
@@ -26,19 +27,80 @@ const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
 const RESPONSE_NAVIGATION_WATCHDOG_ALARM = 'hhja-response-navigation-watchdog';
 const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
 const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
-const RESUME_GROQ_RETRY_BRIEF_MAX_CHARS = 800;
+const RESUME_PROFILE_MAX_CHARS = 6000;
+const RESUME_PROFILE_WEAKNESSES_MAX_CHARS = 3000;
+const RESUME_PROFILE_MODEL_MAX_TOKENS = 1800;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
-const GROQ_COVER_LETTER_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_QUESTION_MODEL = 'openai/gpt-oss-120b';
+const GROQ_COVER_LETTER_MODEL = 'llama-3.1-8b-instant';
 const GROQ_COVER_LETTER_MAX_TOKENS = 120;
-const GROQ_COVER_LETTER_RETRY_MAX_TOKENS = 180;
-const GROQ_CHOICE_RETRY_MAX_TOKENS = 300;
 const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
-const GROQ_TEST_ASSIST_RETRY_MAX_TOKENS = 1400;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
-const GROQ_EMPTY_RESPONSE_RETRIES = 1;
-const GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS = 500;
+const GROQ_QUOTA_WAIT_MAX_MS = 60000;
+const GROQ_DAILY_RATE_TOKEN_LIMITS = Object.freeze({
+  [GROQ_QUESTION_MODEL]: 180000,
+  [GROQ_COVER_LETTER_MODEL]: 450000
+});
+const GROQ_DAILY_REQUEST_LIMITS = Object.freeze({
+  [GROQ_QUESTION_MODEL]: 1000,
+  [GROQ_COVER_LETTER_MODEL]: 14400
+});
+const GROQ_PUBLISHED_TPM_LIMITS = Object.freeze({
+  [GROQ_QUESTION_MODEL]: 8000,
+  [GROQ_COVER_LETTER_MODEL]: 6000
+});
+const EMPLOYER_ANSWER_RESPONSE_FORMAT = Object.freeze({
+  type: 'json_schema',
+  json_schema: {
+    name: 'hh_employer_answers',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        answers: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              answer: { type: 'string' },
+              selectedOptions: { type: 'array', items: { type: 'string' } }
+            },
+            required: ['id', 'answer', 'selectedOptions'],
+            additionalProperties: false
+          }
+        },
+        coverLetter: { type: 'string' }
+      },
+      required: ['answers', 'coverLetter'],
+      additionalProperties: false
+    }
+  }
+});
+const EMPLOYER_ANSWER_INTERNAL_INSTRUCTION = [
+  'Верни один JSON-объект по заданной схеме.',
+  'Для каждого переданного question верни ровно один answers item с тем же id.',
+  'Для kind=text заполни answer, а selectedOptions оставь пустым.',
+  'Для kind=choice заполни selectedOptions только точными строками из options; answer оставь пустым.',
+  'Для radio выбери ровно один вариант, для checkbox — все подходящие.',
+  'Если coverLetterRequested=false, coverLetter должен быть пустой строкой.',
+  'Если coverLetterRequested=true, coverLetter — финальный компактный русский текст без приветствия, markdown и служебных данных.',
+  'Не повторяй текст вопроса. Не возвращай лишние id и не меняй порядок входных вопросов.'
+].join(' ');
+const RESUME_PROFILE_BUILD_INSTRUCTION = [
+  'Преобразуй текст резюме в подробный фактический профиль кандидата для последующих ответов работодателям.',
+  'Используй только явно указанные факты. Не додумывай обязанности, результаты, метрики, инструменты или управленческие практики.',
+  'Сохрани роли, периоды, домены, технологии, достижения и полный управленческий опыт: размер команд, найм, интервью, онбординг, наставничество, performance review и развитие сотрудников — только если они есть в исходном тексте.',
+  'Отдельно перечисли слабые места резюме: важные заявления без конкретики или ожидаемые для заявленных ролей факты, которые в резюме не подтверждены.',
+  'Верни только JSON: {"profile":"...","weaknesses":["..."]}. Без markdown и пояснений.'
+].join(' ');
+const RESUME_PROFILE_EDIT_INSTRUCTION = [
+  'Отредактируй профиль кандидата по комментарию пользователя.',
+  'Не меняй формат назначения профиля и не добавляй сведения, которых нет в текущем профиле или явном комментарии пользователя.',
+  'Верни только JSON: {"profile":"..."}. Без markdown и пояснений.'
+].join(' ');
 const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_contract']);
 const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 const RESPONSE_FORM_PROCESSING_STATES = new Set([
@@ -46,6 +108,8 @@ const RESPONSE_FORM_PROCESSING_STATES = new Set([
   'filling_cover_letter',
   'submitting'
 ]);
+let resumeProfileRefreshPromise = null;
+let groqHttpQueue = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -169,6 +233,283 @@ function parseRetryAfterMs(value) {
   return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : 0;
 }
 
+function getUtcDay(timestamp = Date.now()) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function parseRateLimitResetMs(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 0;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric >= 0) return numeric * 1000;
+  let totalMs = 0;
+  const pattern = /(\d+(?:\.\d+)?)\s*(ms|d|h|m|s)/g;
+  for (const match of raw.matchAll(pattern)) {
+    const amount = Number(match[1]);
+    const unit = match[2];
+    const multiplier = unit === 'd'
+      ? 86400000
+      : unit === 'h'
+        ? 3600000
+        : unit === 'm'
+          ? 60000
+          : unit === 's'
+            ? 1000
+            : 1;
+    totalMs += amount * multiplier;
+  }
+  return Math.max(0, Math.round(totalMs));
+}
+
+function headerValue(headers, name) {
+  return headers?.get?.(name) ?? headers?.get?.(name.toLowerCase()) ?? '';
+}
+
+function normalizeRateLimitHeaders(headers) {
+  const numberValue = (name) => {
+    const raw = headerValue(headers, name);
+    if (raw === '' || raw == null) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  };
+  return {
+    limitRequests: numberValue('x-ratelimit-limit-requests'),
+    remainingRequests: numberValue('x-ratelimit-remaining-requests'),
+    limitTokens: numberValue('x-ratelimit-limit-tokens'),
+    remainingTokens: numberValue('x-ratelimit-remaining-tokens'),
+    resetRequests: String(headerValue(headers, 'x-ratelimit-reset-requests') || ''),
+    resetTokens: String(headerValue(headers, 'x-ratelimit-reset-tokens') || ''),
+    observedAt: nowIso()
+  };
+}
+
+function emptyQuotaModelUsage() {
+  return {
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cachedTokens: 0,
+    rateTokens: 0,
+    fallbackCount: 0,
+    fallbackReasons: {},
+    lastHeaders: {}
+  };
+}
+
+function normalizeQuotaState(value) {
+  const utcDay = getUtcDay();
+  if (!value || value.utcDay !== utcDay) return { utcDay, models: {} };
+  return {
+    utcDay,
+    models: value.models && typeof value.models === 'object' ? value.models : {}
+  };
+}
+
+function quotaModelUsage(state, model) {
+  return { ...emptyQuotaModelUsage(), ...(state.models?.[model] || {}) };
+}
+
+function getQuotaModelForTask(task) {
+  return task === 'cover_letter' ? GROQ_COVER_LETTER_MODEL : GROQ_QUESTION_MODEL;
+}
+
+function quotaStatusText(state) {
+  const question = quotaModelUsage(state, GROQ_QUESTION_MODEL);
+  const cover = quotaModelUsage(state, GROQ_COVER_LETTER_MODEL);
+  const fallbacks = question.fallbackCount + cover.fallbackCount;
+  const promptTokens = question.promptTokens + cover.promptTokens;
+  const cachedTokens = question.cachedTokens + cover.cachedTokens;
+  const cacheHitRate = promptTokens > 0 ? Math.round((cachedTokens / promptTokens) * 100) : 0;
+  return [
+    `AI: ${question.requests + cover.requests} запросов`,
+    `GPT ${question.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_QUESTION_MODEL]}`,
+    `8B ${cover.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_COVER_LETTER_MODEL]}`,
+    `cache ${cacheHitRate}%`,
+    `fallback ${fallbacks}`
+  ].join(' · ');
+}
+
+async function storeQuotaState(state) {
+  const normalized = normalizeQuotaState(state);
+  const { runState = DEFAULTS.runState } = await storageGet(['runState']);
+  await storageSet({
+    aiQuotaUsage: normalized,
+    runState: {
+      ...DEFAULTS.runState,
+      ...runState,
+      aiQuotaStatus: quotaStatusText(normalized)
+    }
+  });
+  return normalized;
+}
+
+async function getQuotaState() {
+  const { aiQuotaUsage } = await storageGet(['aiQuotaUsage']);
+  return normalizeQuotaState(aiQuotaUsage);
+}
+
+async function recordAiQuotaFallback(task, reason = 'unknown') {
+  const state = await getQuotaState();
+  const model = getQuotaModelForTask(task);
+  const entry = quotaModelUsage(state, model);
+  const key = cleanPlainText(reason || 'unknown').slice(0, 100) || 'unknown';
+  entry.fallbackCount += 1;
+  entry.fallbackReasons = {
+    ...(entry.fallbackReasons || {}),
+    [key]: Number(entry.fallbackReasons?.[key] || 0) + 1
+  };
+  state.models[model] = entry;
+  await storeQuotaState(state);
+  await appendAgentLog('ai_quota_fallback', { task, model, reason: key, fallbackCount: entry.fallbackCount });
+}
+
+function estimateGroqRequestTokens(requestBody) {
+  const serialized = JSON.stringify({
+    messages: requestBody.messages,
+    response_format: requestBody.response_format || null
+  });
+  const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(serialized).length : serialized.length * 2;
+  const completionTokens = Math.max(0, Number(requestBody.max_tokens) || 0);
+  return {
+    likelyRateTokens: Math.ceil(bytes / 3) + completionTokens,
+    maximumRateTokens: bytes + completionTokens
+  };
+}
+
+async function preflightGroqQuota({ task, model, requestBody }) {
+  const state = await getQuotaState();
+  const entry = quotaModelUsage(state, model);
+  const dailyLimit = GROQ_DAILY_RATE_TOKEN_LIMITS[model];
+  const dailyRequestLimit = GROQ_DAILY_REQUEST_LIMITS[model];
+  const estimate = estimateGroqRequestTokens(requestBody);
+  if (dailyRequestLimit && entry.requests >= dailyRequestLimit) {
+    const error = new Error(`Дневная квота запросов ${model} исчерпана; используется безопасный локальный ответ.`);
+    error.code = 'HHJA_AI_QUOTA_REQUESTS';
+    throw error;
+  }
+  if (dailyLimit && entry.rateTokens + estimate.maximumRateTokens > dailyLimit) {
+    const error = new Error(`Дневной AI-бюджет ${model} исчерпан; используется безопасный локальный ответ.`);
+    error.code = 'HHJA_AI_QUOTA_DAILY';
+    throw error;
+  }
+
+  const headers = entry.lastHeaders || {};
+  const observedAt = Date.parse(headers.observedAt || 0);
+  const tokenResetMs = parseRateLimitResetMs(headers.resetTokens);
+  const tokenResetAt = Number.isFinite(observedAt) ? observedAt + tokenResetMs : 0;
+  const tpmLimit = Number(headers.limitTokens) || GROQ_PUBLISHED_TPM_LIMITS[model] || 0;
+  if (tpmLimit && estimate.likelyRateTokens > tpmLimit) {
+    const error = new Error(`Запрос превышает минутный токенный лимит ${model}; используется безопасный локальный ответ.`);
+    error.code = 'HHJA_AI_QUOTA_TPM';
+    throw error;
+  }
+  if (
+    Number.isFinite(Number(headers.remainingTokens)) &&
+    Number(headers.remainingTokens) < estimate.likelyRateTokens &&
+    tokenResetAt > Date.now()
+  ) {
+    const waitMs = tokenResetAt - Date.now();
+    if (waitMs > GROQ_QUOTA_WAIT_MAX_MS) {
+      const error = new Error(`Минутная квота ${model} восстановится слишком поздно; используется безопасный локальный ответ.`);
+      error.code = 'HHJA_AI_QUOTA_TPM';
+      throw error;
+    }
+    await sleep(waitMs);
+  }
+
+  const requestResetMs = parseRateLimitResetMs(headers.resetRequests);
+  const requestResetAt = Number.isFinite(observedAt) ? observedAt + requestResetMs : 0;
+  if (Number(headers.remainingRequests) <= 0 && requestResetAt > Date.now()) {
+    const error = new Error(`Дневная квота запросов ${model} исчерпана; используется безопасный локальный ответ.`);
+    error.code = 'HHJA_AI_QUOTA_REQUESTS';
+    throw error;
+  }
+  return estimate;
+}
+
+async function recordGroqUsage({ task, model, requestBody, response, usage }) {
+  const state = await getQuotaState();
+  const entry = quotaModelUsage(state, model);
+  const normalized = normalizeUsage(usage);
+  const estimate = estimateGroqRequestTokens(requestBody);
+  const promptTokens = normalized.promptTokens ?? 0;
+  const completionTokens = normalized.completionTokens ?? 0;
+  const totalTokens = normalized.totalTokens ?? (promptTokens + completionTokens);
+  const cachedTokens = normalized.cachedTokens ?? 0;
+  const rateTokens = normalized.promptTokens == null
+    ? estimate.likelyRateTokens
+    : Math.max(0, promptTokens - cachedTokens) + completionTokens;
+  entry.requests += 1;
+  entry.promptTokens += promptTokens;
+  entry.completionTokens += completionTokens;
+  entry.totalTokens += totalTokens;
+  entry.cachedTokens += cachedTokens;
+  entry.rateTokens += rateTokens;
+  entry.lastHeaders = normalizeRateLimitHeaders(response?.headers);
+  state.models[model] = entry;
+  await storeQuotaState(state);
+  await appendAgentLog('ai_quota_usage', {
+    task,
+    model,
+    requests: entry.requests,
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    rateTokens,
+    dailyRateTokens: entry.rateTokens,
+    dailyLimit: GROQ_DAILY_RATE_TOKEN_LIMITS[model] || null,
+    headers: entry.lastHeaders
+  });
+  return normalized;
+}
+
+function enqueueGroqHttp(work) {
+  const queued = groqHttpQueue.then(work, work);
+  groqHttpQueue = queued.catch(() => {});
+  return queued;
+}
+
+async function fetchGroqCompletion({ task, model, groqApiKey, requestBody }) {
+  return enqueueGroqHttp(async () => {
+    await preflightGroqQuota({ task, model, requestBody });
+    const controller = new AbortController();
+    const timeoutMs = getGroqRequestTimeoutMs();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${groqApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify(requestBody)
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const responseText = await response.text?.().catch?.(() => '') ?? '';
+    let data = null;
+    if (responseText) {
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        data = null;
+      }
+    } else if (typeof response.json === 'function') {
+      data = await response.json().catch(() => null);
+    }
+    await recordGroqUsage({ task, model, requestBody, response, usage: data?.usage });
+    return { response, responseText, data };
+  });
+}
+
 async function storageGet(keys) {
   return chrome.storage.local.get(keys);
 }
@@ -190,7 +531,7 @@ async function appendAgentLog(event, details = {}) {
 async function ensureDefaults() {
   const current = await storageGet(Object.keys(DEFAULTS));
   const patch = {};
-  const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']);
+  const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt']);
 
   for (const [key, value] of Object.entries(DEFAULTS)) {
     if (current[key] === undefined || (promptKeys.has(key) && !String(current[key] || '').trim())) {
@@ -210,17 +551,14 @@ async function ensureDefaults() {
     patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
   }
 
-  if (current.aiPromptsVersion !== 1) {
+  if (current.aiPromptsVersion !== 2) {
     if (!String(current.coverPrompt || '').trim() || OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)) {
       patch.coverPrompt = DEFAULTS.coverPrompt;
     }
     if (!String(current.employerQuestionPrompt || '').trim() || OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS.has(current.employerQuestionPrompt)) {
       patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
     }
-    if (!String(current.choiceRetryPrompt || '').trim()) {
-      patch.choiceRetryPrompt = DEFAULTS.choiceRetryPrompt;
-    }
-    patch.aiPromptsVersion = 1;
+    patch.aiPromptsVersion = 2;
   }
 
   if (LEGACY_DEFAULT_DELAYS.some(([min, max]) => current.delayMinMs === min && current.delayMaxMs === max)) {
@@ -331,39 +669,26 @@ function formatContactContext({ telegramUsername }) {
   return telegram ? `Telegram: ${telegram}` : 'Telegram: не указан';
 }
 
-function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, choiceRetryPrompt, vacancyText, extraText }) {
+function buildGroqMessages({ task, resumeText, candidateFacts = null, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, questions = [], coverLetterRequested = false }) {
   const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
   const contactContext = formatContactContext({ telegramUsername });
-  if (task === 'choice_retry') {
-    return [
-      {
-        role: 'system',
-        content: choiceRetryPrompt
-      },
-      {
-        role: 'user',
-        content: [
-          'Резюме кратко:',
-          resumeText || '(резюме не указано)',
-          '',
-          'Варианты и предыдущий ответ:',
-          extraText || '(нет)'
-        ].join('\n')
-      }
-    ];
-  }
-
   if (task === 'test_assist') {
     return [
       {
         role: 'system',
-        content: employerQuestionPrompt
+        content: EMPLOYER_ANSWER_INTERNAL_INSTRUCTION
       },
       {
-        role: 'user',
+        role: 'system',
         content: [
+          'Пользовательские правила:',
+          employerQuestionPrompt,
+          '',
           'Резюме кандидата:',
           resumeText || '(резюме не указано)',
+          '',
+          'Точные данные кандидата:',
+          `Возраст: ${candidateFacts.age} лет`,
           '',
           'Ожидаемая зарплата кандидата:',
           expectedSalary || '(зарплата не указана)',
@@ -372,14 +697,16 @@ function buildGroqMessages({ task, resumeText, expectedSalary, telegramUsername,
           contactContext,
           '',
           'Предпочтения кандидата:',
-          preferenceContext,
-          '',
-          'Текст вакансии или теста:',
-          vacancyText || '(текст не найден)',
-          '',
-          'Структурированные вопросы и варианты ответа со страницы:',
-          extraText || '(нет)'
+          preferenceContext
         ].join('\n')
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          vacancy: vacancyText || '',
+          questions: Array.isArray(questions) ? questions : [],
+          coverLetterRequested: Boolean(coverLetterRequested)
+        })
       }
     ];
   }
@@ -447,7 +774,28 @@ function extractResumeTextScript() {
     return { ok: false, error: 'Обнаружена страница входа или captcha', text: '' };
   }
 
-  const main = document.querySelector('main')?.innerText || text;
+  const mainNode = document.querySelector('main');
+  const main = mainNode?.innerText || text;
+  const normalize = (value) => String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  const parseExactAge = (value) => {
+    const match = normalize(value).match(/^(?:Возраст\s*[:—-]?\s*)?(\d{1,2})\s+(?:год|года|лет)$/i);
+    const age = Number(match?.[1]);
+    return Number.isInteger(age) && age >= 18 && age <= 80 ? age : null;
+  };
+  const directAgeNode = document.querySelector('[data-qa="resume-personal-age"]');
+  let age = parseExactAge(directAgeNode?.innerText || directAgeNode?.textContent || '');
+  let ageSource = age ? 'resume-personal-age' : '';
+  if (!age) {
+    const fallbackNodes = [...(document.querySelectorAll?.('header, [data-qa*="resume-header"], [data-qa*="resume-personal"]') || [])];
+    for (const node of fallbackNodes) {
+      const exactLines = normalize(node?.innerText || node?.textContent || '').split(/\r?\n/).map(normalize).filter(Boolean);
+      const matchedAge = exactLines.map(parseExactAge).find(Number.isInteger);
+      if (!matchedAge) continue;
+      age = matchedAge;
+      ageSource = 'resume-header-template';
+      break;
+    }
+  }
   return {
     ok: true,
     title: document.title,
@@ -456,7 +804,8 @@ function extractResumeTextScript() {
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
-      .slice(0, 12000)
+      .slice(0, 12000),
+    candidateFacts: age ? { age, source: ageSource } : null
   };
 }
 
@@ -526,27 +875,46 @@ async function getVacancyContextByUrl(vacancyUrl) {
   }
 }
 
-async function getResumeContext() {
+function normalizeResumeCandidateFacts(value, expectedResumeHash = '') {
+  const age = Number(value?.age);
+  if (!Number.isInteger(age) || age < 18 || age > 80) return null;
+  const resumeHash = String(value?.resumeHash || '');
+  if (expectedResumeHash && resumeHash !== expectedResumeHash) return null;
+  return {
+    age,
+    extractedAt: String(value?.extractedAt || ''),
+    source: String(value?.source || ''),
+    resumeHash
+  };
+}
+
+async function getResumeContext({ forceRefresh = false, requireFacts = false } = {}) {
   const {
     resumeUrl = '',
     resumeParsedText = '',
     resumeParsedAt = '',
     resumeParsedUrl = '',
     resumeCacheTtlHours = DEFAULTS.resumeCacheTtlHours,
-    resumeText = ''
-  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeParsedUrl', 'resumeCacheTtlHours', 'resumeText']);
+    resumeText = '',
+    resumeCandidateFacts = null
+  } = await storageGet(['resumeUrl', 'resumeParsedText', 'resumeParsedAt', 'resumeParsedUrl', 'resumeCacheTtlHours', 'resumeText', 'resumeCandidateFacts']);
   const normalizedUrl = normalizeResumeUrl(resumeUrl);
   if (!normalizedUrl) {
+    if (requireFacts && !normalizeResumeCandidateFacts(resumeCandidateFacts, hashText(String(resumeText || '').slice(0, 12000)))) {
+      throw new Error('Не удалось получить точный возраст из резюме HH');
+    }
     return String(resumeText || '').slice(0, 12000);
   }
 
   const ttlHours = Math.max(0.1, Math.min(Number(resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
   const cacheAgeMs = Date.now() - Date.parse(resumeParsedAt || 0);
   if (
+    !forceRefresh &&
     resumeParsedText &&
     resumeParsedUrl === normalizedUrl &&
     Number.isFinite(cacheAgeMs) &&
-    cacheAgeMs < ttlHours * 60 * 60 * 1000
+    cacheAgeMs < ttlHours * 60 * 60 * 1000 &&
+    (!requireFacts || normalizeResumeCandidateFacts(resumeCandidateFacts, hashText(String(resumeParsedText).slice(0, 12000))))
   ) {
     return String(resumeParsedText).slice(0, 12000);
   }
@@ -563,15 +931,33 @@ async function getResumeContext() {
       throw new Error(result.error || 'Не удалось разобрать резюме');
     }
     const text = String(result.text || '').slice(0, 12000);
+    const candidateFacts = result.candidateFacts
+      ? normalizeResumeCandidateFacts({
+          ...result.candidateFacts,
+          extractedAt: nowIso(),
+          resumeHash: hashText(text)
+        }, hashText(text))
+      : null;
+    if (requireFacts && !candidateFacts) {
+      throw new Error('Не удалось получить точный возраст из резюме HH');
+    }
     await storageSet({
       resumeParsedText: text,
       resumeParsedAt: nowIso(),
       resumeParsedUrl: normalizedUrl,
+      resumeCandidateFacts: candidateFacts,
       resumeGroqBriefText: '',
       resumeGroqBriefSourceHash: '',
       resumeGroqBriefBuiltAt: '',
       resumeGroqBriefVersion: ''
     });
+    if (candidateFacts) {
+      await appendAgentLog('resume_candidate_facts_extracted', {
+        age: candidateFacts.age,
+        source: candidateFacts.source,
+        resumeHash: candidateFacts.resumeHash
+      });
+    }
     return text;
   } finally {
     if (tab.id) {
@@ -625,38 +1011,192 @@ async function getResumeGroqContext(sourceText, maxChars = RESUME_GROQ_BRIEF_MAX
   };
 }
 
+function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) {
+  const raw = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Groq вернул некорректный JSON профиля резюме');
+  }
+  const profile = cleanPlainText(parsed?.profile).slice(0, RESUME_PROFILE_MAX_CHARS);
+  if (profile.length < 40) {
+    throw new Error('Groq вернул слишком короткий профиль резюме');
+  }
+  const weaknessValues = Array.isArray(parsed?.weaknesses)
+    ? parsed.weaknesses
+    : parsed?.weaknesses
+      ? [parsed.weaknesses]
+      : [];
+  const weaknesses = weaknessValues
+    .map((item) => cleanPlainText(item))
+    .filter(Boolean)
+    .map((item) => `• ${item}`)
+    .join('\n')
+    .slice(0, RESUME_PROFILE_WEAKNESSES_MAX_CHARS);
+  return { profile, weaknesses: includeWeaknesses ? weaknesses : '' };
+}
+
+async function callResumeProfileModel({ sourceText = '', currentProfile = '', editComment = '', mode = 'build' }) {
+  const { groqApiKey, groqCooldownUntil = '' } = await storageGet([
+    'groqApiKey',
+    'groqCooldownUntil'
+  ]);
+  if (!groqApiKey) throw new Error('Ключ Groq API не настроен');
+  const cooldownUntilMs = Date.parse(groqCooldownUntil || 0);
+  if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now()) {
+    throw new Error(`Groq временно ограничил запросы. Пауза до ${groqCooldownUntil}.`);
+  }
+
+  const task = mode === 'edit' ? 'resume_profile_edit' : 'resume_profile_build';
+  const messages = mode === 'edit'
+    ? [
+        { role: 'system', content: RESUME_PROFILE_EDIT_INSTRUCTION },
+        { role: 'user', content: `Текущий профиль:\n${String(currentProfile).slice(0, RESUME_PROFILE_MAX_CHARS)}\n\nКомментарий пользователя:\n${String(editComment).slice(0, 2000)}` }
+      ]
+    : [
+        { role: 'system', content: RESUME_PROFILE_BUILD_INSTRUCTION },
+        { role: 'user', content: `Текст резюме:\n${String(sourceText).slice(0, 8000)}` }
+      ];
+  const requestBody = {
+    model: GROQ_QUESTION_MODEL,
+    messages,
+    temperature: 0,
+    max_tokens: RESUME_PROFILE_MODEL_MAX_TOKENS
+  };
+  await appendAgentLog('resume_profile_request_start', {
+    task,
+    model: requestBody.model,
+    sourceLength: String(sourceText).length,
+    sourceHash: sourceText ? hashText(sourceText) : '',
+    profileLength: String(currentProfile).length,
+    profileHash: currentProfile ? hashText(currentProfile) : '',
+    commentLength: String(editComment).length,
+    commentHash: editComment ? hashText(editComment) : ''
+  });
+
+  const { response, responseText, data } = await fetchGroqCompletion({
+    task,
+    model: requestBody.model,
+    groqApiKey,
+    requestBody
+  });
+  if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+      await storageSet({ groqCooldownUntil: new Date(Date.now() + retryAfterMs).toISOString() });
+    }
+    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
+  }
+  const content = String(data?.choices?.[0]?.message?.content || '').trim();
+  if (!content || data?.choices?.[0]?.finish_reason === 'length') {
+    throw new Error('Groq вернул пустой или обрезанный профиль резюме');
+  }
+  await appendAgentLog('resume_profile_request_complete', {
+    task,
+    responseLength: content.length,
+    responseHash: hashText(content),
+    usage: normalizeUsage(data?.usage)
+  });
+  return content;
+}
+
+async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() } = {}) {
+  const source = String(sourceText || '').slice(0, 12000);
+  if (!source.trim()) throw new Error('Резюме пустое или не удалось прочитать его текст');
+  const parsed = parseResumeProfileResponse(await callResumeProfileModel({ sourceText: source, mode: 'build' }));
+  const patch = {
+    resumeProfileText: parsed.profile,
+    resumeProfileWeaknesses: parsed.weaknesses,
+    resumeProfileSourceHash: hashText(source),
+    resumeProfileBuiltAt: checkedAt,
+    resumeProfileCheckedAt: checkedAt
+  };
+  await storageSet(patch);
+  return patch;
+}
+
+async function buildResumeProfile() {
+  const source = await getResumeContext({ forceRefresh: true, requireFacts: true });
+  return buildResumeProfileFromSource(source);
+}
+
+async function editResumeProfile(editComment) {
+  const { resumeProfileText = '' } = await storageGet(['resumeProfileText']);
+  if (!String(resumeProfileText).trim()) throw new Error('Сначала заполните промпт с резюме');
+  if (!String(editComment).trim()) throw new Error('Напишите, что нужно изменить в промпте');
+  const parsed = parseResumeProfileResponse(await callResumeProfileModel({
+    currentProfile: resumeProfileText,
+    editComment,
+    mode: 'edit'
+  }), { includeWeaknesses: false });
+  const patch = { resumeProfileText: parsed.profile, resumeProfileBuiltAt: nowIso() };
+  await storageSet(patch);
+  return patch;
+}
+
+async function ensureResumeProfileAutoRefresh() {
+  const current = await storageGet([
+    'resumeProfileText',
+    'resumeProfileSourceHash',
+    'resumeProfileCheckedAt',
+    'resumeProfileAutoRefreshEnabled',
+    'resumeCacheTtlHours',
+    'resumeCandidateFacts'
+  ]);
+  const factsValid = normalizeResumeCandidateFacts(current.resumeCandidateFacts, current.resumeProfileSourceHash || '');
+  if (!current.resumeProfileAutoRefreshEnabled && factsValid) return current;
+  const ttlHours = Math.max(0.1, Math.min(Number(current.resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
+  const ageMs = Date.now() - Date.parse(current.resumeProfileCheckedAt || 0);
+  if (factsValid && Number.isFinite(ageMs) && ageMs < ttlHours * 60 * 60 * 1000) return current;
+  if (resumeProfileRefreshPromise) return resumeProfileRefreshPromise;
+
+  resumeProfileRefreshPromise = (async () => {
+    try {
+      const source = await getResumeContext({ forceRefresh: true, requireFacts: true });
+      const sourceHash = hashText(source);
+      const checkedAt = nowIso();
+      if (current.resumeProfileText && current.resumeProfileSourceHash === sourceHash) {
+        await storageSet({ resumeProfileCheckedAt: checkedAt });
+        await appendAgentLog('resume_profile_auto_refresh', { changed: false, sourceHash, checkedAt });
+        return { ...current, resumeProfileCheckedAt: checkedAt };
+      }
+      const updated = await buildResumeProfileFromSource(source, { checkedAt });
+      await appendAgentLog('resume_profile_auto_refresh', { changed: true, sourceHash, checkedAt });
+      return { ...current, ...updated };
+    } catch (error) {
+      await recordAiQuotaFallback('resume_profile_build', error?.code || 'resume_profile_refresh_error');
+      await appendAgentLog('resume_profile_auto_refresh_error', { error: localizeError(error) });
+      return current;
+    } finally {
+      resumeProfileRefreshPromise = null;
+    }
+  })();
+  return resumeProfileRefreshPromise;
+}
+
 function getMaxTokensForTask(task) {
   if (task === 'test_assist') return GROQ_TEST_ASSIST_MAX_TOKENS;
-  if (task === 'choice_retry') return GROQ_CHOICE_RETRY_MAX_TOKENS;
   return GROQ_COVER_LETTER_MAX_TOKENS;
 }
 
-function getGroqModelForTask(task, configuredModel) {
-  if (task === 'cover_letter') return GROQ_COVER_LETTER_MODEL;
-  return configuredModel || DEFAULTS.groqModel;
-}
-
-function getLengthRetryMaxTokensForTask(task, currentMaxTokens) {
-  if (task === 'test_assist') {
-    return Math.max(currentMaxTokens, GROQ_TEST_ASSIST_RETRY_MAX_TOKENS);
-  }
-  if (task === 'cover_letter') {
-    return Math.max(currentMaxTokens, GROQ_COVER_LETTER_RETRY_MAX_TOKENS);
-  }
-  return currentMaxTokens;
+function getGroqModelForTask(task) {
+  return getQuotaModelForTask(task);
 }
 
 function getGroqTaskLabel(task) {
   if (task === 'test_assist') return 'ответы на вопросы работодателя';
-  if (task === 'choice_retry') return 'уточнение вариантов HH';
+  if (task === 'resume_profile_build' || task === 'resume_profile_edit') return 'профиль резюме';
   return 'сопроводительное письмо';
 }
 
 function normalizeUsage(usage = {}) {
+  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? usage?.cached_tokens;
   return {
     promptTokens: Number.isFinite(Number(usage.prompt_tokens)) ? Number(usage.prompt_tokens) : null,
     completionTokens: Number.isFinite(Number(usage.completion_tokens)) ? Number(usage.completion_tokens) : null,
-    totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null
+    totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null,
+    cachedTokens: Number.isFinite(Number(cachedTokens)) ? Number(cachedTokens) : 0
   };
 }
 
@@ -679,6 +1219,38 @@ function summarizeGroqResponse(data = {}) {
   };
 }
 
+function parseEmployerAnswerResponse(content) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(content || '').trim());
+  } catch {
+    throw new Error('Groq вернул некорректный JSON ответов работодателю');
+  }
+  if (!parsed || !Array.isArray(parsed.answers) || typeof parsed.coverLetter !== 'string') {
+    throw new Error('Groq вернул неполный структурированный ответ работодателю');
+  }
+  const seen = new Set();
+  const answers = parsed.answers.map((item) => {
+    if (
+      !item ||
+      typeof item.id !== 'string' ||
+      typeof item.answer !== 'string' ||
+      !Array.isArray(item.selectedOptions) ||
+      item.selectedOptions.some((option) => typeof option !== 'string') ||
+      seen.has(item.id)
+    ) {
+      throw new Error('Groq вернул дублирующиеся или некорректные идентификаторы ответов');
+    }
+    seen.add(item.id);
+    return {
+      id: item.id,
+      answer: cleanPlainText(item.answer),
+      selectedOptions: item.selectedOptions.map(cleanPlainText).filter(Boolean)
+    };
+  });
+  return { answers, coverLetter: cleanPlainText(parsed.coverLetter) };
+}
+
 function formatGroqEmptyResponseError({ task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
   const normalizedUsage = normalizeUsage(usage);
   const parts = [
@@ -694,19 +1266,17 @@ function formatGroqEmptyResponseError({ task, status, finishReason, attempt, max
   return `Groq вернул пустой ответ (${parts.filter(Boolean).join(', ')}). Если finish_reason=length, модель уперлась в лимит вывода и не вернула message.content.`;
 }
 
-async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '' }) {
+async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false }) {
   const {
     groqApiKey,
-    groqModel = DEFAULTS.groqModel,
     expectedSalary = '',
     employmentPreference = DEFAULTS.employmentPreference,
     workFormatPreference = DEFAULTS.workFormatPreference,
     telegramUsername = DEFAULTS.telegramUsername,
     coverPrompt = DEFAULTS.coverPrompt,
     employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
-    choiceRetryPrompt = DEFAULTS.choiceRetryPrompt,
     groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'groqModel', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt', 'groqCooldownUntil']);
+  } = await storageGet(['groqApiKey', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
 
   if (!groqApiKey) {
     throw new Error('Ключ Groq API не настроен');
@@ -722,29 +1292,58 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     throw new Error(`Groq временно ограничил запросы. Пауза до ${groqCooldownUntil}.`);
   }
 
-  const resumeSourceText = await getResumeContext();
-  const resumeContext = await getResumeGroqContext(
-    resumeSourceText,
-    task === 'choice_retry' ? RESUME_GROQ_RETRY_BRIEF_MAX_CHARS : RESUME_GROQ_BRIEF_MAX_CHARS
-  );
+  const profileState = await storageGet([
+    'resumeProfileText',
+    'resumeProfileSourceHash',
+    'resumeProfileBuiltAt'
+  ]);
+  const resumeSourceText = await getResumeContext({ requireFacts: task === 'test_assist' });
+  const { resumeCandidateFacts = null } = await storageGet(['resumeCandidateFacts']);
+  const candidateFacts = normalizeResumeCandidateFacts(resumeCandidateFacts, hashText(resumeSourceText));
+  if (task === 'test_assist' && !candidateFacts) {
+    const error = new Error('Точные данные кандидата не извлечены из резюме HH');
+    error.code = 'HHJA_RESUME_CANDIDATE_FACTS_REQUIRED';
+    throw error;
+  }
+  const profileText = String(profileState.resumeProfileText || '').trim();
+  if (!profileText && task === 'test_assist') {
+    const error = new Error('Промпт с резюме не заполнен');
+    error.code = 'HHJA_RESUME_PROFILE_REQUIRED';
+    throw error;
+  }
+  const resumeContext = profileText
+    ? {
+        text: profileText.slice(0, RESUME_PROFILE_MAX_CHARS),
+        sourceHash: profileState.resumeProfileSourceHash || hashText(resumeSourceText),
+        sourceLength: String(resumeSourceText).length,
+        briefLength: profileText.length,
+        version: 'resume-profile-v1',
+        builtAt: profileState.resumeProfileBuiltAt || '',
+        cached: true
+      }
+    : await getResumeGroqContext(resumeSourceText, RESUME_GROQ_BRIEF_MAX_CHARS);
   const payloadParts = {
     resumeText: resumeContext.text,
+    candidateFacts,
     expectedSalary: String(expectedSalary).slice(0, 1000),
     telegramUsername: String(telegramUsername).slice(0, 200),
     employmentPreference,
     workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     employerQuestionPrompt: String(employerQuestionPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
-    choiceRetryPrompt: String(choiceRetryPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
-    vacancyText: task === 'choice_retry' ? '' : compactVacancyText(vacancyText),
-    extraText: compactExtraText(extraText)
+    vacancyText: compactVacancyText(vacancyText),
+    extraText: compactExtraText(extraText),
+    questions: Array.isArray(questions) ? questions : [],
+    coverLetterRequested: Boolean(coverLetterRequested)
   };
-  const model = getGroqModelForTask(task, groqModel);
+  const model = getGroqModelForTask(task);
   await appendAgentLog('groq_request_start', {
     task,
     model,
     vacancyTextLength: String(vacancyText).length,
     extraTextLength: String(extraText).length,
+    questionCount: payloadParts.questions.length,
+    coverLetterRequested: payloadParts.coverLetterRequested,
     resumeSourceLength: String(resumeSourceText).length,
     resumeBriefLength: payloadParts.resumeText.length,
     resumeBriefVersion: resumeContext.version
@@ -759,6 +1358,7 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     temperature: 0.2,
     max_tokens: getMaxTokensForTask(task)
   };
+  if (task === 'test_assist') requestBody.response_format = EMPLOYER_ANSWER_RESPONSE_FORMAT;
   if (task === 'test_assist') {
     await appendAgentLog('groq_test_assist_request', {
       task,
@@ -768,7 +1368,8 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
         model: requestBody.model,
         messages: requestBody.messages,
         temperature: requestBody.temperature,
-        max_tokens: requestBody.max_tokens
+        max_tokens: requestBody.max_tokens,
+        response_format: requestBody.response_format
       }
     });
   }
@@ -802,123 +1403,84 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     resumeBriefVersion: resumeContext.version,
     resumeBriefCached: resumeContext.cached
   });
-  const timeoutMs = getGroqRequestTimeoutMs();
-  const maxAttempts = GROQ_EMPTY_RESPONSE_RETRIES + 1;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    let response;
-    try {
-      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${groqApiKey}`,
-          'Content-Type': 'application/json'
-        },
-        signal: controller.signal,
-        body: JSON.stringify(requestBody)
-      });
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        await appendAgentLog('groq_request_error', { task, error: 'timeout', timeoutMs, attempt, maxAttempts });
-        throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
+  const { response, responseText, data } = await fetchGroqCompletion({ task, model, groqApiKey, requestBody });
+  if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+      const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
+      await storageSet({ groqCooldownUntil: cooldownUntil });
+      await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
     }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      if (response.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
-        const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
-        await storageSet({ groqCooldownUntil: cooldownUntil });
-        await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
-      }
-      await appendAgentLog('groq_request_error', {
-        task,
-        status: response.status,
-        responseTextLength: text.length,
-        responseTextHash: hashText(text),
-        attempt,
-        maxAttempts
-      });
-      await appendAgentLog('groq_error_payload', {
-        task,
-        status: response.status,
-        responseTextLength: text.length,
-        responseTextHash: hashText(text),
-        attempt,
-        maxAttempts
-      });
-      throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${text.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content?.trim();
-    const finishReason = data?.choices?.[0]?.finish_reason || '';
-    if (!content || finishReason === 'length') {
-      await appendAgentLog('groq_request_error', {
-        task,
-        status: response.status,
-        error: content ? 'truncated_response' : 'empty_response',
-        attempt,
-        maxAttempts,
-        choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-        finishReason,
-        maxTokens: requestBody.max_tokens,
-        model: data?.model || requestBody.model,
-        usage: normalizeUsage(data?.usage),
-        responseSummary: summarizeGroqResponse(data)
-      });
-      if (attempt < maxAttempts) {
-        if (finishReason === 'length') requestBody.max_tokens = getLengthRetryMaxTokensForTask(task, requestBody.max_tokens);
-        await sleep(GROQ_EMPTY_RESPONSE_RETRY_DELAY_MS);
-        continue;
-      }
-      throw new Error(formatGroqEmptyResponseError({
-        task,
-        status: response.status,
-        finishReason,
-        attempt,
-        maxAttempts,
-        maxTokens: requestBody.max_tokens,
-        usage: data?.usage
-      }));
-    }
-    await appendAgentLog('groq_response_payload', {
+    await appendAgentLog('groq_request_error', {
       task,
-      responseLength: content.length,
-      responseHash: hashText(content),
-      finishReason,
-      choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-      model: data?.model || '',
-      usage: normalizeUsage(data?.usage),
-      attempt
+      status: response.status,
+      responseTextLength: responseText.length,
+      responseTextHash: hashText(responseText),
+      attempt: 1,
+      maxAttempts: 1
     });
-    if (task === 'test_assist') {
-      await appendAgentLog('groq_test_assist_response', {
-        task,
-        content,
-        finishReason,
-        model: data?.model || '',
-        usage: normalizeUsage(data?.usage),
-        attempt
-      });
-    }
-    await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage: normalizeUsage(data?.usage), attempt });
-    return content;
+    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
   }
-  throw new Error('Groq вернул пустой ответ');
+
+  const content = data?.choices?.[0]?.message?.content?.trim();
+  const finishReason = data?.choices?.[0]?.finish_reason || '';
+  if (!content || finishReason === 'length') {
+    await appendAgentLog('groq_request_error', {
+      task,
+      status: response.status,
+      error: content ? 'truncated_response' : 'empty_response',
+      attempt: 1,
+      maxAttempts: 1,
+      finishReason,
+      maxTokens: requestBody.max_tokens,
+      responseSummary: summarizeGroqResponse(data)
+    });
+    throw new Error(formatGroqEmptyResponseError({
+      task,
+      status: response.status,
+      finishReason,
+      attempt: 1,
+      maxAttempts: 1,
+      maxTokens: requestBody.max_tokens,
+      usage: data?.usage
+    }));
+  }
+
+  const usage = normalizeUsage(data?.usage);
+  await appendAgentLog('groq_response_payload', {
+    task,
+    responseLength: content.length,
+    responseHash: hashText(content),
+    finishReason,
+    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+    model: data?.model || model,
+    usage,
+    attempt: 1
+  });
+  if (task === 'test_assist') {
+    const structured = parseEmployerAnswerResponse(content);
+    await appendAgentLog('groq_test_assist_response', {
+      task,
+      answerCount: structured.answers.length,
+      coverLetterLength: structured.coverLetter.length,
+      finishReason,
+      model: data?.model || model,
+      usage,
+      attempt: 1
+    });
+    await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
+    return { text: content, ...structured, usage, fallbackReason: '' };
+  }
+  await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
+  return { text: content, answers: [], coverLetter: content, usage, fallbackReason: '' };
 }
 
 async function testGroq() {
-  const text = await callGroq({
+  const result = await callGroq({
     task: 'cover_letter',
     vacancyText: 'Вакансия: Java developer. Требуется знание Spring Boot и SQL.'
   });
-  return { ok: true, sampleLength: text.length };
+  return { ok: true, sampleLength: result.text.length };
 }
 
 async function getTabDocumentReadyState(tabId) {
@@ -1462,7 +2024,7 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
 }
 
 async function startAutoApplyFromActiveTab() {
-  globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt']));
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt']));
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
     throw new Error('Перед запуском откликов откройте страницу поиска вакансий или форму отклика на hh.ru.');
@@ -1566,12 +2128,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'GENERATE_COVER_LETTER': {
-        const text = await callGroq({
+        const result = await callGroq({
           task: message.task || 'cover_letter',
           vacancyText: message.vacancyText || '',
-          extraText: message.extraText || ''
+          extraText: message.extraText || '',
+          questions: message.questions || [],
+          coverLetterRequested: message.coverLetterRequested === true
         });
-        sendResponse({ ok: true, text });
+        sendResponse({ ok: true, ...result });
+        break;
+      }
+      case 'RECORD_AI_FALLBACK': {
+        await recordAiQuotaFallback(message.task || 'test_assist', message.reason || 'local_fallback');
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'BUILD_RESUME_PROFILE': {
+        const result = await buildResumeProfile();
+        sendResponse({ ok: true, ...result });
+        break;
+      }
+      case 'ENSURE_RESUME_PROFILE': {
+        const result = await ensureResumeProfileAutoRefresh();
+        sendResponse({ ok: true, refreshed: true, profileAvailable: Boolean(result?.resumeProfileText) });
+        break;
+      }
+      case 'EDIT_RESUME_PROFILE': {
+        const result = await editResumeProfile(message.comment || '');
+        sendResponse({ ok: true, ...result });
         break;
       }
       case 'TEST_GROQ': {
@@ -1582,7 +2166,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'REFRESH_RESUMES_NOW': {
         const { resumeUrl } = await storageGet(['resumeUrl']);
         const resumeMissing = globalThis.HHJA_CONFIG_READINESS
-          .evaluate({ resumeUrl, groqApiKey: 'unused', coverPrompt: 'unused', employerQuestionPrompt: 'unused', choiceRetryPrompt: 'unused' })
+          .evaluate({ resumeUrl, groqApiKey: 'unused', coverPrompt: 'unused', employerQuestionPrompt: 'unused' })
           .missing.some((item) => item.code === 'resume_url');
         if (resumeMissing) {
           throw new Error('Укажите ссылку на резюме в настройках');

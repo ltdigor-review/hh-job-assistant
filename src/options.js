@@ -1,10 +1,7 @@
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
 
 const GROQ_MODELS = new Set([
-  'llama-3.3-70b-versatile',
-  'llama-3.1-8b-instant',
-  'openai/gpt-oss-120b',
-  'openai/gpt-oss-20b'
+  'openai/gpt-oss-120b'
 ]);
 
 const OLD_DEFAULT_COVER_PROMPTS = new Set([
@@ -24,13 +21,16 @@ const fields = {
   groqModel: document.getElementById('groqModel'),
   resumeUrl: document.getElementById('resumeUrl'),
   resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
+  resumeProfileText: document.getElementById('resumeProfileText'),
+  resumeProfileEditComment: document.getElementById('resumeProfileEditComment'),
+  resumeProfileAutoRefreshEnabled: document.getElementById('resumeProfileAutoRefreshEnabled'),
+  resumeProfileWeaknesses: document.getElementById('resumeProfileWeaknesses'),
   expectedSalary: document.getElementById('expectedSalary'),
   telegramUsername: document.getElementById('telegramUsername'),
   employmentPreference: document.getElementById('employmentPreference'),
   workFormatPreference: document.getElementById('workFormatPreference'),
   coverPrompt: document.getElementById('coverPrompt'),
   employerQuestionPrompt: document.getElementById('employerQuestionPrompt'),
-  choiceRetryPrompt: document.getElementById('choiceRetryPrompt'),
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
@@ -39,6 +39,11 @@ const fields = {
 
 const statusNode = document.getElementById('status');
 const groqStatusNode = document.getElementById('groqStatus');
+const resumeProfileStatusNode = document.getElementById('resumeProfileStatus');
+const resumeProfileButtons = [
+  document.getElementById('buildResumeProfile'),
+  document.getElementById('editResumeProfile')
+];
 let savedGroqKeyMasked = false;
 let groqKeyDirty = false;
 
@@ -53,6 +58,10 @@ function setStatus(text, isError = false, node = statusNode) {
 
 function setGroqStatus(text, isError = false) {
   setStatus(text, isError, groqStatusNode);
+}
+
+function setResumeProfileStatus(text, isError = false) {
+  setStatus(text, isError, resumeProfileStatusNode);
 }
 
 function normalizeMultiPreference(value, allowedValues) {
@@ -97,13 +106,15 @@ async function loadOptions() {
   fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
+  fields.resumeProfileText.value = values.resumeProfileText || '';
+  fields.resumeProfileAutoRefreshEnabled.checked = values.resumeProfileAutoRefreshEnabled === true;
+  fields.resumeProfileWeaknesses.textContent = values.resumeProfileWeaknesses || 'Недостатки не обнаружены или аудит ещё не выполнен.';
   fields.expectedSalary.value = values.expectedSalary || DEFAULTS.expectedSalary;
   fields.telegramUsername.value = values.telegramUsername || DEFAULTS.telegramUsername;
   setMultiCheckboxValue(fields.employmentPreference, normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES));
   setMultiCheckboxValue(fields.workFormatPreference, normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES));
   fields.coverPrompt.value = String(values.coverPrompt || '').trim() || DEFAULTS.coverPrompt;
   fields.employerQuestionPrompt.value = String(values.employerQuestionPrompt || '').trim() || DEFAULTS.employerQuestionPrompt;
-  fields.choiceRetryPrompt.value = String(values.choiceRetryPrompt || '').trim() || DEFAULTS.choiceRetryPrompt;
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
@@ -129,8 +140,7 @@ async function saveOptions() {
 
   for (const [field, label] of [
     [fields.coverPrompt, 'промпт сопроводительного письма'],
-    [fields.employerQuestionPrompt, 'промпт ответов работодателю'],
-    [fields.choiceRetryPrompt, 'промпт уточнения вариантов']
+    [fields.employerQuestionPrompt, 'промпт ответов работодателю']
   ]) {
     if (!field.value.trim()) {
       field.setCustomValidity(`Заполните ${label}.`);
@@ -144,14 +154,15 @@ async function saveOptions() {
     groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
+    resumeProfileText: fields.resumeProfileText.value.trim(),
+    resumeProfileAutoRefreshEnabled: fields.resumeProfileAutoRefreshEnabled.checked,
     expectedSalary: fields.expectedSalary.value.trim(),
     telegramUsername: fields.telegramUsername.value.trim(),
     employmentPreference: getMultiCheckboxValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: getMultiCheckboxValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     coverPrompt: fields.coverPrompt.value.trim(),
     employerQuestionPrompt: fields.employerQuestionPrompt.value.trim(),
-    choiceRetryPrompt: fields.choiceRetryPrompt.value.trim(),
-    aiPromptsVersion: 1,
+    aiPromptsVersion: 2,
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 200)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
@@ -170,6 +181,11 @@ async function saveOptions() {
     patch.resumeGroqBriefSourceHash = '';
     patch.resumeGroqBriefBuiltAt = '';
     patch.resumeGroqBriefVersion = '';
+    patch.resumeProfileText = '';
+    patch.resumeProfileWeaknesses = '';
+    patch.resumeProfileSourceHash = '';
+    patch.resumeProfileBuiltAt = '';
+    patch.resumeProfileCheckedAt = '';
   }
 
   if (fields.groqApiKey.dataset.masked !== 'true' && (!savedGroqKeyMasked || groqKeyDirty)) {
@@ -201,6 +217,33 @@ async function testGroq() {
   setGroqStatus('Groq работает.');
 }
 
+async function runResumeProfileAction(type) {
+  await saveOptions();
+  if (type === 'BUILD_RESUME_PROFILE' && !fields.resumeUrl.value.trim()) {
+    throw new Error('Укажите ссылку на резюме hh.ru перед заполнением промпта.');
+  }
+  const comment = fields.resumeProfileEditComment.value.trim();
+  if (type === 'EDIT_RESUME_PROFILE' && !comment) {
+    fields.resumeProfileEditComment.setCustomValidity('Напишите, что нужно изменить в промпте.');
+    fields.resumeProfileEditComment.reportValidity();
+    throw new Error('Напишите, что нужно изменить в промпте.');
+  }
+  fields.resumeProfileEditComment.setCustomValidity('');
+  resumeProfileButtons.forEach((button) => { button.disabled = true; });
+  setResumeProfileStatus(type === 'BUILD_RESUME_PROFILE' ? 'Читаю резюме и составляю промпт…' : 'Редактирую промпт…');
+  try {
+    const response = await chrome.runtime.sendMessage({ type, comment });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Не удалось обновить промпт с резюме.');
+    }
+    await loadOptions();
+    if (type === 'EDIT_RESUME_PROFILE') fields.resumeProfileEditComment.value = '';
+    setResumeProfileStatus(type === 'BUILD_RESUME_PROFILE' ? 'Промпт заполнен.' : 'Промпт отредактирован.');
+  } finally {
+    resumeProfileButtons.forEach((button) => { button.disabled = false; });
+  }
+}
+
 fields.groqApiKey.addEventListener('focus', () => {
   if (fields.groqApiKey.dataset.masked === 'true') {
     fields.groqApiKey.value = '';
@@ -218,6 +261,14 @@ document.getElementById('save').addEventListener('click', () => {
 
 document.getElementById('testGroq').addEventListener('click', () => {
   testGroq().catch((error) => setGroqStatus(localizeError(error), true));
+});
+
+document.getElementById('buildResumeProfile').addEventListener('click', () => {
+  runResumeProfileAction('BUILD_RESUME_PROFILE').catch((error) => setResumeProfileStatus(localizeError(error), true));
+});
+
+document.getElementById('editResumeProfile').addEventListener('click', () => {
+  runResumeProfileAction('EDIT_RESUME_PROFILE').catch((error) => setResumeProfileStatus(localizeError(error), true));
 });
 
 loadOptions().catch((error) => setStatus(localizeError(error), true));

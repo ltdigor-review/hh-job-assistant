@@ -10,6 +10,7 @@ const nodes = {
   appStatusTitle: document.getElementById('appStatusTitle'),
   appStatusDetail: document.getElementById('appStatusDetail'),
   currentAction: document.getElementById('currentAction'),
+  aiQuotaStatus: document.getElementById('aiQuotaStatus'),
   applied: document.getElementById('applied'),
   skipped: document.getElementById('skipped'),
   errors: document.getElementById('errors'),
@@ -78,6 +79,7 @@ function renderView() {
   nodes.appStatusDetail.textContent = view.status.detail;
 
   nodes.currentAction.textContent = view.currentAction.title;
+  nodes.aiQuotaStatus.textContent = lastRunState.aiQuotaStatus || 'AI: запросов сегодня не было';
 
   nodes.applied.textContent = view.counters.applied;
   nodes.skipped.textContent = view.counters.skipped;

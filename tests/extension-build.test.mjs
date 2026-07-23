@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,20 @@ const root = new URL('../', import.meta.url);
 
 async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, root), 'utf8'));
+}
+
+function resumeCandidateFacts(text, age = 27, source = 'resume-personal-age') {
+  let hash = 0x811c9dc5;
+  for (const character of String(text || '')) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return {
+    age,
+    extractedAt: '2026-07-21T00:00:00.000Z',
+    source,
+    resumeHash: (hash >>> 0).toString(16).padStart(8, '0')
+  };
 }
 
 test('manifest is valid MV3 and exposes popup UI', async () => {
@@ -249,6 +264,19 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   }
 });
 
+test('default prompts remain byte-for-byte versioned', async () => {
+  const defaultsSource = await readFile(new URL('src/defaults.js', root), 'utf8');
+  const context = { globalThis: {} };
+  vm.runInNewContext(defaultsSource, context);
+  const hashes = {
+    coverPrompt: '6710dd147e8f0d961e8bef10957425bef2467cfac527baa8ee7abce648e830c2',
+    employerQuestionPrompt: '003ccd18c6c9b15ad476086e6dc24466c31c9f482cdd8cd3d6f9d9759808bebe'
+  };
+  for (const [key, expectedHash] of Object.entries(hashes)) {
+    assert.equal(createHash('sha256').update(context.globalThis.HHJA_DEFAULTS[key]).digest('hex'), expectedHash, key);
+  }
+});
+
 test('background service worker avoids top-level await', async () => {
   const js = await readFile(new URL('src/background.js', root), 'utf8');
 
@@ -312,13 +340,12 @@ test('background initializes defaults and registers required listeners', async (
   assert.match(localData.coverPrompt, /markdown/i);
   assert.match(localData.coverPrompt, /пересказа вакансии или пересказа резюме/i);
   assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
-  assert.ok(localData.choiceRetryPrompt);
-  assert.equal(localData.aiPromptsVersion, 1);
-  assert.match(localData.employerQuestionPrompt, /не пиши, что опыта нет/);
-  assert.match(localData.employerQuestionPrompt, /близкого опыта/);
+  assert.equal(localData.aiPromptsVersion, 2);
+  assert.match(localData.employerQuestionPrompt, /правдоподобный кейс/);
+  assert.match(localData.employerQuestionPrompt, /Нельзя придумывать/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
-  assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
-  assert.match(localData.employerQuestionPrompt, /только короткое значение/);
+  assert.match(localData.employerQuestionPrompt, /от первого лица/);
+  assert.match(localData.employerQuestionPrompt, /точное короткое значение/);
   assert.deepEqual(localData.employmentPreference, []);
   assert.deepEqual(localData.workFormatPreference, []);
   assert.equal(localData.autoApplyStopRequested, false);
@@ -377,8 +404,9 @@ test('background migrates old default employer question prompt', async () => {
 
   assert.notEqual(localData.employerQuestionPrompt, oldEmployerQuestionPrompt);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
-  assert.match(localData.employerQuestionPrompt, /пиши от первого лица/);
-  assert.match(localData.employerQuestionPrompt, /только короткое значение/);
+  assert.match(localData.employerQuestionPrompt, /от первого лица/);
+  assert.match(localData.employerQuestionPrompt, /точное короткое значение/);
+  assert.match(localData.employerQuestionPrompt, /Нельзя придумывать/);
   assert.notEqual(localData.coverPrompt, oldCoverPrompt);
   assert.ok(localData.coverPrompt.length > 220);
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
@@ -425,7 +453,7 @@ test('background repairs blank prompts and preserves non-empty custom prompts du
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
   assert.equal(localData.employerQuestionPrompt, 'Custom employer instructions');
   assert.equal(localData.choiceRetryPrompt, 'Custom exact-choice instructions');
-  assert.equal(localData.aiPromptsVersion, 1);
+  assert.equal(localData.aiPromptsVersion, 2);
 
   localData.coverPrompt = null;
   localData.employerQuestionPrompt = '\n\t';
@@ -438,7 +466,6 @@ test('background repairs blank prompts and preserves non-empty custom prompts du
 
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
   assert.match(localData.employerQuestionPrompt, /вопросы работодателя/);
-  assert.match(localData.choiceRetryPrompt, /точные подписи/);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -609,6 +636,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
     resumeText: 'Relevant profile with adjacent experience and delivery tools',
+    resumeCandidateFacts: resumeCandidateFacts('Relevant profile with adjacent experience and delivery tools'),
+    resumeProfileText: 'Relevant profile with adjacent experience and delivery tools',
     expectedSalary: '250 000 руб. на руки',
     telegramUsername: '@candidate_tg',
     employmentPreference: [],
@@ -616,7 +645,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     coverPrompt: 'cover prompt',
     employerQuestionPrompt: 'custom employer question prompt: use adjacent experience and draft a relevant case',
     choiceRetryPrompt: 'choose exact labels',
-    aiPromptsVersion: 1,
+    aiPromptsVersion: 2,
     agentDebugLog: [],
     agentDebugLogsEnabled: true
   };
@@ -628,8 +657,16 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
       ok: true,
       async json() {
         return {
-          choices: [{ finish_reason: 'stop', message: { content: 'Ответ' } }],
-          usage: { prompt_tokens: 1234, completion_tokens: 63, total_tokens: 1297 }
+          choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+            answers: [{ id: 'salary-question', answer: '250 000 руб. на руки', selectedOptions: [] }],
+            coverLetter: 'Откликаюсь на вакансию.'
+          }) } }],
+          usage: {
+            prompt_tokens: 1234,
+            completion_tokens: 63,
+            total_tokens: 1297,
+            prompt_tokens_details: { cached_tokens: 400 }
+          }
         };
       }
     };
@@ -677,7 +714,14 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
         type: 'GENERATE_COVER_LETTER',
         task: 'test_assist',
         vacancyText: 'Вакансия: роль со смежными требованиями',
-        extraText: 'Какую зарплату ожидаете?'
+        questions: [{
+          id: 'salary-question',
+          kind: 'text',
+          inputType: 'text',
+          question: 'Какую зарплату ожидаете?',
+          options: []
+        }],
+        coverLetterRequested: true
       },
       {},
       resolve
@@ -686,35 +730,37 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   });
 
   assert.equal(response.ok, true);
-  assert.equal(requestBody.model, 'test-model');
+  assert.equal(requestBody.model, 'openai/gpt-oss-120b');
   assert.equal(requestBody.max_tokens, 700);
+  assert.equal(requestBody.response_format.type, 'json_schema');
+  assert.equal(requestBody.response_format.json_schema.strict, true);
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
-  assert.match(userContent, /Relevant profile with adjacent experience and delivery tools/);
-  assert.match(userContent, /250 000 руб\. на руки/);
-  assert.match(userContent, /Контакты кандидата:\nTelegram: @candidate_tg/);
-  assert.match(userContent, /Оформление: предпочтение не выбрано/);
-  assert.match(userContent, /Формат работы: предпочтение не выбрано/);
   assert.match(userContent, /Вакансия: роль со смежными требованиями/);
   assert.match(userContent, /Какую зарплату ожидаете\?/);
-  const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
+  assert.match(userContent, /salary-question/);
+  assert.match(userContent, /"coverLetterRequested":true/);
+  const systemContents = requestBody.messages.filter((message) => message.role === 'system').map((message) => message.content);
+  const systemContent = systemContents.join('\n');
   assert.match(systemContent, /custom employer question prompt/);
   assert.match(systemContent, /adjacent experience/);
   assert.match(systemContent, /draft a relevant case/);
-  assert.doesNotMatch(systemContent, /Telegram username|Output contract|same language as each question/);
+  assert.match(systemContent, /Relevant profile with adjacent experience and delivery tools/);
+  assert.match(systemContent, /250 000 руб\. на руки/);
+  assert.match(systemContent, /Telegram: @candidate_tg/);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
   const groqTestRequestLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_request');
   const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
   const groqTestResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_response');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
-  assert.equal(groqPayloadLog.details.model, 'test-model');
+  assert.equal(groqPayloadLog.details.model, 'openai/gpt-oss-120b');
   assert.deepEqual(groqPayloadLog.details.messageLengths, requestBody.messages.map((message) => ({
     role: message.role,
     contentLength: message.content.length
   })));
   assert.equal(groqPayloadLog.details.componentLengths.resumeBrief, 'Relevant profile with adjacent experience and delivery tools'.length);
-  assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, systemContent.length);
+  assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, localData.employerQuestionPrompt.length);
   assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: роль со смежными требованиями'.length);
-  assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-brief-v1');
+  assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-profile-v1');
   assert.equal(groqPayloadLog.details.requestBody, undefined);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Relevant profile with adjacent experience and delivery tools/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /250 000 руб\. на руки/);
@@ -723,12 +769,12 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
   assert.equal(groqTestRequestLog.details.task, 'test_assist');
-  assert.equal(groqTestRequestLog.details.requestBody.model, 'test-model');
+  assert.equal(groqTestRequestLog.details.requestBody.model, 'openai/gpt-oss-120b');
   assert.deepEqual(groqTestRequestLog.details.requestBody.messages, requestBody.messages);
   assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Relevant profile with adjacent experience and delivery tools/);
   assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqTestRequestLog.details), /gsk_test/);
-  assert.equal(groqResponseLog.details.responseLength, 'Ответ'.length);
+  assert.ok(groqResponseLog.details.responseLength > 30);
   assert.equal(groqResponseLog.details.content, undefined);
   assert.equal(groqResponseLog.details.responseBody, undefined);
   assert.match(groqResponseLog.details.responseHash, /^[0-9a-f]{8}$/);
@@ -738,21 +784,30 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.deepEqual(groqResponseLog.details.usage, {
     promptTokens: 1234,
     completionTokens: 63,
-    totalTokens: 1297
+    totalTokens: 1297,
+    cachedTokens: 400
   });
   assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|rawResponse|responsePreview/);
-  assert.equal(groqTestResponseLog.details.content, 'Ответ');
+  assert.equal(groqTestResponseLog.details.content, undefined);
+  assert.equal(groqTestResponseLog.details.answerCount, 1);
+  assert.equal(groqTestResponseLog.details.coverLetterLength, 'Откликаюсь на вакансию.'.length);
   assert.equal(groqTestResponseLog.details.task, 'test_assist');
+  assert.equal(response.answers[0].id, 'salary-question');
+  assert.equal(response.coverLetter, 'Откликаюсь на вакансию.');
+  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].rateTokens, 897);
+  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].cachedTokens, 400);
   assert.doesNotMatch(JSON.stringify(groqTestResponseLog.details), /gsk_test/);
 });
 
-test('default employer question prompt tells Groq to synthesize case from adjacent experience', async () => {
+test('default employer prompt allows adjacent experience but forbids invented facts', async () => {
   let listener = null;
   let requestBody = null;
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
     resumeText: 'Specialist with adjacent tools, delivery experience, integrations, and user-facing product checks',
+    resumeCandidateFacts: resumeCandidateFacts('Specialist with adjacent tools, delivery experience, integrations, and user-facing product checks'),
+    resumeProfileText: 'Specialist with adjacent tools, delivery experience, integrations, and user-facing product checks',
     expectedSalary: '',
     employmentPreference: '',
     workFormatPreference: '',
@@ -768,7 +823,10 @@ test('default employer question prompt tells Groq to synthesize case from adjace
       ok: true,
       async json() {
         return {
-          choices: [{ finish_reason: 'stop', message: { content: 'Text question 1: Работал с похожими задачами через смежный опыт, инструменты кандидата, проверки пользовательских сценариев и интеграций' } }]
+          choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+            answers: [{ id: 'experience', answer: 'Работал с похожими задачами через подтвержденный смежный опыт.', selectedOptions: [] }],
+            coverLetter: ''
+          }) } }]
         };
       }
     };
@@ -816,7 +874,7 @@ test('default employer question prompt tells Groq to synthesize case from adjace
         type: 'GENERATE_COVER_LETTER',
         task: 'test_assist',
         vacancyText: 'Вакансия: роль со смежными требованиями',
-        extraText: 'Text question 1: Опишите релевантный опыт в похожем направлении'
+        questions: [{ id: 'experience', kind: 'text', inputType: 'text', question: 'Опишите релевантный опыт в похожем направлении', options: [] }]
       },
       {},
       resolve
@@ -825,21 +883,241 @@ test('default employer question prompt tells Groq to synthesize case from adjace
   });
 
   assert.equal(response.ok, true);
-  const systemContent = requestBody.messages.find((message) => message.role === 'system').content;
+  const systemContent = requestBody.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
-  assert.match(systemContent, /не пиши, что опыта нет/);
-  assert.match(systemContent, /придумай уверенный релевантный кейс/);
-  assert.match(systemContent, /близкого опыта/);
+  assert.match(systemContent, /правдоподобный кейс/);
+  assert.match(systemContent, /Нельзя придумывать/);
+  assert.match(systemContent, /подтвержденный смежный опыт/);
   assert.match(systemContent, /языке вопроса/);
-  assert.match(systemContent, /пиши от первого лица/);
-  assert.match(systemContent, /только короткое значение/);
+  assert.match(systemContent, /от первого лица/);
+  assert.match(systemContent, /точное короткое значение/);
   assert.doesNotMatch(systemContent, /QA|Selenium|Playwright|игр|игров/i);
-  assert.match(systemContent, /Text question N: <готовый ответ>/);
-  assert.match(userContent, /adjacent tools/);
+  assert.match(systemContent, /ровно один answers item с тем же id/);
+  assert.match(systemContent, /adjacent tools/);
   assert.match(userContent, /релевантный опыт/);
+  assert.equal(response.answers[0].id, 'experience');
 });
 
-test('Groq truncated test assistance is retried once with a larger token cap', async () => {
+test('generation tasks use fixed model routing and stable resume profile context', async () => {
+  let listener = null;
+  const requests = [];
+  const profile = 'Фактический профиль кандидата: Tech Lead, команда 15 FTE, найм, интервью и онбординг.';
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Сырой текст резюме, который не должен заменять готовый профиль.',
+    resumeCandidateFacts: resumeCandidateFacts('Сырой текст резюме, который не должен заменять готовый профиль.'),
+    resumeProfileText: profile,
+    resumeProfileSourceHash: 'profile-source-hash',
+    resumeProfileAutoRefreshEnabled: false,
+    coverPrompt: 'original cover prompt',
+    employerQuestionPrompt: 'original employer prompt',
+    employmentPreference: [],
+    workFormatPreference: []
+  };
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    const content = body.response_format
+      ? JSON.stringify({ answers: [{ id: 'q1', answer: 'Готовый ответ', selectedOptions: [] }], coverLetter: '' })
+      : 'Готовое письмо';
+    return { ok: true, async json() { return { choices: [{ finish_reason: 'stop', message: { content } }] }; } };
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const send = (task) => new Promise((resolve) => listener({
+    type: 'GENERATE_COVER_LETTER',
+    task,
+    vacancyText: 'Вакансия',
+    questions: task === 'test_assist' ? [{ id: 'q1', kind: 'text', inputType: 'text', question: 'Вопрос', options: [] }] : []
+  }, {}, resolve));
+  await send('cover_letter');
+  await send('test_assist');
+
+  assert.deepEqual(requests.map((body) => body.model), ['llama-3.1-8b-instant', 'openai/gpt-oss-120b']);
+  assert.equal(requests[0].messages[0].content, 'original cover prompt');
+  assert.match(requests[0].messages.find((message) => message.role === 'user').content, /Tech Lead, команда 15 FTE/);
+  assert.match(requests[1].messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n'), /original employer prompt[\s\S]*Tech Lead, команда 15 FTE/);
+  assert.equal(requests[1].response_format.json_schema.strict, true);
+});
+
+test('200 vacancies stay within request and daily token budgets with cached-token accounting', async () => {
+  let listener = null;
+  let fetchCalls = 0;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    resumeText: 'Java developer',
+    resumeProfileText: `Java developer with confirmed backend delivery experience ${'J'.repeat(5900)}`,
+    resumeProfileSourceHash: 'profile-hash',
+    coverPrompt: 'short cover prompt',
+    employerQuestionPrompt: 'answer only from confirmed facts',
+    employmentPreference: [],
+    workFormatPreference: [],
+    agentDebugLogsEnabled: false
+  };
+  globalThis.fetch = async (_url, options) => {
+    fetchCalls += 1;
+    const body = JSON.parse(options.body);
+    const structured = Boolean(body.response_format);
+    const content = structured
+      ? JSON.stringify({ answers: [{ id: 'q1', answer: 'Подтвержденный опыт.', selectedOptions: [] }], coverLetter: '' })
+      : 'Откликаюсь на вакансию.';
+    const usage = structured
+      ? { prompt_tokens: 1900, completion_tokens: 100, total_tokens: 2000, prompt_tokens_details: { cached_tokens: 100 } }
+      : { prompt_tokens: 4700, completion_tokens: 100, total_tokens: 4800, prompt_tokens_details: { cached_tokens: 100 } };
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { choices: [{ finish_reason: 'stop', message: { content } }], usage };
+      }
+    };
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const send = (message) => new Promise((resolve) => listener(message, {}, resolve));
+
+  for (let index = 0; index < 200; index += 1) {
+    const task = index % 2 === 0 ? 'test_assist' : 'cover_letter';
+    const response = await send({
+      type: 'GENERATE_COVER_LETTER',
+      task,
+      vacancyText: `Vacancy ${index}`,
+      questions: task === 'test_assist'
+        ? [{ id: 'q1', kind: 'text', inputType: 'text', question: 'Опыт?', options: [] }]
+        : []
+    });
+    if (!response.ok) {
+      await send({ type: 'RECORD_AI_FALLBACK', task, reason: 'budget_simulation' });
+    }
+  }
+
+  const gpt = localData.aiQuotaUsage.models['openai/gpt-oss-120b'];
+  const cover = localData.aiQuotaUsage.models['llama-3.1-8b-instant'];
+  assert.ok(fetchCalls <= 200);
+  assert.ok(gpt.rateTokens <= 180000);
+  assert.ok(cover.rateTokens <= 450000);
+  assert.equal(gpt.rateTokens, gpt.promptTokens - gpt.cachedTokens + gpt.completionTokens);
+  assert.equal(cover.rateTokens, cover.promptTokens - cover.cachedTokens + cover.completionTokens);
+  assert.equal(gpt.requests + cover.requests, fetchCalls);
+  assert.equal(gpt.fallbackCount + cover.fallbackCount, 200 - fetchCalls);
+  assert.match(localData.runState.aiQuotaStatus, /cache \d+% · fallback \d+$/);
+});
+
+test('quota manager waits only for short TPM resets and resets counters on a new UTC day', async () => {
+  let listener = null;
+  let fetchCalls = 0;
+  const today = new Date().toISOString().slice(0, 10);
+  const coverModel = 'llama-3.1-8b-instant';
+  const localData = {
+    groqApiKey: 'gsk_test',
+    resumeText: 'Java developer',
+    coverPrompt: 'short cover prompt',
+    aiQuotaUsage: {
+      utcDay: today,
+      models: {
+        [coverModel]: {
+          requests: 1,
+          rateTokens: 10,
+          lastHeaders: {
+            remainingTokens: 0,
+            limitTokens: 6000,
+            resetTokens: '61s',
+            observedAt: new Date().toISOString()
+          }
+        }
+      }
+    }
+  };
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          choices: [{ finish_reason: 'stop', message: { content: 'Откликаюсь на вакансию.' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+        };
+      }
+    };
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const send = () => new Promise((resolve) => listener({
+    type: 'GENERATE_COVER_LETTER',
+    task: 'cover_letter',
+    vacancyText: 'Java'
+  }, {}, resolve));
+
+  const tooLong = await send();
+  assert.equal(tooLong.ok, false);
+  assert.match(tooLong.error, /восстановится слишком поздно/);
+  assert.equal(fetchCalls, 0);
+
+  localData.aiQuotaUsage.models[coverModel].lastHeaders = {
+    remainingTokens: 0,
+    limitTokens: 6000,
+    resetTokens: '30ms',
+    observedAt: new Date().toISOString()
+  };
+  const startedAt = Date.now();
+  const shortReset = await send();
+  assert.equal(shortReset.ok, true);
+  assert.ok(Date.now() - startedAt >= 10);
+  assert.equal(fetchCalls, 1);
+
+  localData.aiQuotaUsage = {
+    utcDay: '2000-01-01',
+    models: { [coverModel]: { requests: 14400, rateTokens: 450000 } }
+  };
+  const nextDay = await send();
+  assert.equal(nextDay.ok, true);
+  assert.equal(fetchCalls, 2);
+  assert.equal(localData.aiQuotaUsage.utcDay, today);
+  assert.equal(localData.aiQuotaUsage.models[coverModel].requests, 1);
+});
+
+test('Groq invalid structured JSON is not retried', async () => {
   let listener = null;
   let calls = 0;
   const maxTokensByCall = [];
@@ -847,6 +1125,8 @@ test('Groq truncated test assistance is retried once with a larger token cap', a
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
     resumeText: 'Java developer, Spring Boot',
+    resumeCandidateFacts: resumeCandidateFacts('Java developer, Spring Boot'),
+    resumeProfileText: 'Java developer, Spring Boot with confirmed backend delivery experience',
     expectedSalary: '',
     coverPrompt: 'cover prompt',
     agentDebugLog: [],
@@ -861,7 +1141,7 @@ test('Groq truncated test assistance is retried once with a larger token cap', a
       status: 200,
       async json() {
         return {
-          choices: [{ message: { content: calls === 1 ? 'Оборванный ответ' : 'Ответ после повтора' }, finish_reason: calls === 1 ? 'length' : 'stop' }]
+          choices: [{ message: { content: '{invalid json' }, finish_reason: 'stop' }]
         };
       }
     };
@@ -897,21 +1177,22 @@ test('Groq truncated test assistance is retried once with a larger token cap', a
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
 
   const response = await new Promise((resolve) => {
-    const stayedAsync = listener({ type: 'GENERATE_COVER_LETTER', task: 'test_assist', vacancyText: 'Вакансия: Java developer' }, {}, resolve);
+    const stayedAsync = listener({
+      type: 'GENERATE_COVER_LETTER',
+      task: 'test_assist',
+      vacancyText: 'Вакансия: Java developer',
+      questions: [{ id: 'q1', kind: 'text', inputType: 'text', question: 'Опыт?', options: [] }]
+    }, {}, resolve);
     assert.equal(stayedAsync, true);
   });
 
-  assert.equal(response.ok, true);
-  assert.equal(response.text, 'Ответ после повтора');
-  assert.equal(calls, 2);
-  assert.deepEqual(maxTokensByCall, [700, 1400]);
-  const emptyErrorLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_error' && entry.details.error === 'truncated_response');
+  assert.equal(response.ok, false);
+  assert.match(response.error, /некорректный JSON/);
+  assert.equal(calls, 1);
+  assert.deepEqual(maxTokensByCall, [700]);
   const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
-  assert.equal(emptyErrorLog.details.attempt, 1);
-  assert.equal(emptyErrorLog.details.maxTokens, 700);
-  assert.equal(emptyErrorLog.details.maxAttempts, 2);
+  assert.equal(responseLog.details.attempt, 1);
   assert.equal(responseLog.details.finishReason, 'stop');
-  assert.equal(responseLog.details.attempt, 2);
 });
 
 test('Groq empty response reports task, finish reason, attempts, and token cap', async () => {
@@ -920,6 +1201,8 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
     resumeText: 'Java developer, Spring Boot',
+    resumeCandidateFacts: resumeCandidateFacts('Java developer, Spring Boot'),
+    resumeProfileText: 'Java developer, Spring Boot with confirmed backend delivery experience',
     expectedSalary: '',
     coverPrompt: 'cover prompt',
     agentDebugLog: [],
@@ -969,7 +1252,11 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
-      { type: 'GENERATE_COVER_LETTER', task: 'choice_retry', extraText: 'Choice group 1:\n1. Да\n2. Нет' },
+      {
+        type: 'GENERATE_COVER_LETTER',
+        task: 'test_assist',
+        questions: [{ id: 'q1', kind: 'choice', inputType: 'radio', question: 'Выберите', options: ['Да', 'Нет'] }]
+      },
       {},
       resolve
     );
@@ -977,16 +1264,16 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   });
 
   assert.equal(response.ok, false);
-  assert.match(response.error, /задача: уточнение вариантов HH/);
+  assert.match(response.error, /задача: ответы на вопросы работодателя/);
   assert.match(response.error, /finish_reason=length/);
-  assert.match(response.error, /попытки 2\/2/);
-  assert.match(response.error, /max_tokens=300/);
+  assert.match(response.error, /попытки 1\/1/);
+  assert.match(response.error, /max_tokens=700/);
   assert.match(response.error, /completion_tokens=300/);
   const emptyErrorLogs = localData.agentDebugLog.filter((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
-  assert.equal(emptyErrorLogs.length, 2);
+  assert.equal(emptyErrorLogs.length, 1);
   assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
-  assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 300);
-  assert.equal(emptyErrorLogs.at(-1).details.usage.completionTokens, 300);
+  assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 700);
+  assert.equal(emptyErrorLogs.at(-1).details.responseSummary.usage.completionTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.responseBody, undefined);
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].finishReason, 'length');
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].contentLength, 0);
@@ -1446,6 +1733,186 @@ test('Groq prompt rebuilds stale resume brief and keeps original parsed resume u
   assert.doesNotMatch(userContent, /Лишняя длинная секция .*Лишняя длинная секция/s);
 });
 
+test('resume profile build and edit store factual context without changing audit metadata', async () => {
+  let listener = null;
+  const requests = [];
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Tech Lead. Руководил командой 15 FTE, проводил найм, собеседования и онбординг инженеров.',
+    resumeCandidateFacts: resumeCandidateFacts('Tech Lead. Руководил командой 15 FTE, проводил найм, собеседования и онбординг инженеров.'),
+    resumeProfileText: '',
+    resumeProfileWeaknesses: '',
+    resumeProfileSourceHash: '',
+    resumeProfileBuiltAt: '',
+    resumeProfileCheckedAt: '',
+    resumeProfileAutoRefreshEnabled: false,
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
+  };
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    const editing = body.messages[0].content.includes('Отредактируй профиль');
+    return {
+      ok: true,
+      async json() {
+        return {
+          choices: [{ finish_reason: 'stop', message: { content: editing
+            ? JSON.stringify({ profile: 'Tech Lead: руководил командой 15 FTE; отвечал за найм, собеседования и онбординг инженеров.' })
+            : JSON.stringify({
+                profile: 'Tech Lead. Руководил командой из 15 FTE, проводил найм, собеседования и онбординг инженеров.',
+                weaknesses: ['Не описаны performance review и измеримые результаты управления командой.']
+              }) } }]
+        };
+      }
+    };
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const send = (message) => new Promise((resolve) => {
+    assert.equal(listener(message, {}, resolve), true);
+  });
+
+  const built = await send({ type: 'BUILD_RESUME_PROFILE' });
+  assert.equal(built.ok, true);
+  assert.match(localData.resumeProfileText, /15 FTE/);
+  assert.match(localData.resumeProfileWeaknesses, /performance review/);
+  assert.ok(localData.resumeProfileSourceHash);
+  const sourceHash = localData.resumeProfileSourceHash;
+  const weaknesses = localData.resumeProfileWeaknesses;
+
+  const edited = await send({ type: 'EDIT_RESUME_PROFILE', comment: 'Убери любые мотивационные программы; подчеркни найм и онбординг.' });
+  assert.equal(edited.ok, true);
+  assert.match(localData.resumeProfileText, /найм, собеседования и онбординг/);
+  assert.doesNotMatch(localData.resumeProfileText, /мотивационн/i);
+  assert.equal(localData.resumeProfileWeaknesses, weaknesses);
+  assert.equal(localData.resumeProfileSourceHash, sourceHash);
+  assert.equal(requests.length, 2);
+  assert.doesNotMatch(JSON.stringify(localData.agentDebugLog), /Tech Lead|мотивационн/);
+});
+
+test('resume profile invalid build preserves last good profile', async () => {
+  let listener = null;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Подробное резюме кандидата с подтвержденным опытом разработки и руководства командой.',
+    resumeCandidateFacts: resumeCandidateFacts('Подробное резюме кандидата с подтвержденным опытом разработки и руководства командой.'),
+    resumeProfileText: 'Последний рабочий профиль кандидата с подтвержденными фактами.',
+    resumeProfileWeaknesses: '• Старый аудит',
+    resumeProfileSourceHash: 'old-hash',
+    resumeProfileBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileCheckedAt: '2026-01-01T00:00:00.000Z'
+  };
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() { return { choices: [{ finish_reason: 'stop', message: { content: '{invalid json' } }] }; }
+  });
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const response = await new Promise((resolve) => listener({ type: 'BUILD_RESUME_PROFILE' }, {}, resolve));
+  assert.equal(response.ok, false);
+  assert.equal(localData.resumeProfileText, 'Последний рабочий профиль кандидата с подтвержденными фактами.');
+  assert.equal(localData.resumeProfileWeaknesses, '• Старый аудит');
+  assert.equal(localData.resumeProfileSourceHash, 'old-hash');
+});
+
+test('resume profile auto refresh is single-flight and never runs inside each application', async () => {
+  let listener = null;
+  let profileBuildCalls = 0;
+  let coverCalls = 0;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Обновленное резюме Tech Lead: команда 15 FTE, найм, интервью и онбординг.',
+    resumeCandidateFacts: resumeCandidateFacts('Обновленное резюме Tech Lead: команда 15 FTE, найм, интервью и онбординг.'),
+    resumeProfileText: 'Старый профиль кандидата с достаточным количеством подтвержденных фактов.',
+    resumeProfileWeaknesses: '• Старый аудит',
+    resumeProfileSourceHash: 'stale-hash',
+    resumeProfileBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileCheckedAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileAutoRefreshEnabled: true,
+    resumeCacheTtlHours: 1,
+    coverPrompt: 'unchanged cover prompt',
+    employerQuestionPrompt: 'unchanged employer prompt',
+    employmentPreference: [],
+    workFormatPreference: []
+  };
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.messages[0].content.includes('Преобразуй текст резюме')) {
+      profileBuildCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { ok: true, async json() { return { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+        profile: 'Tech Lead: руководил командой 15 FTE, проводил найм, интервью и онбординг инженеров.',
+        weaknesses: []
+      }) } }] }; } };
+    }
+    coverCalls += 1;
+    return { ok: true, async json() { return { choices: [{ finish_reason: 'stop', message: { content: 'Откликаюсь на вакансию.' } }] }; } };
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const ensure = () => new Promise((resolve) => listener({ type: 'ENSURE_RESUME_PROFILE' }, {}, resolve));
+  const send = () => new Promise((resolve) => listener({ type: 'GENERATE_COVER_LETTER', task: 'cover_letter', vacancyText: 'Java' }, {}, resolve));
+  const refreshResponses = await Promise.all([ensure(), ensure()]);
+  assert.equal(refreshResponses.every((item) => item.ok), true);
+  const responses = await Promise.all([send(), send()]);
+  assert.equal(responses.every((item) => item.ok), true);
+  assert.equal(profileBuildCalls, 1);
+  assert.equal(coverCalls, 2);
+  assert.match(localData.resumeProfileText, /15 FTE/);
+
+  localData.resumeProfileCheckedAt = '2026-01-01T00:00:00.000Z';
+  const next = await send();
+  assert.equal(next.ok, true);
+  assert.equal(profileBuildCalls, 1);
+  assert.equal(coverCalls, 3);
+  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].requests, 1);
+  assert.equal(localData.aiQuotaUsage.models['llama-3.1-8b-instant'].requests, 3);
+});
+
 test('Groq prompt caps large payload components', async () => {
   let listener = null;
   let requestBody = null;
@@ -1455,11 +1922,19 @@ test('Groq prompt caps large payload components', async () => {
     ...Array.from({ length: 300 }, (_, index) => `Проект ${index}: разработка backend систем и автоматизация процессов`)
   ].join('\n');
   const longVacancy = Array.from({ length: 200 }, (_, index) => `Вакансия строка ${index}: Java Spring SQL Kafka`).join('\n');
-  const longExtra = Array.from({ length: 200 }, (_, index) => `Text question ${index}: Расскажите про опыт`).join('\n');
+  const questions = Array.from({ length: 20 }, (_, index) => ({
+    id: `question-${index}`,
+    kind: 'text',
+    inputType: 'text',
+    question: `Расскажите про опыт ${index} ${'x'.repeat(50)}`,
+    options: []
+  }));
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
     resumeText: longResume,
+    resumeCandidateFacts: resumeCandidateFacts(longResume.slice(0, 12000)),
+    resumeProfileText: longResume,
     expectedSalary: '250000',
     telegramUsername: `@${'x'.repeat(300)}`,
     coverPrompt: 'cover prompt',
@@ -1473,7 +1948,11 @@ test('Groq prompt caps large payload components', async () => {
     return {
       ok: true,
       async json() {
-        return { choices: [{ message: { content: 'Ответ' } }] };
+        const sent = JSON.parse(requestBody.messages.find((message) => message.role === 'user').content);
+        return { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+          answers: sent.questions.map((question) => ({ id: question.id, answer: 'Ответ', selectedOptions: [] })),
+          coverLetter: ''
+        }) } }] };
       }
     };
   };
@@ -1520,7 +1999,7 @@ test('Groq prompt caps large payload components', async () => {
         type: 'GENERATE_COVER_LETTER',
         task: 'test_assist',
         vacancyText: longVacancy,
-        extraText: longExtra
+        questions
       },
       {},
       resolve
@@ -1531,15 +2010,17 @@ test('Groq prompt caps large payload components', async () => {
   assert.equal(response.ok, true);
   assert.equal(requestBody.max_tokens, 700);
   const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
-  assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 1800);
-  assert.ok(requestBody.messages.find((message) => message.role === 'user').content.includes(`Telegram: @${'x'.repeat(199)}`));
+  assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 6000);
+  assert.ok(requestBody.messages.filter((message) => message.role === 'system').some((message) => message.content.includes(`Telegram: @${'x'.repeat(199)}`)));
   assert.ok(groqPayloadLog.details.componentLengths.vacancy <= 2200);
-  assert.ok(groqPayloadLog.details.componentLengths.extra <= 2200);
-  assert.ok(requestBody.messages.reduce((sum, message) => sum + message.content.length, 0) < longResume.length + longVacancy.length + longExtra.length);
+  assert.equal(groqPayloadLog.details.componentLengths.extra, 0);
+  assert.equal(JSON.parse(requestBody.messages.find((message) => message.role === 'user').content).questions.length, 20);
+  assert.ok(requestBody.messages.reduce((sum, message) => sum + message.content.length, 0) < longResume.length + longVacancy.length + JSON.stringify(questions).length);
 });
 
 test('Groq 429 response stores cooldown from retry-after', async () => {
   let listener = null;
+  let fetchCalls = 0;
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
@@ -1550,18 +2031,21 @@ test('Groq 429 response stores cooldown from retry-after', async () => {
     agentDebugLogsEnabled: true
   };
 
-  globalThis.fetch = async () => ({
-    ok: false,
-    status: 429,
-    headers: {
-      get(name) {
-        return String(name).toLowerCase() === 'retry-after' ? '2' : '';
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: false,
+      status: 429,
+      headers: {
+        get(name) {
+          return String(name).toLowerCase() === 'retry-after' ? '2' : '';
+        }
+      },
+      async text() {
+        return 'rate limit';
       }
-    },
-    async text() {
-      return 'rate limit';
-    }
-  });
+    };
+  };
 
   globalThis.chrome = {
     storage: {
@@ -1613,6 +2097,7 @@ test('Groq 429 response stores cooldown from retry-after', async () => {
   });
 
   assert.equal(response.ok, false);
+  assert.equal(fetchCalls, 1);
   assert.ok(Date.parse(localData.groqCooldownUntil) > Date.now());
   assert.ok(localData.agentDebugLog.some((entry) => entry.event === 'groq_rate_limit_cooldown'));
 });
@@ -1882,7 +2367,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   const html = await readFile(new URL('src/popup.html', root), 'utf8');
   const js = await readFile(new URL('src/popup.js', root), 'utf8');
 
-  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults']) {
+  for (const id of ['appStatus', 'appStatusDot', 'appStatusTitle', 'appStatusDetail', 'currentAction', 'aiQuotaStatus', 'autoApply', 'continueApply', 'stop', 'refreshResumes', 'openOptions', 'version', 'applied', 'skipped', 'errors', 'recentResults']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /\.copy-button/);
@@ -1933,6 +2418,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /item\.error/);
   assert.doesNotMatch(js, /Уже был отклик/);
   assert.match(js, /currentAction/);
+  assert.match(js, /nodes\.aiQuotaStatus\.textContent = lastRunState\.aiQuotaStatus/);
   assert.match(js, /START_AUTO_APPLY/);
   assert.match(js, /CONTINUE_AUTO_APPLY/);
   assert.match(js, /GET_CONTENT_STATUS/);
@@ -2239,6 +2725,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     groqModel: 'llama-3.3-70b-versatile',
     resumeUrl: '',
     resumeCacheTtlHours: 1,
+    resumeProfileText: '',
+    resumeProfileWeaknesses: '',
+    resumeProfileAutoRefreshEnabled: false,
     expectedSalary: '',
     telegramUsername: '',
     employmentPreference: '',
@@ -2289,7 +2778,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     return element;
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'choiceRetryPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'groqStatus', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'groqStatus', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
 
@@ -2301,6 +2790,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     resumeParsedAt: '',
     resumeParsedUrl: '',
     resumeCacheTtlHours: 1,
+    resumeProfileText: '',
+    resumeProfileWeaknesses: '',
+    resumeProfileAutoRefreshEnabled: false,
     expectedSalary: '',
     telegramUsername: '',
     employmentPreference: [],
@@ -2359,7 +2851,6 @@ test('options preserve masked Groq key unless user edits the key field', async (
 
     assert.equal(elements.coverPrompt.value, 'default prompt');
     assert.equal(elements.employerQuestionPrompt.value, 'default employer prompt');
-    assert.equal(elements.choiceRetryPrompt.value, 'default choice prompt');
 
     await handlers.get('testGroq:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2376,7 +2867,6 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.deepEqual(storage.workFormatPreference, []);
     assert.equal(storage.coverPrompt, 'default prompt');
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
-    assert.equal(storage.choiceRetryPrompt, 'default choice prompt');
 
     elements.dailyLimit.value = '250';
     await handlers.get('save:click')();
@@ -2424,12 +2914,18 @@ test('options preserve masked Groq key unless user edits the key field', async (
   }
 });
 
-test('options use hh resume URL instead of pasted resume text or daily refresh toggle', async () => {
+test('options expose editable resume profile, audit, refinement, and auto refresh controls', async () => {
   const html = await readFile(new URL('src/options.html', root), 'utf8');
   const js = await readFile(new URL('src/options.js', root), 'utf8');
 
   assert.match(html, /id="resumeUrl"/);
   assert.match(html, /id="resumeCacheTtlHours" type="number" min="0.1" step="0.5"/);
+  assert.match(html, /id="resumeProfileText"/);
+  assert.match(html, /id="buildResumeProfile"/);
+  assert.match(html, /id="resumeProfileEditComment"/);
+  assert.match(html, /id="editResumeProfile"/);
+  assert.match(html, /id="resumeProfileAutoRefreshEnabled"/);
+  assert.match(html, /id="resumeProfileWeaknesses"/);
   assert.match(html, /<fieldset class="preference-field" id="employmentPreference">/);
   assert.match(html, /value="individual_entrepreneur">\s*<span>ИП<\/span>/);
   assert.match(html, /value="labor_contract">\s*<span>ТК<\/span>/);
@@ -2457,6 +2953,10 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.match(html, /id="delayMaxMs" type="number" min="500" step="250"/);
   assert.match(js, /resumeUrl/);
   assert.match(js, /resumeCacheTtlHours/);
+  assert.match(js, /BUILD_RESUME_PROFILE/);
+  assert.match(js, /EDIT_RESUME_PROFILE/);
+  assert.match(js, /resumeProfileAutoRefreshEnabled/);
+  assert.match(js, /Укажите ссылку на резюме hh\.ru перед заполнением промпта/);
   assert.match(js, /employmentPreference/);
   assert.match(js, /workFormatPreference/);
   assert.match(js, /employerQuestionPrompt/);
@@ -2481,19 +2981,14 @@ test('options use hh resume URL instead of pasted resume text or daily refresh t
   assert.doesNotMatch(js, /chatUnreadOnly|chatReplyMode|chatLimit|experimentalFeaturesEnabled|chatAssistantSettings|syncExperimentalSections|auto_send/);
 });
 
-test('options expose Groq production text model choices', async () => {
+test('options expose fixed Groq task model routing', async () => {
   const html = await readFile(new URL('src/options.html', root), 'utf8');
   const js = await readFile(new URL('src/options.js', root), 'utf8');
 
-  assert.match(html, /<select id="groqModel">/);
-  for (const model of [
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'openai/gpt-oss-120b',
-    'openai/gpt-oss-20b'
-  ]) {
-    assert.match(html, new RegExp(`value="${model.replace('/', '\\/')}"`));
-    assert.match(js, new RegExp(model.replace('/', '\\/')));
-  }
+  assert.match(html, /<select id="groqModel" disabled>/);
+  assert.match(html, /value="openai\/gpt-oss-120b"/);
+  assert.match(html, /Сопроводительные письма автоматически отправляются в Llama 3\.1 8B Instant/);
+  assert.doesNotMatch(html, /value="llama-3\.3-70b-versatile"|value="openai\/gpt-oss-20b"/);
+  assert.match(js, /openai\/gpt-oss-120b/);
   assert.doesNotMatch(html, /<input id="groqModel"/);
 });

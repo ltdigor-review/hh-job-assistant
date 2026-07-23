@@ -1,10 +1,10 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.220",
+  "version": "0.1.225",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
+    "test": "node scripts/run-tests.mjs",
     "test:summary": "bash scripts/test-summary.sh",
     "build": "npm test",
     "test:extension": "node scripts/chromium-extension-smoke.mjs",

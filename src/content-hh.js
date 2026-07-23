@@ -63,11 +63,7 @@ const {
   cleanText,
   sanitizeGeneratedText,
   stripAnswerLabel,
-  getGeneratedTextInvalidReason,
-  splitGeneratedAnswers,
-  normalizeChoiceText,
-  choiceTokens,
-  scoreChoice
+  getGeneratedTextInvalidReason
 } = globalThis.HHJobAssistantText || {};
 const {
   textOf,
@@ -786,6 +782,12 @@ function isSalaryQuestion(field) {
   return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
 }
 
+function isAgeQuestion(field) {
+  const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
+  return /(?:^|\b)(?:возраст|сколько\s+вам\s+лет|ваш\s+возраст|age)(?:\b|$)/i.test(text)
+    && !/(?:опыт|стаж|experience|разработ|работа(?:ли|ете)?|коммерческ)/i.test(text);
+}
+
 function allowsShortNumericQuestionAnswer(field) {
   return /сколько|количеств|число|лет|год|разработчик|команд|зарплат|доход|компенсац|оклад|gross|salary|income/i.test(
     `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`
@@ -805,50 +807,25 @@ function getQuestionAnswerInvalidReason(answer, field) {
   }
   const genericReason = getGeneratedTextInvalidReason(text, { minLength: 2 });
   if (genericReason) return genericReason;
-  if (isContactQuestion(field) && !/(?:^|\s)(?:@[a-z0-9_]{4,}|t\.me\/[a-z0-9_]+|https?:\/\/\S+|телеграм|telegram|whatsapp|wa\.me\/\S+)/i.test(text)) {
-    return 'Сгенерированный ответ не похож на контакт для вопроса про мессенджер.';
+  const comparable = (value) => cleanText(value).toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const answerComparable = comparable(text);
+  const questionComparable = comparable(getFieldQuestionText(field));
+  if (
+    answerComparable &&
+    questionComparable &&
+    (answerComparable === questionComparable || (answerComparable.length > 20 && questionComparable.includes(answerComparable)))
+  ) {
+    return 'Сгенерированный ответ повторяет вопрос работодателя.';
   }
-  if (isSalaryQuestion(field) && !/\d/.test(text)) {
+  if (isContactQuestion(field) && !/(?:^|\s)(?:@[a-z0-9_]{4,}|t\.me\/[a-z0-9_]+|https?:\/\/\S+|телеграм|telegram|whatsapp|wa\.me\/\S+)/i.test(text)) {
+    if (!/общение\s+через\s+hh\.ru/i.test(text)) {
+      return 'Сгенерированный ответ не похож на контакт для вопроса про мессенджер.';
+    }
+  }
+  if (isSalaryQuestion(field) && !/\d/.test(text) && !/по\s+договор[её]нности/i.test(text)) {
     return 'Сгенерированный ответ не содержит сумму для вопроса про доход.';
   }
   return '';
-}
-
-async function normalizeQuestionAnswers(answers, questionFields) {
-  const { resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
-    ['resumeText', 'resumeParsedText', 'resumeCache'],
-    { optional: true }
-  );
-  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
-  const contact = extractContactFromText(resumeSource);
-  return answers.map((answer, index) => {
-    const field = questionFields[index];
-    if (isContactQuestion(field) && contact) {
-      return contact;
-    }
-    return answer;
-  });
-}
-
-async function buildDeterministicQuestionAssistance(questionFields, { includeSalary = false } = {}) {
-  if (questionFields.length === 0) return '';
-  const { resumeText = '', resumeParsedText = '', resumeCache = null } = await storageGet(
-    ['resumeText', 'resumeParsedText', 'resumeCache'],
-    { optional: true }
-  );
-  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
-  const contact = extractContactFromText(resumeSource);
-  const expectedSalary = await getExpectedSalary();
-  const answers = questionFields.map((field, index) => {
-    if (isContactQuestion(field) && contact) {
-      return `Text question ${index + 1}: ${contact}`;
-    }
-    if (includeSalary && isSalaryQuestion(field) && expectedSalary) {
-      return `Text question ${index + 1}: ${expectedSalary}`;
-    }
-    return '';
-  });
-  return answers.every(Boolean) ? answers.join('\n') : '';
 }
 
 function findCoverLetterTextarea(root = getDialogRoot()) {
@@ -864,8 +841,14 @@ function findCoverLetterTextarea(root = getDialogRoot()) {
   return null;
 }
 
+function getQuestionScopes(root = getDialogRoot()) {
+  const taskBodies = [...root.querySelectorAll('[data-qa="task-body"]')].filter(isVisible);
+  return taskBodies.length > 0 ? taskBodies : [root];
+}
+
 function findQuestionFields(root = getDialogRoot()) {
-  return [...root.querySelectorAll('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),[contenteditable="true"]')]
+  return getQuestionScopes(root)
+    .flatMap((scope) => [...scope.querySelectorAll('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),[contenteditable="true"]')])
     .filter(isVisible)
     .filter((field) => {
       const marker = getFieldMarker(field);
@@ -891,7 +874,9 @@ function isUsableChoiceValue(value) {
   const text = cleanText(value);
   if (!text || text.length > 120) return false;
   if (/^\d+$/.test(text)) return false;
+  if (/^(?:on|true|false|short|long|yes|no)$/i.test(text)) return false;
   if (/^task[_-]?\d+/i.test(text)) return false;
+  if (isQuestionLikeChoiceLine(text)) return false;
   return /[а-яa-z]/i.test(text);
 }
 
@@ -919,8 +904,9 @@ function getOptionLabel(control) {
   const marker = textOf(label || control.parentElement || control);
   const value = control.value || control.getAttribute?.('value') || '';
   const markerOption = extractOptionMarker(marker);
+  const ariaOption = isQuestionLikeChoiceLine(ariaLabel) ? '' : ariaLabel;
   const fallbackValue = !markerOption.text && !markerOption.hasQuestionLikeLine && isUsableChoiceValue(value) ? value : '';
-  return cleanText([...new Set([ariaLabel, markerOption.text, fallbackValue].map(cleanText).filter(Boolean))].join('\n'));
+  return cleanText([...new Set([ariaOption, markerOption.text, fallbackValue].map(cleanText).filter(Boolean))].join('\n'));
 }
 
 function getControlGroupKey(control, index) {
@@ -953,7 +939,8 @@ function isSelectableQuestionControl(control) {
 }
 
 function findQuestionControlGroups(root = getDialogRoot()) {
-  const controls = [...root.querySelectorAll('input[type="checkbox"],input[type="radio"]')]
+  const controls = getQuestionScopes(root)
+    .flatMap((scope) => [...scope.querySelectorAll('input[type="checkbox"],input[type="radio"]')])
     .filter(isSelectableQuestionControl)
     .map((control, index) => ({
       control,
@@ -976,6 +963,89 @@ function findQuestionControlGroups(root = getDialogRoot()) {
   }
 
   return [...byGroup.values()].filter((group) => group.options.length > 0);
+}
+
+function stableQuestionHash(value) {
+  let hash = 0x811c9dc5;
+  for (const character of String(value || '')) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function createQuestionSnapshot(root, questionFields = findQuestionFields(root), questionControlGroups = findQuestionControlGroups(root)) {
+  const textQuestions = questionFields.map((field, index) => {
+    const question = cleanText(getMeaningfulQuestionText(field) || getFieldMarker(field) || 'question text not found');
+    const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${getFieldMarker(field)}`)}`;
+    field.__hhjaQuestionText = question;
+    field.__hhjaQuestionId = id;
+    return {
+      id,
+      legacyIndex: index + 1,
+      kind: 'text',
+      question,
+      inputType: cleanText(field.getAttribute?.('type') || field.type || 'text').toLowerCase(),
+      required: Boolean(field.required || field.getAttribute?.('aria-required') === 'true'),
+      field
+    };
+  });
+  const choiceQuestions = questionControlGroups.map((group, index) => {
+    const question = cleanText(group.question || group.key || 'question text not found');
+    const labels = group.options.map((option) => cleanText(option.label)).filter(Boolean);
+    const id = `choice-${index + 1}-${stableQuestionHash(`${question}\n${group.type}\n${labels.join('\n')}`)}`;
+    group.__hhjaQuestionId = id;
+    return {
+      id,
+      legacyIndex: index + 1,
+      kind: 'choice',
+      inputType: group.type,
+      question,
+      options: labels,
+      group
+    };
+  });
+  return {
+    root,
+    textQuestions,
+    choiceQuestions,
+    signature: [
+      ...textQuestions.map((item) => `${item.id}:${item.inputType}:${item.required ? 'required' : 'optional'}`),
+      ...choiceQuestions.map((item) => `${item.id}:${item.inputType}`)
+    ].join('|')
+  };
+}
+
+function refreshQuestionSnapshot(snapshot) {
+  if (!snapshot?.root) return false;
+  if (snapshot.root !== document && snapshot.root.isConnected === false) return false;
+  const currentFields = findQuestionFields(snapshot.root);
+  const currentGroups = findQuestionControlGroups(snapshot.root);
+  if (currentFields.length !== snapshot.textQuestions.length || currentGroups.length !== snapshot.choiceQuestions.length) return false;
+  const currentSnapshot = createQuestionSnapshot(snapshot.root, currentFields, currentGroups);
+  if (currentSnapshot.signature !== snapshot.signature) return false;
+  snapshot.textQuestions = currentSnapshot.textQuestions;
+  snapshot.choiceQuestions = currentSnapshot.choiceQuestions;
+  return true;
+}
+
+function toGroqQuestion(descriptor) {
+  if (descriptor.kind === 'choice') {
+    return {
+      id: descriptor.id,
+      kind: 'choice',
+      inputType: descriptor.inputType,
+      question: descriptor.question.slice(0, 600),
+      options: descriptor.options.slice(0, 30).map((option) => option.slice(0, 180))
+    };
+  }
+  return {
+    id: descriptor.id,
+    kind: 'text',
+    inputType: descriptor.inputType,
+    question: descriptor.question.slice(0, 600),
+    options: []
+  };
 }
 
 function buildEmployerQuestionContext(root, questionFields, questionControlGroups) {
@@ -1020,21 +1090,6 @@ function buildEmployerQuestionContext(root, questionFields, questionControlGroup
   }
 
   return sections.join('\n\n').slice(0, QUESTION_CONTEXT_GROQ_MAX_CHARS);
-}
-
-function buildChoiceRetryContext(questionControlGroups) {
-  return [
-    'Choice groups:',
-    ...questionControlGroups.map((group, index) => {
-      const groupIndex = Number(group.originalIndex ?? index) + 1;
-      const options = group.options.map((option, optionIndex) => `${optionIndex + 1}. ${option.label}`).join('\n');
-      return [
-        `Choice group ${groupIndex} (${group.type}, ${group.type === 'radio' ? 'choose one' : 'choose all matching'}):`,
-        group.question ? `Question/context: ${group.question}` : 'Question/context: not found',
-        options
-      ].join('\n');
-    })
-  ].join('\n').slice(0, QUESTION_CONTEXT_GROQ_MAX_CHARS);
 }
 
 function summarizeEmployerQuestionInputs(questionFields, questionControlGroups) {
@@ -1384,6 +1439,7 @@ async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = 
 
 async function appendDirectClickResponse(item, counters, { status = 'applied_direct_click', coverLetterUsed = false, testDetected = item.testDetected } = {}) {
   counters.applied += 1;
+  await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
   await clearPendingSubmit();
   await appendResult({
     index: item.index,
@@ -1481,6 +1537,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })
   ) {
     counters.applied += 1;
+    await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
     await clearPendingSubmit();
     await appendResult({
       index: item.index,
@@ -1675,8 +1732,7 @@ async function getConfig() {
     'groqApiKey',
     'resumeUrl',
     'coverPrompt',
-    'employerQuestionPrompt',
-    'choiceRetryPrompt'
+    'employerQuestionPrompt'
   ]);
   return {
     dailyLimit: Number(values.dailyLimit) || DEFAULTS.dailyLimit,
@@ -1687,8 +1743,7 @@ async function getConfig() {
     groqApiKey: values.groqApiKey,
     resumeUrl: values.resumeUrl,
     coverPrompt: values.coverPrompt,
-    employerQuestionPrompt: values.employerQuestionPrompt,
-    choiceRetryPrompt: values.choiceRetryPrompt
+    employerQuestionPrompt: values.employerQuestionPrompt
   };
 }
 
@@ -1729,11 +1784,7 @@ function isMissingGroqKeyError(error) {
 }
 
 function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|groq вернул (?:пустой ответ|неподходящее сопроводительное письмо)/i.test(error instanceof Error ? error.message : String(error));
-}
-
-function isEmptyGroqResponseError(error) {
-  return /groq вернул пустой ответ/i.test(error instanceof Error ? error.message : String(error));
+  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|дневной ai-бюджет|квота .*исчерпан|минутн.*квот|groq вернул (?:пустой ответ|неподходящее сопроводительное письмо|некорректный json|неполный структурированный|дублирующиеся)/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
@@ -1749,12 +1800,13 @@ function missingGroqMessage(kind) {
   return 'Пропущено: не указан ключ Groq API, а вакансия требует сопроводительное письмо.';
 }
 
-async function generateTestAssistance(vacancyText, extraText) {
+async function generateTestAssistance(vacancyText, questions, coverLetterRequested) {
   const response = await sendRuntimeMessage({
     type: 'GENERATE_COVER_LETTER',
     task: 'test_assist',
     vacancyText,
-    extraText
+    questions,
+    coverLetterRequested
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
     timeoutMessage: 'Запрос помощи с вопросами Groq не уложился во время.',
@@ -1763,29 +1815,7 @@ async function generateTestAssistance(vacancyText, extraText) {
   if (!response?.ok) {
     throw new Error(localizeError(response?.error, 'Не удалось подготовить ответы на вопросы работодателя'));
   }
-  return sanitizeGeneratedText(response.text);
-}
-
-async function generateChoiceRetryAssistance(vacancyText, questionContext, previousAnswer) {
-  const response = await sendRuntimeMessage({
-    type: 'GENERATE_COVER_LETTER',
-    task: 'choice_retry',
-    vacancyText: '',
-    extraText: [
-      questionContext,
-      '',
-      'Previous answer:',
-      previousAnswer
-    ].join('\n')
-  }, {
-    timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Запрос уточнения вариантов Groq не уложился во время.',
-    cancelOnStop: true
-  });
-  if (!response?.ok) {
-    throw new Error(localizeError(response?.error, 'Не удалось уточнить варианты ответов HH'));
-  }
-  return sanitizeGeneratedText(response.text);
+  return response;
 }
 
 async function getExpectedSalary() {
@@ -1804,15 +1834,194 @@ async function getQuestionPreferences() {
   };
 }
 
+function isNumericOnlyQuestionField(field) {
+  const type = cleanText(field?.getAttribute?.('type') || field?.type || '').toLowerCase();
+  const inputMode = cleanText(field?.getAttribute?.('inputmode') || '').toLowerCase();
+  return type === 'number' || /numeric|decimal/.test(inputMode);
+}
+
+async function getDeterministicStructuredAnswers(snapshot) {
+  const {
+    expectedSalary = '',
+    telegramUsername = '',
+    resumeText = '',
+    resumeParsedText = '',
+    resumeCache = null,
+    resumeCandidateFacts = null
+  } = await storageGet(
+    ['expectedSalary', 'telegramUsername', 'resumeText', 'resumeParsedText', 'resumeCache', 'resumeCandidateFacts'],
+    { optional: true }
+  );
+  const preferences = await getQuestionPreferences();
+  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
+  const contact = cleanText(telegramUsername) || extractContactFromText(resumeSource);
+  const answers = new Map();
+  let blockedReason = '';
+
+  for (const descriptor of snapshot.textQuestions) {
+    if (isAgeQuestion(descriptor.field)) {
+      const age = Number(resumeCandidateFacts?.age);
+      if (Number.isInteger(age) && age >= 18 && age <= 80) {
+        answers.set(descriptor.id, { id: descriptor.id, answer: String(age), selectedOptions: [] });
+      } else {
+        blockedReason = 'Пропущено: точный возраст не извлечён из резюме HH.';
+      }
+      continue;
+    }
+    if (isSalaryQuestion(descriptor.field)) {
+      if (cleanText(expectedSalary)) {
+        answers.set(descriptor.id, { id: descriptor.id, answer: cleanText(expectedSalary), selectedOptions: [] });
+      } else if (isNumericOnlyQuestionField(descriptor.field) && descriptor.required) {
+        blockedReason = 'Пропущено: обязательное числовое поле зарплаты не заполнено в настройках.';
+      } else {
+        answers.set(descriptor.id, { id: descriptor.id, answer: 'По договорённости', selectedOptions: [] });
+      }
+      continue;
+    }
+    if (isContactQuestion(descriptor.field)) {
+      answers.set(descriptor.id, {
+        id: descriptor.id,
+        answer: contact || 'Предпочту общение через hh.ru',
+        selectedOptions: []
+      });
+    }
+  }
+
+  for (const descriptor of snapshot.choiceQuestions) {
+    const preferred = getPreferredChoiceOptions(descriptor.group, preferences).map((option) => cleanText(option.label));
+    const onlyOption = descriptor.group.options.length === 1 ? cleanText(descriptor.group.options[0].label) : '';
+    const selectedOptions = preferred.length > 0 ? preferred : [onlyOption].filter(Boolean);
+    if (selectedOptions.length > 0) {
+      answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions });
+    }
+  }
+  return { answers, blockedReason };
+}
+
+async function buildSafeStructuredFallback(snapshot, existingAnswers = new Map()) {
+  const answers = new Map(existingAnswers);
+  const preferences = await getQuestionPreferences();
+  for (const descriptor of snapshot.textQuestions) {
+    if (answers.has(descriptor.id)) continue;
+    answers.set(descriptor.id, {
+      id: descriptor.id,
+      answer: 'Готов подробно обсудить этот вопрос на интервью',
+      selectedOptions: []
+    });
+  }
+  for (const descriptor of snapshot.choiceQuestions) {
+    if (answers.has(descriptor.id)) continue;
+    const preferred = getPreferredChoiceOptions(descriptor.group, preferences);
+    const ownOption = descriptor.group.options.find((option) => /^(?:свой вариант|другое|other)$/i.test(cleanText(option.label)));
+    const selected = (preferred.length > 0 ? preferred : [ownOption].filter(Boolean)).map((option) => cleanText(option.label));
+    if (selected.length > 0) {
+      answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions: selected });
+    }
+  }
+  return answers;
+}
+
+function parseLegacyStructuredAnswers(text, expectedDescriptors) {
+  const source = String(text || '');
+  if (expectedDescriptors.length === 1 && !/(?:^|\n)\s*(?:Text question|Choice group)\s+\d+\s*:/i.test(source)) {
+    const descriptor = expectedDescriptors[0];
+    const value = sanitizeGeneratedText(source);
+    return [{
+      id: descriptor.id,
+      answer: descriptor.kind === 'text' ? value : '',
+      selectedOptions: descriptor.kind === 'choice' ? [value].filter(Boolean) : []
+    }];
+  }
+  const result = [];
+  for (const descriptor of expectedDescriptors) {
+    const legacyIndex = descriptor.legacyIndex;
+    const label = descriptor.kind === 'choice' ? 'Choice group' : 'Text question';
+    const marker = new RegExp(`(?:^|\\n)\\s*${label}\\s+${legacyIndex}\\s*:\\s*`, 'ig');
+    const matches = [...source.matchAll(marker)];
+    if (matches.length !== 1) throw new Error('Groq вернул неоднозначные или пропущенные метки ответов');
+    const start = matches[0].index + matches[0][0].length;
+    const remaining = source.slice(start);
+    const end = remaining.search(/\n\s*(?:Text question|Choice group)\s+\d+\s*:/i);
+    const value = cleanText(end >= 0 ? remaining.slice(0, end) : remaining);
+    result.push({
+      id: descriptor.id,
+      answer: descriptor.kind === 'text' ? stripAnswerLabel(value) : '',
+      selectedOptions: descriptor.kind === 'choice'
+        ? value.split(/\s*;\s*|\n+/).map(cleanText).filter(Boolean)
+        : []
+    });
+  }
+  return result;
+}
+
+function validateStructuredAssistance(response, expectedDescriptors, { coverLetterRequested = false } = {}) {
+  if (!Array.isArray(response?.answers) && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
+    throw new Error('Groq не вернул обязательный структурированный массив answers');
+  }
+  const sourceAnswers = Array.isArray(response?.answers)
+    ? response.answers
+    : parseLegacyStructuredAnswers(response?.text, expectedDescriptors);
+  if (sourceAnswers.length !== expectedDescriptors.length) {
+    throw new Error('Groq вернул неправильное количество структурированных ответов');
+  }
+  const expectedById = new Map(expectedDescriptors.map((descriptor) => [descriptor.id, descriptor]));
+  const seen = new Set();
+  const answers = new Map();
+  for (const item of sourceAnswers) {
+    const id = cleanText(item?.id);
+    const descriptor = expectedById.get(id);
+    if (!descriptor || seen.has(id) || typeof item.answer !== 'string' || !Array.isArray(item.selectedOptions)) {
+      throw new Error('Groq вернул неизвестный или дублирующийся идентификатор ответа');
+    }
+    seen.add(id);
+    const selectedOptions = item.selectedOptions.map(cleanText).filter(Boolean);
+    if (descriptor.kind === 'text' && selectedOptions.length > 0) {
+      throw new Error('Groq смешал текстовый ответ и варианты выбора');
+    }
+    if (descriptor.kind === 'choice') {
+      if (selectedOptions.some((option) => !descriptor.options.includes(option))) {
+        throw new Error('Groq вернул вариант, которого нет в форме HH');
+      }
+      if ((descriptor.inputType === 'radio' && selectedOptions.length !== 1) || selectedOptions.length === 0) {
+        throw new Error('Groq не выбрал допустимый вариант формы HH');
+      }
+    }
+    answers.set(id, {
+      id,
+      answer: cleanText(item.answer),
+      selectedOptions
+    });
+  }
+  if (seen.size !== expectedById.size) throw new Error('Groq пропустил обязательный идентификатор ответа');
+  const coverLetter = cleanText(response?.coverLetter || '');
+  if (!coverLetterRequested && coverLetter) throw new Error('Groq вернул лишнее сопроводительное письмо');
+  return { answers, coverLetter };
+}
+
+function serializeStructuredAssistance(snapshot, answers) {
+  const lines = [];
+  snapshot.textQuestions.forEach((descriptor, index) => {
+    const answer = answers.get(descriptor.id)?.answer;
+    if (answer) lines.push(`Text question ${index + 1}: ${answer}`);
+  });
+  snapshot.choiceQuestions.forEach((descriptor, index) => {
+    const selected = answers.get(descriptor.id)?.selectedOptions || [];
+    if (selected.length > 0) lines.push(`Choice group ${index + 1}: ${selected.join('; ')}`);
+  });
+  return lines.join('\n');
+}
+
+async function recordLocalAiFallback(task, reason) {
+  await sendRuntimeMessage({
+    type: 'RECORD_AI_FALLBACK',
+    task,
+    reason: cleanText(reason || 'local_fallback').slice(0, 100)
+  }, { timeoutMs: 5000 }).catch(() => {});
+}
+
 async function getFallbackCoverLetter(vacancyText = '') {
-  const text = cleanText(vacancyText);
-  if (/(?:kotlin|java|jvm|backend|api|микросервис)/i.test(text)) {
-    return 'Занимался JVM backend и API. Откликаюсь.';
-  }
-  if (/(?:qa|тестирован|автоматизац|selenium|playwright|junit)/i.test(text)) {
-    return 'Занимался автотестами backend. Откликаюсь.';
-  }
-  return 'Похоже на мой опыт. Откликаюсь.';
+  void vacancyText;
+  return 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.';
 }
 
 function getCoverLetterInvalidReason(value) {
@@ -1862,54 +2071,6 @@ function isStructuredCoverLetterAnswer(value) {
   return lines.length > 0 && lines.every((line) => /^\d+[.)]\s+/.test(line));
 }
 
-async function getFallbackQuestionAssistance(questionFields, questionControlGroups) {
-  const preferences = await getQuestionPreferences();
-  const lines = [];
-  questionControlGroups.forEach((group, index) => {
-    const preferredOptions = getPreferredChoiceOptions(group, preferences);
-    const positiveOptions = group.type === 'checkbox' && preferredOptions.length > 0
-      ? preferredOptions
-      : [
-          getPreferredChoiceOption(group, preferences) ||
-          group.options.find((option) => /да|готов|готова|соглас|можно|full|полная|удален|remote/i.test(option.label)) ||
-          group.options.find((option) => !/нет|не готов|не готова|no\b/i.test(option.label)) ||
-          group.options[0]
-        ].filter(Boolean);
-    const labels = positiveOptions.map((option) => option.label).filter(Boolean);
-    if (labels.length > 0) {
-      lines.push(`Choice group ${index + 1}: ${labels.join('; ')}`);
-    }
-  });
-  const deterministicText = await buildDeterministicQuestionAssistance(questionFields, { includeSalary: true });
-  if (deterministicText) lines.push(deterministicText);
-  return lines.join('\n');
-}
-
-function hasCompleteLabeledTextAnswers(value, count) {
-  if (count === 0) return true;
-  const text = String(value || '');
-  return Array.from({ length: count }, (_, index) => new RegExp(`(?:^|\\n)\\s*Text question ${index + 1}\\s*:`, 'i').test(text))
-    .every(Boolean);
-}
-
-async function buildNumberedCoverLetterAnswers(questionContext) {
-  const context = cleanText(questionContext);
-  if (!/скопируйте|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(context)) return '';
-  const expectedSalary = await getExpectedSalary();
-  const salary = expectedSalary || 'минимум 250 000 руб. gross, комфорт 300 000 руб. gross';
-  const answers = [];
-  if (/АБС\s*ЦФТ|ИБСО|ЦФТ-Банк|ЦФТ-Ритейл/i.test(context)) {
-    answers.push('1. С АБС ЦФТ / ИБСО / ЦФТ-Банк / ЦФТ-Ритейл коммерческого опыта не было; есть опыт функционального, регрессионного и интеграционного тестирования, анализа требований, тест-кейсов и баг-репортов.');
-  }
-  if (/оклад|доход|зарплат|gross|гросс|вычета/i.test(context)) {
-    answers.push(`${answers.length + 1}. Ожидания по окладу: ${salary}.`);
-  }
-  if (/военный билет|приписное/i.test(context)) {
-    answers.push(`${answers.length + 1}. Военный билет или приписное: есть, детали готов обсудить.`);
-  }
-  return answers.join('\n');
-}
-
 function selectControl(control) {
   control.focus?.();
   if (!control.checked) {
@@ -1920,56 +2081,18 @@ function selectControl(control) {
   control.dispatchEvent?.(new Event('change', { bubbles: true }));
 }
 
-function extractGroupAnswer(answerText, group, index) {
-  const lines = cleanText(answerText).split(/\n+/).filter(Boolean);
-  const numberedPattern = new RegExp(`(?:choice\\s+group|group|вариант(?:ы)?|вопрос)\\s*${index + 1}\\b`, 'i');
-  const numbered = lines.filter((line) => numberedPattern.test(line));
-  if (numbered.length > 0) {
-    return numbered.join('\n');
-  }
-
-  const groupTokens = new Set(choiceTokens(group.question || group.key || ''));
-  if (groupTokens.size > 0) {
-    const contextual = lines.filter((line) => {
-      const lineTokens = new Set(choiceTokens(line));
-      return [...groupTokens].filter((token) => lineTokens.has(token)).length >= Math.min(2, groupTokens.size);
-    });
-    if (contextual.length > 0) {
-      return contextual.join('\n');
-    }
-  }
-
-  const optionLabels = group.options.map((option) => normalizeChoiceText(option.label)).filter(Boolean);
-  const withOptions = lines.filter((line) => {
-    const normalizedLine = normalizeChoiceText(line);
-    return optionLabels.some((label) => label && normalizedLine.includes(label));
-  });
-  return withOptions.length > 0 ? withOptions.join('\n') : answerText;
-}
-
-function fillQuestionControls(groups, answerText) {
+function fillStructuredQuestionControls(choiceDescriptors, answers) {
   let selected = 0;
   const labels = [];
-  for (const [index, group] of groups.entries()) {
-    const groupAnswer = extractGroupAnswer(answerText, group, Number(group.originalIndex ?? index));
-    const scored = group.options
-      .map((option) => ({ ...option, score: scoreChoice(option.label, groupAnswer) }))
-      .filter((option) => option.score >= 0.5);
-
-    if (group.type === 'radio') {
-      const best = scored.sort((left, right) => right.score - left.score)[0];
-      if (best) {
-        selectControl(best.control);
-        selected += 1;
-        labels.push(best.label);
-      }
-      continue;
-    }
-
-    for (const option of scored) {
+  for (const descriptor of choiceDescriptors) {
+    const selectedOptions = answers.get(descriptor.id)?.selectedOptions || [];
+    for (const selectedLabel of selectedOptions) {
+      const option = descriptor.group.options.find((candidate) => cleanText(candidate.label) === cleanText(selectedLabel));
+      if (!option) continue;
       selectControl(option.control);
       selected += 1;
       labels.push(option.label);
+      if (descriptor.inputType === 'radio') break;
     }
   }
   return { selected, labels };
@@ -2029,86 +2152,20 @@ function getPreferredChoiceOptions(group, preferences = {}) {
     }
     if (preferred.length === 0 && /гибрид|hybrid/i.test(questionText)) {
       const configuredFormats = normalizeMultiPreference(preferences.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES);
-      const option = findYesNoOption(options, configuredFormats.length === 0 || configuredFormats.includes('hybrid'));
+      const option = configuredFormats.length > 0
+        ? findYesNoOption(options, configuredFormats.includes('hybrid'))
+        : null;
       if (option) preferred.push(option);
     } else if (preferred.length === 0 && /офис|office/i.test(questionText)) {
       const configuredFormats = normalizeMultiPreference(preferences.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES);
-      const option = findYesNoOption(options, configuredFormats.length === 0 || configuredFormats.includes('office'));
+      const option = configuredFormats.length > 0
+        ? findYesNoOption(options, configuredFormats.includes('office'))
+        : null;
       if (option) preferred.push(option);
     }
   }
 
   return [...new Map(preferred.map((option) => [option.control, option])).values()];
-}
-
-function getPreferredChoiceOption(group, preferences = {}) {
-  return getPreferredChoiceOptions(group, preferences)[0] || null;
-}
-
-function getFallbackChoiceOption(group, preferences = {}) {
-  const options = Array.isArray(group?.options) ? group.options.filter((option) => option?.control) : [];
-  if (options.length === 0) return null;
-  return (
-    getPreferredChoiceOption(group, preferences) ||
-    findYesNoOption(options, true) ||
-    options.find((option) => /(?:^|\s)(?:соглас|подходит|рассматриваю|agree|available)/i.test(option.label)) ||
-    options.find((option) => !/нет|не готов|не готова|не могу|не подходит|не рассматриваю|no\b|not\b|отказ/i.test(option.label)) ||
-    options[0]
-  );
-}
-
-async function fillFallbackQuestionControls(groups) {
-  const preferences = await getQuestionPreferences();
-  let selected = 0;
-  const labels = [];
-  for (const group of groups) {
-    const preferredOptions = getPreferredChoiceOptions(group, preferences);
-    const options = group.type === 'checkbox' && preferredOptions.length > 0
-      ? preferredOptions
-      : [getFallbackChoiceOption(group, preferences)].filter(Boolean);
-    for (const option of options) {
-      selectControl(option.control);
-      selected += 1;
-      labels.push(option.label);
-    }
-  }
-  return { selected, labels };
-}
-
-function truncateForStatus(value, maxLength = 180) {
-  const text = cleanText(value);
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-}
-
-function formatChoiceOptionSummary(groups) {
-  return groups
-    .slice(0, 3)
-    .map((group, index) => {
-      const options = group.options
-        .map((option) => cleanText(option.label))
-        .filter(Boolean)
-        .slice(0, 6)
-        .join(' / ');
-      const suffix = group.options.length > 6 ? ' / …' : '';
-      return `группа ${index + 1}: ${options}${suffix}`;
-    })
-    .filter(Boolean)
-    .join('; ');
-}
-
-function formatChoiceUnmatchedMessage(groups, answerText, retryError = '') {
-  const optionSummary = formatChoiceOptionSummary(groups);
-  const answerSummary = truncateForStatus(answerText, 180);
-  const details = [
-    optionSummary ? `ожидались точные варианты: ${optionSummary}` : '',
-    answerSummary ? `Groq ответил: ${answerSummary}` : '',
-    retryError ? `ошибка уточнения: ${truncateForStatus(retryError, 220)}` : ''
-  ].filter(Boolean);
-  return [
-    'Пропущено: Groq не вернул подходящие варианты ответов HH.',
-    details.length > 0 ? `Нет совпадения с вариантами HH (${details.join('; ')}).` : ''
-  ].filter(Boolean).join(' ');
 }
 
 async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
@@ -2398,333 +2455,203 @@ async function applyToVacancy(item, counters) {
     const questionFields = findQuestionFields(root);
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
+    const questionSnapshot = createQuestionSnapshot(root, questionFields, questionControlGroups);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     const vacancyText = getVacancyText(item.card) || getVacancyText(document);
     const questionAudit = summarizeEmployerQuestionInputs(questionFields, questionControlGroups);
-    const deterministicAssistance = await buildDeterministicQuestionAssistance(questionFields);
     let coverLetterUsed = false;
-    if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
-      const message = 'Пропущено: обнаружены вопросы работодателя, но заполняемые поля HH не найдены.';
+    const skipQuestionForm = async (status, message) => {
       counters.skipped += 1;
       await appendResult({
         index: item.index,
         vacancyId: item.vacancyId,
         title: item.title,
         url: item.url,
-        status: 'skipped_question_fields_not_found',
+        status,
         coverLetterUsed: false,
         testDetected: true,
         error: message
       });
       await setRunState({ state: 'applying', ...counters, lastError: message });
       closeDialog();
+    };
+    if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
+      const message = 'Пропущено: обнаружены вопросы работодателя, но заполняемые поля HH не найдены.';
+      await skipQuestionForm('skipped_question_fields_not_found', message);
       return;
     }
 
-    await setRunState({
-      state: 'generating_cover_letter',
-      ...counters,
-      currentAction: 'ИИ: отвечаю на вопросы работодателя'
+    const deterministic = await getDeterministicStructuredAnswers(questionSnapshot);
+    if (deterministic.blockedReason) {
+      await skipQuestionForm('skipped_required_numeric_salary_missing', deterministic.blockedReason);
+      return;
+    }
+    let structuredAnswers = new Map(deterministic.answers);
+    let letter = '';
+    const allDescriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
+    const aiDescriptors = allDescriptors.filter((descriptor) => !structuredAnswers.has(descriptor.id));
+    const coverLetterRequested = Boolean(coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea)));
+    const aiNeeded = aiDescriptors.length > 0 || coverLetterRequested;
+
+    await appendAgentLog('question_context_extracted', {
+      vacancyId: item.vacancyId,
+      textFields: questionFields.length,
+      choiceGroups: questionControlGroups.length,
+      contextLength: questionContext.length,
+      deterministicFields: structuredAnswers.size,
+      aiFields: aiDescriptors.length,
+      coverLetterRequested
     });
-    let assistance;
-    setBusyCursor(true);
-    try {
-      await appendAgentLog('question_context_extracted', {
-        vacancyId: item.vacancyId,
-        textFields: questionFields.length,
-        choiceGroups: questionControlGroups.length,
-        contextLength: questionContext.length,
-        deterministicTextFields: deterministicAssistance ? questionFields.length : 0
-      });
-      await appendAgentLog('question_test_detected', {
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        questions: questionAudit,
-        questionContext,
-        deterministicAssistance: deterministicAssistance || ''
-      });
-      if (deterministicAssistance && questionControlGroups.length === 0) {
-        assistance = deterministicAssistance;
-      } else {
-        assistance = await generateTestAssistance(getVacancyText(item.card), questionContext || textOf(root));
-      }
-    } catch (error) {
-      if (isStopRequestedError(error)) {
-        await markStopped(counters);
-        closeDialog();
-        return;
-      }
-      if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
-        throw error;
-      }
-
-      assistance = deterministicAssistance || await getFallbackQuestionAssistance(questionFields, questionControlGroups);
-      if (assistance && hasCompleteLabeledTextAnswers(assistance, questionFields.length)) {
-        await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
-      } else {
-        const message = isMissingGroqKeyError(error)
-          ? missingGroqMessage('test')
-          : `Пропущено: Groq не подготовил безопасные ответы на вопросы работодателя: ${localizeError(error)}`;
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: isMissingGroqKeyError(error) ? 'skipped_test_missing_groq_key' : 'skipped_test_ai_answer_unavailable',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: message
-        });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
-        closeDialog();
-        return;
-      }
-    } finally {
-      setBusyCursor(false);
-    }
-
-    if (await stopIfRequested(counters)) return;
-
-    let selectedChoices = { selected: 0, labels: [] };
-    if (questionControlGroups.length > 0) {
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю ответы на вопросы работодателя' });
-      setBusyCursor(true);
-      let choiceRetryError = '';
-      try {
-        selectedChoices = fillQuestionControls(questionControlGroups, assistance);
-      } finally {
-        setBusyCursor(false);
-      }
-      if (await stopIfRequested(counters)) return;
-      let missingChoiceGroups = getUnselectedQuestionControlGroups(questionControlGroups);
-      if (missingChoiceGroups.length > 0) {
-        await appendAgentLog('question_choices_retry', {
-          vacancyId: item.vacancyId,
-          groups: missingChoiceGroups.length,
-          missingGroups: missingChoiceGroups.map((group) => group.originalIndex + 1),
-          reason: selectedChoices.selected === 0 ? 'no_matching_option_labels' : 'partial_matching_option_labels'
-        });
-        await setRunState({
-          state: 'generating_cover_letter',
-          ...counters,
-          currentAction: 'ИИ: уточняю варианты ответов HH'
-        });
-        setBusyCursor(true);
-        const previousAssistance = assistance;
-        try {
-          const choiceRetryAssistance = await generateChoiceRetryAssistance('', buildChoiceRetryContext(missingChoiceGroups), previousAssistance);
-          const retryChoices = fillQuestionControls(missingChoiceGroups, choiceRetryAssistance);
-          assistance = [choiceRetryAssistance, previousAssistance].filter(Boolean).join('\n');
-          selectedChoices = {
-            selected: selectedChoices.selected + retryChoices.selected,
-            labels: [...selectedChoices.labels, ...retryChoices.labels]
-          };
-        } catch (error) {
-          if (isStopRequestedError(error)) {
-            await markStopped(counters);
-            closeDialog();
-            return;
-          }
-          if (isEmptyGroqResponseError(error)) {
-            choiceRetryError = localizeError(error);
-            await appendAgentLog('question_choices_retry_empty', {
-              vacancyId: item.vacancyId,
-              error: choiceRetryError
-            });
-            // Keep choices already selected from the initial AI answer.
-          } else if (!isRecoverableGroqError(error)) {
-            throw error;
-          } else {
-            const fallbackAssistance = await getFallbackQuestionAssistance(questionFields, missingChoiceGroups);
-            const retryChoices = fillQuestionControls(missingChoiceGroups, fallbackAssistance);
-            assistance = [fallbackAssistance, previousAssistance].filter(Boolean).join('\n');
-            selectedChoices = {
-              selected: selectedChoices.selected + retryChoices.selected,
-              labels: [...selectedChoices.labels, ...retryChoices.labels]
-            };
-          }
-        } finally {
-          setBusyCursor(false);
-        }
-        if (await stopIfRequested(counters)) return;
-      }
-      await appendAgentLog('question_choices_applied', {
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        groups: questionControlGroups.length,
-        selected: selectedChoices.selected,
-        labels: selectedChoices.labels.slice(0, 20),
-        expectedOptions: selectedChoices.selected === 0 ? formatChoiceOptionSummary(questionControlGroups) : '',
-        rejectedAnswerLength: selectedChoices.selected === 0 ? cleanText(assistance).length : 0,
-        retryError: selectedChoices.selected === 0 ? choiceRetryError : ''
-      });
-      missingChoiceGroups = getUnselectedQuestionControlGroups(questionControlGroups);
-      if (missingChoiceGroups.length > 0) {
-        const fallbackChoices = await fillFallbackQuestionControls(missingChoiceGroups);
-        selectedChoices = {
-          selected: selectedChoices.selected + fallbackChoices.selected,
-          labels: [...selectedChoices.labels, ...fallbackChoices.labels]
-        };
-        await appendAgentLog('question_choices_fallback_applied', {
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          groups: missingChoiceGroups.length,
-          missingGroups: missingChoiceGroups.map((group) => group.originalIndex + 1),
-          selected: fallbackChoices.selected,
-          labels: fallbackChoices.labels.slice(0, 20),
-          expectedOptions: formatChoiceOptionSummary(missingChoiceGroups),
-          rejectedAnswerLength: cleanText(assistance).length,
-          retryError: choiceRetryError
-        });
-      }
-      const missingChoiceGroupIndexes = validateSelectedQuestionControls(questionControlGroups);
-      if (missingChoiceGroupIndexes.length > 0) {
-        const message = `Пропущено: ответы на варианты HH не были выбраны (${missingChoiceGroupIndexes.join(', ')}).`;
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_choice_fill_not_verified',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: message
-        });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
-        closeDialog();
-        return;
-      }
-      await sleep(POST_FILL_SETTLE_MS);
-      if (await stopIfRequested(counters)) return;
-    }
-
-    if (questionFields.length > 0) {
-      if (await stopIfRequested(counters)) return;
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
-      setBusyCursor(true);
-      let answers = await normalizeQuestionAnswers(splitGeneratedAnswers(assistance, questionFields.length), questionFields);
-      let invalidReason = answers
-        .map((answer, index) => getQuestionAnswerInvalidReason(answer, questionFields[index]))
-        .find(Boolean);
-      if (invalidReason) {
-        await appendAgentLog('question_text_rejected_bad_answer', {
-          vacancyId: item.vacancyId,
-          error: invalidReason,
-          fields: questionFields.length
-        });
-        setBusyCursor(false);
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_bad_generated_answer',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: invalidReason
-        });
-        await setRunState({ state: 'applying', ...counters, lastError: invalidReason });
-        closeDialog();
-        return;
-      }
-      if (await stopIfRequested(counters)) return;
-      try {
-        questionFields.forEach((field, index) => {
-          field.focus?.();
-          setNativeValue(field, answers[index] || assistance);
-        });
-      } finally {
-        setBusyCursor(false);
-      }
-      await appendAgentLog('question_text_fields_applied', {
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        fields: questionFields.length,
-        fieldTargets: questionFields.map((field) => getFieldLogTarget(field)),
-        insertedTextLengths: questionFields.map((field) => cleanText(getFieldValue(field)).length),
-        sourceAnswerLengths: answers.slice(0, questionFields.length).map((answer) => cleanText(answer).length),
-        answerLengths: answers.slice(0, questionFields.length).map((answer) => String(answer || '').length)
-      });
-      await sleep(POST_FILL_SETTLE_MS);
-      if (await stopIfRequested(counters)) return;
-      const missingTextFields = validateFilledQuestionFields(questionFields, answers);
-      if (missingTextFields.length > 0) {
-        const message = `Пропущено: ответы HH не записались в поля (${missingTextFields.join(', ')}).`;
-        await appendAgentLog('question_text_fields_not_verified', {
-          vacancyId: item.vacancyId,
-          fields: questionFields.length,
-          missing: missingTextFields,
-          actualLengths: questionFields.map((field) => cleanText(getFieldValue(field)).length)
-        });
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_text_fill_not_verified',
-          coverLetterUsed: false,
-          testDetected: true,
-          error: message
-        });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
-        closeDialog();
-        return;
-      }
-    }
-
-    await appendAgentLog('question_test_answers_applied', {
+    await appendAgentLog('question_test_detected', {
       vacancyId: item.vacancyId,
       title: item.title,
       url: item.url,
-      assistance,
-      answers: buildQuestionAnswerAudit(questionFields, questionControlGroups, selectedChoices)
+      questions: questionAudit,
+      questionContext,
+      questionIds: allDescriptors.map((descriptor) => descriptor.id)
     });
 
-    if (coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea))) {
-      let letter;
+    if (aiNeeded) {
       await setRunState({
         state: 'generating_cover_letter',
         ...counters,
-        currentAction: 'ИИ: готовлю обязательное сопроводительное письмо'
+        currentAction: 'ИИ: готовлю один структурированный ответ для формы'
       });
       setBusyCursor(true);
       try {
-        if (/скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)) {
-          letter = await buildNumberedCoverLetterAnswers(questionContext)
-            || assistance;
-        } else {
-          letter = await generateCoverLetter(vacancyText);
+        const response = await generateTestAssistance(
+          vacancyText,
+          aiDescriptors.map(toGroqQuestion),
+          coverLetterRequested
+        );
+        const validated = validateStructuredAssistance(response, aiDescriptors, { coverLetterRequested });
+        for (const [id, answer] of validated.answers) {
+          structuredAnswers.set(id, answer);
         }
+        letter = validated.coverLetter;
       } catch (error) {
         if (isStopRequestedError(error)) {
           await markStopped(counters);
           closeDialog();
           return;
         }
-        if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
-          throw error;
-        }
-        const fallbackContext = [vacancyText, questionContext, assistance].map(cleanText).filter(Boolean).join('\n');
-        letter = /скопируйте|сопроводительное письмо|пронумерованные вопросы|ответьте,?\s+пожалуйста/i.test(questionContext)
-          ? (await buildNumberedCoverLetterAnswers(questionContext) || assistance)
-          : await getFallbackCoverLetter(fallbackContext);
+        await recordLocalAiFallback('test_assist', error?.code || localizeError(error));
+        structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
+        if (coverLetterRequested) letter = await getFallbackCoverLetter(vacancyText);
+        await appendAgentLog('question_structured_fallback', {
+          vacancyId: item.vacancyId,
+          reason: localizeError(error),
+          answers: structuredAnswers.size,
+          coverLetterRequested
+        });
       } finally {
         setBusyCursor(false);
       }
+    }
 
+    if (await stopIfRequested(counters)) return;
+
+    let invalidReason = '';
+    for (const descriptor of questionSnapshot.textQuestions) {
+      const answer = structuredAnswers.get(descriptor.id)?.answer || '';
+      const reason = getQuestionAnswerInvalidReason(answer, descriptor.field);
+      if (!reason) continue;
+      invalidReason ||= reason;
+      structuredAnswers.delete(descriptor.id);
+    }
+    if (invalidReason) {
+      await recordLocalAiFallback('test_assist', 'semantic_answer_rejected');
+      structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
+      await appendAgentLog('question_text_rejected_bad_answer', {
+        vacancyId: item.vacancyId,
+        error: invalidReason,
+        fields: questionFields.length
+      });
+    }
+
+    if (!refreshQuestionSnapshot(questionSnapshot)) {
+      await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH изменилась до заполнения ответов.');
+      return;
+    }
+
+    let selectedChoices = { selected: 0, labels: [] };
+    if (questionSnapshot.choiceQuestions.length > 0) {
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
+      setBusyCursor(true);
+      try {
+        selectedChoices = fillStructuredQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers);
+      } finally {
+        setBusyCursor(false);
+      }
+      const missingChoiceGroupIndexes = validateSelectedQuestionControls(questionControlGroups);
+      if (missingChoiceGroupIndexes.length > 0) {
+        const message = `Пропущено: безопасный вариант HH не найден (${missingChoiceGroupIndexes.join(', ')}).`;
+        await skipQuestionForm('skipped_choice_fill_not_verified', message);
+        return;
+      }
+      await sleep(POST_FILL_SETTLE_MS);
       if (await stopIfRequested(counters)) return;
+    }
 
+    if (!refreshQuestionSnapshot(questionSnapshot)) {
+      await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH изменилась во время заполнения ответов.');
+      return;
+    }
+
+    if (questionSnapshot.choiceQuestions.length > 0) {
+      const currentChoiceGroups = questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group);
+      const missingChoiceGroupIndexes = validateSelectedQuestionControls(currentChoiceGroups);
+      if (missingChoiceGroupIndexes.length > 0) {
+        const message = `Пропущено: ответы HH не сохранились после обновления формы (${missingChoiceGroupIndexes.join(', ')}).`;
+        await skipQuestionForm('skipped_choice_fill_not_verified', message);
+        return;
+      }
+    }
+
+    const textAnswers = questionSnapshot.textQuestions.map((descriptor) => structuredAnswers.get(descriptor.id)?.answer || '');
+    if (textAnswers.some((answer) => !answer)) {
+      await skipQuestionForm('skipped_bad_generated_answer', 'Пропущено: для одного из полей HH нет безопасного ответа.');
+      return;
+    }
+    if (questionSnapshot.textQuestions.length > 0) {
+      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
+      setBusyCursor(true);
+      try {
+        questionSnapshot.textQuestions.forEach((descriptor, index) => {
+          descriptor.field.focus?.();
+          setNativeValue(descriptor.field, textAnswers[index]);
+        });
+      } finally {
+        setBusyCursor(false);
+      }
+      await sleep(POST_FILL_SETTLE_MS);
+      const currentQuestionFields = questionSnapshot.textQuestions.map((descriptor) => descriptor.field);
+      const missingTextFields = validateFilledQuestionFields(currentQuestionFields, textAnswers);
+      if (missingTextFields.length > 0) {
+        const message = `Пропущено: ответы HH не записались в поля (${missingTextFields.join(', ')}).`;
+        await skipQuestionForm('skipped_text_fill_not_verified', message);
+        return;
+      }
+    }
+
+    const assistance = serializeStructuredAssistance(questionSnapshot, structuredAnswers);
+    await appendAgentLog('question_test_answers_applied', {
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      assistance,
+      answers: buildQuestionAnswerAudit(
+        questionSnapshot.textQuestions.map((descriptor) => descriptor.field),
+        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group),
+        selectedChoices
+      )
+    });
+
+    if (coverLetterRequested) {
       const fallbackContext = [vacancyText, questionContext, assistance, letter].map(cleanText).filter(Boolean).join('\n');
-      const sanitizedLetter = await sanitizeCoverLetterDraft(letter, () => getFallbackCoverLetter(fallbackContext), { allowStructuredAnswers: true });
+      const sanitizedLetter = await sanitizeCoverLetterDraft(letter, () => getFallbackCoverLetter(fallbackContext));
       if (sanitizedLetter.fallbackUsed) {
+        await recordLocalAiFallback('test_assist', sanitizedLetter.reason || 'invalid_cover_letter');
         await appendAgentLog('mandatory_cover_letter_fallback_after_bad_text', {
           vacancyId: item.vacancyId,
           reason: sanitizedLetter.reason,
@@ -2737,6 +2664,10 @@ async function applyToVacancy(item, counters) {
       setBusyCursor(true);
       setNativeValue(coverLetterTextarea, letter);
       setBusyCursor(false);
+      if (!cleanText(getFieldValue(coverLetterTextarea))) {
+        await skipQuestionForm('skipped_cover_letter_fill_not_verified', 'Пропущено: сопроводительное письмо не записалось в поле HH.');
+        return;
+      }
       coverLetterUsed = true;
       await sleep(POST_FILL_SETTLE_MS);
       if (await stopIfRequested(counters)) return;
@@ -2787,7 +2718,7 @@ async function applyToVacancy(item, counters) {
     if (await stopBeforeSubmitIfRequested(counters)) {
       return;
     }
-  clickWithActionCursor(submitButton);
+    clickWithActionCursor(submitButton);
     await sleep(POST_SUBMIT_SETTLE_MS);
     if (await stopIfRequested(counters)) return;
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -2808,6 +2739,7 @@ async function applyToVacancy(item, counters) {
     }
 
     counters.applied += 1;
+    await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
     await clearPendingSubmit();
     await appendResult({
       index: item.index,
@@ -2854,29 +2786,8 @@ async function applyToVacancy(item, counters) {
         closeDialog();
         return;
       }
-      if (!isMissingGroqKeyError(error) && !isRecoverableGroqError(error)) {
-        throw error;
-      }
-
-      if (isRecoverableGroqError(error)) {
-        letter = await getFallbackCoverLetter(vacancyText);
-      } else {
-        const message = missingGroqMessage('cover');
-        counters.skipped += 1;
-        await appendResult({
-          index: item.index,
-          vacancyId: item.vacancyId,
-          title: item.title,
-          url: item.url,
-          status: 'skipped_missing_groq_key',
-          coverLetterUsed: false,
-          testDetected: false,
-          error: message
-        });
-        await setRunState({ state: 'applying', ...counters, lastError: message });
-        closeDialog();
-        return;
-      }
+      await recordLocalAiFallback('cover_letter', error?.code || localizeError(error));
+      letter = await getFallbackCoverLetter(vacancyText);
     } finally {
       setBusyCursor(false);
     }
@@ -2959,6 +2870,7 @@ async function applyToVacancy(item, counters) {
   }
 
   counters.applied += 1;
+  await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
   await clearPendingSubmit();
   await appendResult({
     index: item.index,
@@ -3556,6 +3468,9 @@ async function startRun(mode, limitOverride = null, options = {}) {
   if (mode === 'dry') {
     return handleDryRun(limit);
   }
+  await sendRuntimeMessage({ type: 'ENSURE_RESUME_PROFILE' }, { timeoutMs: getRuntimeMessageTimeoutMs() }).catch(async (error) => {
+    await appendAgentLog('resume_profile_preflight_error', { error: localizeError(error) });
+  });
   return handleAutoApply(limit, null, [], { maxProcessed });
 }
 
