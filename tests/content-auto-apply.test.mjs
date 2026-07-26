@@ -61,6 +61,7 @@ async function runContentAutoApply({
   runtimeCallbackOnly = false,
   message = null,
   initialLocalStore = null,
+  cardTitle = 'Java Developer',
   cardText = 'Java Developer\nООО Test\nОткликнуться',
   sendMessageAfterImport = true,
   authenticated = true,
@@ -313,7 +314,7 @@ async function runContentAutoApply({
     }
   });
   const titleLink = new FakeElement({
-    text: 'Java Developer',
+    text: cardTitle,
     href: 'https://hh.ru/vacancy/123'
   });
   const nextLink = nextPageUrl ? new FakeElement({ text: 'дальше', href: nextPageUrl }) : null;
@@ -899,6 +900,7 @@ test('auto apply clears stale auth error before starting an authorized run', asy
     found: 0,
     processed: 0,
     applied: 0,
+    alreadyApplied: 0,
     skipped: 0,
     errors: 0,
     currentAction: 'Проверяю страницу HH',
@@ -1113,7 +1115,7 @@ test('auto apply stops cleanly when hh shows daily response limit after submit',
   assert.equal(result.states.at(-1).lastError, '');
 });
 
-test('auto apply counts already applied open response form without submit button as confirmed', async () => {
+test('auto apply records already applied open response form without consuming new-submit quota', async () => {
   const result = await runContentAutoApply({
     dialogText: '',
     hasTextarea: false,
@@ -1122,10 +1124,14 @@ test('auto apply counts already applied open response form without submit button
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.alreadyApplied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
+  assert.equal(result.localStore.dailyApplicationLedger.newSubmitted, 0);
+  assert.equal(result.localStore.dailyApplicationLedger.alreadyApplied, 1);
+  assert.deepEqual(result.localStore.dailyApplicationLedger.alreadyAppliedVacancyIds, ['123']);
   assert.equal(result.states.at(-1).state, 'complete');
   assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
 });
@@ -1318,6 +1324,16 @@ test('auto apply fills choice and text questions on open response form before su
   assert.match(answersAppliedLog.details.assistance, /Choice group 1: нет/);
   assert.equal(answersAppliedLog.details.answers.textAnswers[0].answer, 'Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.');
   assert.deepEqual(answersAppliedLog.details.answers.choiceAnswers[0].selectedOptions, ['нет']);
+  assert.equal(result.localStore.agentPrivateQuestionAudit.retentionDays, 7);
+  assert.equal(result.localStore.agentPrivateQuestionAudit.entries.length, 1);
+  assert.equal(
+    result.localStore.agentPrivateQuestionAudit.entries[0].questions.textAnswers[0].answer,
+    'Релевантного опыта автоматизации государственных услуг на стороне исполнителя нет.'
+  );
+  assert.deepEqual(
+    result.localStore.agentPrivateQuestionAudit.entries[0].questions.choiceAnswers[0].selectedOptions,
+    ['нет']
+  );
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
@@ -1537,7 +1553,7 @@ test('auto apply falls back when Groq cover letter uses stiff overlap wording', 
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('auto apply counts already-applied cover form update before submit lookup', async () => {
+test('auto apply records already-applied cover form update without consuming new-submit quota', async () => {
   const coverLetter = 'Занимался JVM backend и API. Откликаюсь.';
   const result = await runContentAutoApply({
     dialogText: [
@@ -1553,7 +1569,8 @@ test('auto apply counts already-applied cover form update before submit lookup',
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.alreadyApplied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.coverTextareaValue, coverLetter);
@@ -2935,7 +2952,7 @@ test('auto apply fills live-style confirmation radio and mandatory cover letter'
   assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
 });
 
-test('auto apply counts already confirmed response page as applied', async () => {
+test('auto apply records already confirmed response page without consuming new-submit quota', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: false,
@@ -2944,10 +2961,111 @@ test('auto apply counts already confirmed response page as applied', async () =>
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.alreadyApplied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
+});
+
+test('auto apply resumes the Moscow-day new-submit ledger across runs', async () => {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 2,
+    initialLocalStore: {
+      dailyApplicationLedger: {
+        date: today,
+        legacySubmitted: 0,
+        newSubmitted: 1,
+        alreadyApplied: 0,
+        submittedVacancyIds: ['999'],
+        alreadyAppliedVacancyIds: [],
+        hhDailyLimitReached: false,
+        updatedAt: new Date().toISOString()
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 2);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.localStore.dailyApplicationLedger.newSubmitted, 2);
+  assert.deepEqual(result.localStore.dailyApplicationLedger.submittedVacancyIds, ['999', '123']);
+});
+
+test('daily 200 run skips adjacent QA lead roles before opening a response form', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    cardTitle: 'Senior AQA Lead Java',
+    cardText: 'Senior AQA Lead Java\nМожно удалённо\nОткликнуться'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
+  assert.equal(result.appended.at(-1).error, 'excluded_lead_role');
+});
+
+test('daily 200 run skips a Tech Lead vacancy below the configured resume salary floor', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    cardTitle: 'Руководитель разработки бэкенда Java',
+    expectedSalary: '600 000 ₽ на руки',
+    cardText: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
+  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
+});
+
+test('daily 200 run skips a leadership vacancy for an explicitly different stack', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    cardTitle: 'Tech Lead Python',
+    cardText: 'Tech Lead Python\nМожно удалённо\nОткликнуться'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
+  assert.equal(result.appended.at(-1).error, 'stack_mismatch');
+});
+
+test('daily 200 run accepts a Java backend leadership vacancy without a conflicting salary', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    cardTitle: 'Руководитель группы разработки Java backend',
+    expectedSalary: '600 000 ₽ на руки',
+    cardText: 'Руководитель группы разработки Java backend\nМожно удалённо\nОткликнуться'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.appended.at(-1).status, 'applied');
 });
 
 test('auto apply clicks generate resume submit button in hh response dialog', async () => {
@@ -4088,7 +4206,8 @@ test('auto apply returns from already applied queued detail page without respons
   assert.equal(appended.at(-1).status, 'applied_already_confirmed');
   assert.equal(localStore.autoApplyQueue.active, false);
   assert.equal(localStore.autoApplySearchQueue.active, true);
-  assert.equal(localStore.autoApplySearchQueue.counters.applied, 6);
+  assert.equal(localStore.autoApplySearchQueue.counters.applied, 5);
+  assert.equal(localStore.autoApplySearchQueue.counters.alreadyApplied, 1);
   assert.equal(localStore.autoApplySearchQueue.counters.processed, 7);
   assert.equal(states.at(-1).state, 'applying');
   assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');

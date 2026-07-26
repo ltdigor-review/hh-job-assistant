@@ -545,8 +545,17 @@ async function ensureDefaults() {
     }
   }
 
-  if (current.dailyLimit === 10) {
+  if (current.dailyLimit === 10 || current.dailyLimit === 100) {
     patch.dailyLimit = DEFAULTS.dailyLimit;
+  }
+  if (current.resumeProfileAutoRefreshEnabled === false) {
+    patch.resumeProfileAutoRefreshEnabled = true;
+  }
+  if (current.agentDebugRetentionCount === 5) {
+    patch.agentDebugRetentionCount = DEFAULTS.agentDebugRetentionCount;
+  }
+  if (current.agentDebugLogsEnabled === false) {
+    patch.agentDebugLogsEnabled = true;
   }
 
   if (OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)) {
@@ -1193,6 +1202,90 @@ async function ensureResumeProfileAutoRefresh() {
     }
   })();
   return resumeProfileRefreshPromise;
+}
+
+function normalizeComparableMoney(value) {
+  const groups = String(value || '').match(/\d+/g) || [];
+  const candidates = groups
+    .map((group, index) => Number(groups.slice(index, index + 3).join('')))
+    .filter((amount) => Number.isFinite(amount) && amount >= 50000 && amount <= 10000000);
+  return candidates[0] || null;
+}
+
+function extractResumeSalaryAmount(text) {
+  const lines = String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const salaryLine = lines.find((line) => (
+    /(?:зарплат|доход|на\s+руки|gross|net|₽|руб)/i.test(line) &&
+    normalizeComparableMoney(line)
+  ));
+  return normalizeComparableMoney(salaryLine || '');
+}
+
+async function buildAutomationSettingsAudit() {
+  const current = await storageGet([
+    'agentDebugLogsEnabled',
+    'agentDebugRetentionCount',
+    'dailyLimit',
+    'employmentPreference',
+    'expectedSalary',
+    'groqApiKey',
+    'resumeParsedAt',
+    'resumeParsedText',
+    'resumeParsedUrl',
+    'resumeProfileAutoRefreshEnabled',
+    'resumeProfileCheckedAt',
+    'resumeProfileText',
+    'resumeUrl',
+    'telegramUsername',
+    'workFormatPreference'
+  ]);
+  const resumeUrl = normalizeResumeUrl(current.resumeUrl);
+  const resumeText = String(current.resumeParsedText || '');
+  const resumeSalary = extractResumeSalaryAmount(resumeText);
+  const configuredSalary = normalizeComparableMoney(current.expectedSalary);
+  const employmentPreference = normalizeMultiPreference(
+    current.employmentPreference,
+    EMPLOYMENT_PREFERENCE_VALUES
+  );
+  const workFormatPreference = normalizeMultiPreference(
+    current.workFormatPreference,
+    WORK_FORMAT_PREFERENCE_VALUES
+  );
+  const requiredWorkFormats = [
+    /удален|remote/i.test(resumeText) ? 'remote' : '',
+    /гибрид|hybrid/i.test(resumeText) ? 'hybrid' : ''
+  ].filter(Boolean);
+  const checks = {
+    resumeUrlConfigured: Boolean(resumeUrl),
+    resumeUrlCurrent: Boolean(resumeUrl && normalizeResumeUrl(current.resumeParsedUrl) === resumeUrl),
+    resumeProfileAvailable: Boolean(String(current.resumeProfileText || '').trim()),
+    resumeProfileFresh: Boolean(
+      current.resumeProfileCheckedAt &&
+      Date.now() - Date.parse(current.resumeProfileCheckedAt) <= 24 * 60 * 60 * 1000
+    ),
+    expectedSalaryConfigured: Boolean(configuredSalary),
+    expectedSalaryMatchesResume: resumeSalary ? configuredSalary === resumeSalary : null,
+    contactConfigured: Boolean(String(current.telegramUsername || '').trim()),
+    laborContractEnabled: employmentPreference.includes('labor_contract'),
+    workFormatsMatchResume: requiredWorkFormats.every((value) => workFormatPreference.includes(value)),
+    dailyLimit200: Number(current.dailyLimit) === 200,
+    debugLogsEnabled: current.agentDebugLogsEnabled === true,
+    debugRetention20: Number(current.agentDebugRetentionCount) >= 20,
+    resumeAutoRefreshEnabled: current.resumeProfileAutoRefreshEnabled === true,
+    groqKeyConfigured: Boolean(String(current.groqApiKey || '').trim())
+  };
+  const issues = Object.entries(checks)
+    .filter(([, passed]) => passed === false)
+    .map(([name]) => name);
+  const audit = {
+    checkedAt: nowIso(),
+    checks,
+    issues,
+    ready: issues.length === 0
+  };
+  await storageSet({ automationSettingsAudit: audit });
+  await appendAgentLog('automation_settings_audit', audit);
+  return audit;
 }
 
 function getMaxTokensForTask(task) {
@@ -2171,6 +2264,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'ENSURE_RESUME_PROFILE': {
         const result = await ensureResumeProfileAutoRefresh();
         sendResponse({ ok: true, refreshed: true, profileAvailable: Boolean(result?.resumeProfileText) });
+        break;
+      }
+      case 'GET_AUTOMATION_SETTINGS_AUDIT': {
+        const result = await buildAutomationSettingsAudit();
+        sendResponse({ ok: true, audit: result });
         break;
       }
       case 'EDIT_RESUME_PROFILE': {

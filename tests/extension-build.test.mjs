@@ -249,18 +249,24 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   const optionsSource = await readFile(new URL('src/options.js', root), 'utf8');
   const contentSource = await readFile(new URL('src/content-hh.js', root), 'utf8');
 
-  assert.match(defaultsSource, /dailyLimit:\s*100/);
+  assert.match(defaultsSource, /dailyLimit:\s*200/);
   assert.match(defaultsSource, /delayMinMs:\s*4000/);
   assert.match(defaultsSource, /delayMaxMs:\s*8000/);
   assert.match(defaultsSource, /employmentPreference:\s*\[\]/);
   assert.match(defaultsSource, /workFormatPreference:\s*\[\]/);
-  assert.match(defaultsSource, /agentDebugLogsEnabled:\s*false/);
-  assert.match(defaultsSource, /agentDebugRetentionCount:\s*5/);
+  assert.match(defaultsSource, /agentDebugLogsEnabled:\s*true/);
+  assert.match(defaultsSource, /agentDebugRetentionCount:\s*20/);
   assert.doesNotMatch(defaultsSource, /experimentalFeaturesEnabled|chatUnreadOnly|chatReplyMode|chatLimit|chatReports/);
   assert.match(defaultsSource, /globalThis\.HHJA_DEFAULTS/);
 
   assert.match(backgroundSource, /import '\.\/defaults\.js'/);
   assert.match(backgroundSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
+  assert.match(backgroundSource, /GET_AUTOMATION_SETTINGS_AUDIT/);
+  assert.match(backgroundSource, /automationSettingsAudit/);
+  assert.match(backgroundSource, /expectedSalaryMatchesResume/);
+  assert.match(contentSource, /dailyApplicationLedger/);
+  assert.match(contentSource, /agentPrivateQuestionAudit/);
+  assert.match(contentSource, /GET_AUTOMATION_SETTINGS_AUDIT/);
   assert.match(optionsHtml, /<script src="defaults\.js"><\/script>\s*<script src="options\.js"><\/script>/);
   assert.match(optionsHtml, /id="dailyLimit" type="number" min="1" max="200"/);
   assert.match(optionsSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
@@ -343,7 +349,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.resumeUrl, '');
   assert.equal(localData.resumeParsedUrl, '');
   assert.equal(localData.resumeCacheTtlHours, 1);
-  assert.equal(localData.dailyLimit, 100);
+  assert.equal(localData.dailyLimit, 200);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
   assert.ok(localData.coverPrompt.length > 220);
@@ -2277,6 +2283,7 @@ test('repo script can start auto apply in a persistent Chromium profile', async 
   assert.match(js, /HHJA_MAX_PROCESSED/);
   assert.match(js, /HHJA_CHROMIUM_RUN_MS/);
   assert.match(js, /HHJA_OUTPUT/);
+  assert.match(js, /Math\.min\(Number\(process\.env\.HHJA_LIMIT \|\| 1\) \|\| 1, 200\)/);
   assert.match(js, /hhjaMaxProcessed/);
   assert.match(js, /chrome\.storage\.local\.get\(\['runState', 'runResults'\]/);
   assert.match(js, /readExtensionEvidence/);
@@ -2307,6 +2314,11 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /const runRecords = extractJsonObjects/);
   assert.match(js, /--file/);
   assert.match(js, /Invalid debug file JSON at line/);
+  assert.match(js, /New submitted:/);
+  assert.match(js, /Already applied:/);
+  assert.match(js, /--private-audit-output/);
+  assert.match(js, /mode: 0o600/);
+  assert.match(js, /privateQuestionAuditRaw: _privateQuestionAuditRaw/);
 });
 
 test('repo script smoke tests Groq cover-letter output without logging secrets', async () => {

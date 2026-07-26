@@ -24,7 +24,8 @@ function parseArgs(argv) {
     file: '',
     since: process.env.HHJA_SINCE || '',
     json: false,
-    output: ''
+    output: '',
+    privateAuditOutput: ''
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -39,6 +40,8 @@ function parseArgs(argv) {
       args.file = argv[++index] || '';
     } else if (value === '--output') {
       args.output = argv[++index] || '';
+    } else if (value === '--private-audit-output') {
+      args.privateAuditOutput = argv[++index] || '';
     }
   }
   return args;
@@ -283,6 +286,8 @@ function buildFileReport(args) {
     }))
     .sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
   const applied = results.filter((item) => /^applied/.test(item.status || ''));
+  const newSubmitted = applied.filter((item) => item.status !== 'applied_already_confirmed');
+  const alreadyApplied = applied.filter((item) => item.status === 'applied_already_confirmed');
   const skipped = results.filter((item) => /^skipped/.test(item.status || ''));
   const details = header.details || {};
   return {
@@ -291,6 +296,8 @@ function buildFileReport(args) {
     since: args.since,
     counts: {
       applied: applied.length,
+      newSubmitted: newSubmitted.length,
+      alreadyApplied: alreadyApplied.length,
       skipped: skipped.length,
       results: results.length,
       events: Math.max(0, entries.length - 1)
@@ -311,6 +318,9 @@ function buildFileReport(args) {
       redaction: details.redaction || ''
     },
     hasLocalDebugText: false,
+    dailyLedger: null,
+    settingsAudit: null,
+    privateQuestionAudit: null,
     applied,
     skipped
   };
@@ -336,6 +346,18 @@ async function buildStorageReport(args) {
     .at(-1);
   const latestDebugFile = latestRunRecord?.meta || extractLatestDebugFile(stdout);
   const hasLocalDebugText = stdout.includes('agentDebugLogText');
+  const dailyLedger = extractJsonObjects(stdout, '"hhDailyLimitReached"')
+    .filter((item) => item?.date && Array.isArray(item?.submittedVacancyIds))
+    .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')))
+    .at(-1) || null;
+  const settingsAudit = extractJsonObjects(stdout, '"dailyLimit200"')
+    .filter((item) => item?.checks && Array.isArray(item?.issues))
+    .sort((a, b) => String(a.checkedAt || '').localeCompare(String(b.checkedAt || '')))
+    .at(-1) || null;
+  const privateQuestionAudit = extractJsonObjects(stdout, '"retentionDays":7')
+    .filter((item) => item?.formatVersion === 1 && Array.isArray(item?.entries))
+    .sort((a, b) => String(a.entries?.at(-1)?.timestamp || '').localeCompare(String(b.entries?.at(-1)?.timestamp || '')))
+    .at(-1) || null;
 
   const results = dedupeResults(
     [
@@ -346,6 +368,8 @@ async function buildStorageReport(args) {
     args.since
   );
   const applied = results.filter((item) => /^applied/.test(item.status || ''));
+  const newSubmitted = applied.filter((item) => item.status !== 'applied_already_confirmed');
+  const alreadyApplied = applied.filter((item) => item.status === 'applied_already_confirmed');
   const skipped = results.filter((item) => /^skipped/.test(item.status || ''));
 
   return {
@@ -354,6 +378,8 @@ async function buildStorageReport(args) {
     since: args.since,
     counts: {
       applied: applied.length,
+      newSubmitted: newSubmitted.length,
+      alreadyApplied: alreadyApplied.length,
       skipped: skipped.length,
       results: results.length
     },
@@ -361,6 +387,15 @@ async function buildStorageReport(args) {
     latestState,
     latestDebugFile,
     hasLocalDebugText,
+    dailyLedger,
+    settingsAudit,
+    privateQuestionAudit: privateQuestionAudit ? {
+      formatVersion: privateQuestionAudit.formatVersion,
+      retentionDays: privateQuestionAudit.retentionDays,
+      entriesCount: privateQuestionAudit.entries.length,
+      lastTimestamp: privateQuestionAudit.entries.at(-1)?.timestamp || ''
+    } : null,
+    privateQuestionAuditRaw: privateQuestionAudit,
     applied,
     skipped
   };
@@ -378,20 +413,43 @@ async function main() {
     latestState = null,
     latestStart = null,
     latestDebugFile = null,
-    hasLocalDebugText = false
+    hasLocalDebugText = false,
+    dailyLedger = null,
+    settingsAudit = null,
+    privateQuestionAudit = null,
+    privateQuestionAuditRaw = null
   } = report;
+  const { privateQuestionAuditRaw: _privateQuestionAuditRaw, ...publicReport } = report;
 
   if (args.output) {
-    writeFileSync(args.output, `${JSON.stringify(report, null, 2)}\n`);
+    writeFileSync(args.output, `${JSON.stringify(publicReport, null, 2)}\n`);
+  }
+  if (args.privateAuditOutput && privateQuestionAuditRaw) {
+    writeFileSync(
+      args.privateAuditOutput,
+      `${JSON.stringify(privateQuestionAuditRaw, null, 2)}\n`,
+      { mode: 0o600 }
+    );
   }
 
   if (args.json) {
-    console.log(JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(publicReport, null, 2));
     return;
   }
 
   console.log(`Applied: ${applied.length}`);
+  console.log(`New submitted: ${report.counts.newSubmitted ?? applied.filter((item) => item.status !== 'applied_already_confirmed').length}`);
+  console.log(`Already applied: ${report.counts.alreadyApplied ?? applied.filter((item) => item.status === 'applied_already_confirmed').length}`);
   console.log(`Skipped: ${skipped.length}`);
+  if (dailyLedger) {
+    console.log(`Daily ledger: date=${dailyLedger.date}, new=${dailyLedger.newSubmitted}, already=${dailyLedger.alreadyApplied}, hhLimit=${dailyLedger.hhDailyLimitReached === true}`);
+  }
+  if (settingsAudit) {
+    console.log(`Settings audit: ready=${settingsAudit.ready === true}, issues=${settingsAudit.issues.length}`);
+  }
+  if (privateQuestionAudit) {
+    console.log(`Private question audit: entries=${privateQuestionAudit.entriesCount}, retentionDays=${privateQuestionAudit.retentionDays}`);
+  }
   if (latestState) {
     console.log(`Latest state: ${latestState.state}, applied=${latestState.applied}, processed=${latestState.processed}, updatedAt=${latestState.updatedAt}`);
   }

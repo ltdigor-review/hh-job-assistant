@@ -76,7 +76,7 @@ function buildAutoStartUrl(value, token) {
 
   parsed.searchParams.set('hhjaAutoStart', 'live');
   parsed.searchParams.set('hhjaAutoStartToken', token);
-  const limit = Math.max(1, Math.min(Number(process.env.HHJA_LIMIT || 1) || 1, 100));
+  const limit = Math.max(1, Math.min(Number(process.env.HHJA_LIMIT || 1) || 1, 200));
   parsed.searchParams.set('hhjaLimit', String(limit));
   if (process.env.HHJA_MAX_PROCESSED) {
     const maxProcessed = Math.max(1, Math.min(Number(process.env.HHJA_MAX_PROCESSED) || 1, 1000));

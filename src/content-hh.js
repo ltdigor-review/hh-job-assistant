@@ -54,6 +54,10 @@ const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
 const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
 const AUTO_START_TOKEN_EXPIRES_AT_KEY = 'autoApplyAutoStartTokenExpiresAt';
+const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
+const PRIVATE_QUESTION_AUDIT_KEY = 'agentPrivateQuestionAudit';
+const PRIVATE_QUESTION_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const PRIVATE_QUESTION_AUDIT_MAX_ENTRIES = 200;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
 const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
@@ -103,8 +107,161 @@ function getVacancyDedupeKey(item) {
   return '';
 }
 
+function parseSalaryAmounts(value) {
+  return [...String(value || '').matchAll(/(\d[\d\s\u00a0\u202f]{3,})\s*(?:₽|руб)/gi)]
+    .map((match) => Number(String(match[1]).replace(/\D/g, '')))
+    .filter((amount) => Number.isFinite(amount) && amount >= 10000 && amount <= 10000000);
+}
+
+function getExpectedSalaryAmount(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  const amount = Number(digits);
+  return Number.isFinite(amount) && amount >= 50000 && amount <= 10000000 ? amount : null;
+}
+
+function assessResumeVacancyMatch(item, expectedSalary = '') {
+  const title = cleanText(item?.title || '');
+  const text = cleanText(getVacancyText(item?.card) || title);
+  const normalizedTitle = title.toLowerCase();
+  const leadership = /(?:tech|team)\s*lead|engineering\s*manager|head\s+of|руководител|лид\s+(?:разработ|backend|бэкенд)|solution\s*architect|архитектор/i;
+  const targetStack = /java|kotlin|backend|back-end|бэкенд/i;
+  const foreignStack = /php|python|\.net|dotnet|golang|\bgo\b|frontend|react|flutter|mobile|android|ios|dwh|graphics|sdet|test\s+automation/i;
+  const excluded = /(?:^|\W)(?:aqa|qa|тестирован|quality\s*assurance|product|project|продакт|проджект|ux|ui|дизайн|dba|database\s+administrator|аналитик)(?:\W|$)/i;
+  if (excluded.test(normalizedTitle)) {
+    return { relevant: false, reason: 'excluded_lead_role' };
+  }
+  if (!leadership.test(normalizedTitle)) {
+    return { relevant: false, reason: 'leadership_title_missing' };
+  }
+  if (foreignStack.test(normalizedTitle) && !/java|kotlin/i.test(normalizedTitle)) {
+    return { relevant: false, reason: 'stack_mismatch' };
+  }
+  if (!targetStack.test(text)) {
+    return { relevant: false, reason: 'backend_stack_missing' };
+  }
+  const salaryFloor = getExpectedSalaryAmount(expectedSalary);
+  const salaryAmounts = parseSalaryAmounts(text);
+  if (salaryFloor && salaryAmounts.length > 0 && Math.max(...salaryAmounts) < salaryFloor) {
+    return { relevant: false, reason: 'salary_below_resume_floor' };
+  }
+  return { relevant: true, reason: '' };
+}
+
 function serializeProcessedVacancyIds(processedIds) {
   return Array.from(processedIds || []).filter(Boolean);
+}
+
+function getMoscowDate(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+}
+
+function normalizeDailyApplicationLedger(value, now = new Date()) {
+  const date = getMoscowDate(now);
+  if (!value || value.date !== date) {
+    return {
+      date,
+      legacySubmitted: 0,
+      newSubmitted: 0,
+      alreadyApplied: 0,
+      submittedVacancyIds: [],
+      alreadyAppliedVacancyIds: [],
+      hhDailyLimitReached: false,
+      updatedAt: now.toISOString()
+    };
+  }
+  const submittedVacancyIds = serializeProcessedVacancyIds(value.submittedVacancyIds);
+  const legacySubmitted = Math.max(0, Number(value.legacySubmitted) || 0);
+  const alreadyAppliedVacancyIds = serializeProcessedVacancyIds(value.alreadyAppliedVacancyIds)
+    .filter((id) => !submittedVacancyIds.includes(id));
+  return {
+    date,
+    legacySubmitted,
+    newSubmitted: legacySubmitted + submittedVacancyIds.length,
+    alreadyApplied: alreadyAppliedVacancyIds.length,
+    submittedVacancyIds,
+    alreadyAppliedVacancyIds,
+    hhDailyLimitReached: value.hhDailyLimitReached === true,
+    updatedAt: String(value.updatedAt || now.toISOString())
+  };
+}
+
+async function getDailyApplicationLedger() {
+  const stored = await storageGet([DAILY_APPLICATION_LEDGER_KEY], { optional: true });
+  return normalizeDailyApplicationLedger(stored?.[DAILY_APPLICATION_LEDGER_KEY]);
+}
+
+async function recordDailyApplication(item, kind, counters = null) {
+  const ledger = await getDailyApplicationLedger();
+  const counterBaseline = Math.max(0, Number(counters?.applied) || 0);
+  if (counterBaseline > ledger.newSubmitted) {
+    ledger.legacySubmitted += counterBaseline - ledger.newSubmitted;
+  }
+  const vacancyId = getVacancyDedupeKey(item);
+  let added = false;
+  if (kind === 'submitted' && vacancyId && !ledger.submittedVacancyIds.includes(vacancyId)) {
+    ledger.submittedVacancyIds.push(vacancyId);
+    ledger.alreadyAppliedVacancyIds = ledger.alreadyAppliedVacancyIds.filter((id) => id !== vacancyId);
+    added = true;
+  } else if (
+    kind === 'already_applied' &&
+    vacancyId &&
+    !ledger.submittedVacancyIds.includes(vacancyId) &&
+    !ledger.alreadyAppliedVacancyIds.includes(vacancyId)
+  ) {
+    ledger.alreadyAppliedVacancyIds.push(vacancyId);
+    added = true;
+  } else if (kind === 'hh_daily_limit') {
+    ledger.hhDailyLimitReached = true;
+    added = true;
+  }
+  ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
+  ledger.alreadyApplied = ledger.alreadyAppliedVacancyIds.length;
+  ledger.updatedAt = new Date().toISOString();
+  await storageSet({ [DAILY_APPLICATION_LEDGER_KEY]: ledger }, { optional: true });
+  return { ledger, added };
+}
+
+function syncCountersFromLedger(counters, ledger) {
+  counters.applied = Math.max(Number(counters.applied) || 0, Number(ledger?.newSubmitted) || 0);
+  counters.alreadyApplied = Math.max(
+    Number(counters.alreadyApplied) || 0,
+    Number(ledger?.alreadyApplied) || 0
+  );
+}
+
+async function recordPrivateQuestionAudit(item, audit) {
+  const stored = await storageGet(
+    ['agentDebugLogsEnabled', PRIVATE_QUESTION_AUDIT_KEY],
+    { optional: true }
+  );
+  if (stored?.agentDebugLogsEnabled !== true) return;
+  const now = new Date();
+  const cutoff = now.getTime() - PRIVATE_QUESTION_AUDIT_RETENTION_MS;
+  const previous = Array.isArray(stored?.[PRIVATE_QUESTION_AUDIT_KEY]?.entries)
+    ? stored[PRIVATE_QUESTION_AUDIT_KEY].entries
+    : [];
+  const entries = previous
+    .filter((entry) => Date.parse(entry?.timestamp || 0) >= cutoff)
+    .slice(-(PRIVATE_QUESTION_AUDIT_MAX_ENTRIES - 1));
+  entries.push({
+    timestamp: now.toISOString(),
+    runId: activeRunId || '',
+    vacancyId: String(item?.vacancyId || ''),
+    url: String(item?.url || ''),
+    ...audit
+  });
+  await storageSet({
+    [PRIVATE_QUESTION_AUDIT_KEY]: {
+      formatVersion: 1,
+      retentionDays: 7,
+      entries
+    }
+  }, { optional: true });
 }
 
 function isExtensionContextInvalidatedError(error) {
@@ -1423,7 +1580,8 @@ async function appendSkippedResponse(item, counters, status, error) {
 }
 
 async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = false, testDetected = item.testDetected } = {}) {
-  counters.applied += 1;
+  const { ledger } = await recordDailyApplication(item, 'already_applied', counters);
+  syncCountersFromLedger(counters, ledger);
   await appendResult({
     index: item.index,
     vacancyId: item.vacancyId,
@@ -1438,7 +1596,8 @@ async function appendAlreadyAppliedResponse(item, counters, { coverLetterUsed = 
 }
 
 async function appendDirectClickResponse(item, counters, { status = 'applied_direct_click', coverLetterUsed = false, testDetected = item.testDetected } = {}) {
-  counters.applied += 1;
+  const { ledger } = await recordDailyApplication(item, 'submitted', counters);
+  syncCountersFromLedger(counters, ledger);
   await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
   await clearPendingSubmit();
   await appendResult({
@@ -1456,6 +1615,8 @@ async function appendDirectClickResponse(item, counters, { status = 'applied_dir
 
 async function completeHhDailyResponseLimit(item, counters, reason = '') {
   counters.skipped += 1;
+  const { ledger } = await recordDailyApplication(item, 'hh_daily_limit', counters);
+  syncCountersFromLedger(counters, ledger);
   await clearPendingSubmit();
   await saveQueue({ active: false });
   await saveSearchQueue({ active: false });
@@ -1536,7 +1697,8 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
     isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })
   ) {
-    counters.applied += 1;
+    const { ledger } = await recordDailyApplication(item, 'submitted', counters);
+    syncCountersFromLedger(counters, ledger);
     await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
     await clearPendingSubmit();
     await appendResult({
@@ -1647,7 +1809,8 @@ async function finalizePendingSubmit() {
     errors: 0,
     ...(autoApplyPendingSubmit.counters || {})
   };
-  counters.applied += 1;
+  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', counters);
+  syncCountersFromLedger(counters, ledger);
   await clearPendingSubmit();
   await appendResult({
     ...autoApplyPendingSubmit.item,
@@ -1704,7 +1867,8 @@ async function finalizePendingSubmitFromSearchReturn(counters, runId = activeRun
   if (!Number.isFinite(Number(pendingCounters.processed))) {
     counters.processed += 1;
   }
-  counters.applied += 1;
+  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', counters);
+  syncCountersFromLedger(counters, ledger);
   await clearPendingSubmit();
   await appendResult({
     ...autoApplyPendingSubmit.item,
@@ -1729,6 +1893,7 @@ async function getConfig() {
     'delayMaxMs',
     'employmentPreference',
     'workFormatPreference',
+    'expectedSalary',
     'groqApiKey',
     'resumeUrl',
     'coverPrompt',
@@ -1740,6 +1905,7 @@ async function getConfig() {
     delayMaxMs: Number(values.delayMaxMs) || DEFAULTS.delayMaxMs,
     employmentPreference: normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
+    expectedSalary: String(values.expectedSalary || '').trim(),
     groqApiKey: values.groqApiKey,
     resumeUrl: values.resumeUrl,
     coverPrompt: values.coverPrompt,
@@ -2259,32 +2425,12 @@ async function applyToVacancy(item, counters) {
   }
 
   if (item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
-    counters.applied += 1;
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
-      status: 'applied_already_confirmed',
-      coverLetterUsed: false,
-      testDetected: item.testDetected,
-      error: ''
-    });
+    await appendAlreadyAppliedResponse(item, counters);
     return;
   }
 
   if (isAlreadyAppliedForCurrentItem(item.card, item)) {
-    counters.applied += 1;
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
-      status: 'applied_already_confirmed',
-      coverLetterUsed: false,
-      testDetected: item.testDetected,
-      error: ''
-    });
+    await appendAlreadyAppliedResponse(item, counters);
     return;
   }
 
@@ -2422,17 +2568,7 @@ async function applyToVacancy(item, counters) {
   }
 
   if (isAlreadyAppliedForCurrentItem(root, item)) {
-    counters.applied += 1;
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
-      status: 'applied_already_confirmed',
-      coverLetterUsed: false,
-      testDetected: item.testDetected,
-      error: ''
-    });
+    await appendAlreadyAppliedResponse(item, counters);
     return;
   }
 
@@ -2646,7 +2782,6 @@ async function applyToVacancy(item, counters) {
         selectedChoices
       )
     });
-
     if (coverLetterRequested) {
       const fallbackContext = [vacancyText, questionContext, assistance, letter].map(cleanText).filter(Boolean).join('\n');
       const sanitizedLetter = await sanitizeCoverLetterDraft(letter, () => getFallbackCoverLetter(fallbackContext));
@@ -2680,6 +2815,14 @@ async function applyToVacancy(item, counters) {
         letterLength: cleanText(letter).length
       });
     }
+    await recordPrivateQuestionAudit(item, {
+      questions: buildQuestionAnswerAudit(
+        questionSnapshot.textQuestions.map((descriptor) => descriptor.field),
+        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group),
+        selectedChoices
+      ),
+      coverLetter: coverLetterRequested ? cleanText(getFieldValue(coverLetterTextarea)) : ''
+    });
 
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
@@ -2738,7 +2881,8 @@ async function applyToVacancy(item, counters) {
       return;
     }
 
-    counters.applied += 1;
+    const { ledger } = await recordDailyApplication(item, 'submitted', counters);
+    syncCountersFromLedger(counters, ledger);
     await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
     await clearPendingSubmit();
     await appendResult({
@@ -2869,7 +3013,8 @@ async function applyToVacancy(item, counters) {
     return;
   }
 
-  counters.applied += 1;
+  const { ledger } = await recordDailyApplication(item, 'submitted', counters);
+  syncCountersFromLedger(counters, ledger);
   await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
   await clearPendingSubmit();
   await appendResult({
@@ -3230,6 +3375,29 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       item.navigationQueue.processedCounted = true;
     }
     const appliedBeforeItem = counters.applied;
+    const resumeMatch = limit === 200
+      ? assessResumeVacancyMatch(item, config.expectedSalary)
+      : { relevant: true, reason: '' };
+    if (!resumeMatch.relevant) {
+      counters.skipped += 1;
+      await appendResult({
+        index: item.index,
+        vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
+        status: 'skipped_not_resume_match',
+        coverLetterUsed: false,
+        testDetected: item.testDetected,
+        error: resumeMatch.reason
+      });
+      await appendAgentLog('vacancy_resume_gate_skipped', {
+        vacancyId: item.vacancyId,
+        status: 'skipped_not_resume_match',
+        reason: resumeMatch.reason
+      });
+      await setRunState({ state: 'applying', ...counters, lastError: '' });
+      continue;
+    }
 
     try {
       if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
@@ -3429,6 +3597,15 @@ async function startRun(mode, limitOverride = null, options = {}) {
   const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
   const limit = Math.max(1, Math.min(Number(limitSource) || 20, 200));
   const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
+  const dailyLedger = await getDailyApplicationLedger();
+  const initialCounters = {
+    found: 0,
+    processed: 0,
+    applied: dailyLedger.newSubmitted,
+    alreadyApplied: dailyLedger.alreadyApplied,
+    skipped: 0,
+    errors: 0
+  };
   await clearStopRequestedFlag();
   activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   await globalThis.HHJobAssistantLog?.reset?.('content', 'auto_apply_started', {
@@ -3447,11 +3624,7 @@ async function startRun(mode, limitOverride = null, options = {}) {
   });
   await setRunState({
     state: 'scanning',
-    found: 0,
-    processed: 0,
-    applied: 0,
-    skipped: 0,
-    errors: 0,
+    ...initialCounters,
     currentAction: 'Проверяю страницу HH',
     lastError: ''
   });
@@ -3471,7 +3644,13 @@ async function startRun(mode, limitOverride = null, options = {}) {
   await sendRuntimeMessage({ type: 'ENSURE_RESUME_PROFILE' }, { timeoutMs: getRuntimeMessageTimeoutMs() }).catch(async (error) => {
     await appendAgentLog('resume_profile_preflight_error', { error: localizeError(error) });
   });
-  return handleAutoApply(limit, null, [], { maxProcessed });
+  await sendRuntimeMessage(
+    { type: 'GET_AUTOMATION_SETTINGS_AUDIT' },
+    { timeoutMs: getRuntimeMessageTimeoutMs() }
+  ).catch(async (error) => {
+    await appendAgentLog('automation_settings_audit_error', { error: localizeError(error) });
+  });
+  return handleAutoApply(limit, initialCounters, [], { maxProcessed });
 }
 
 function consumeAutoStartParam() {
