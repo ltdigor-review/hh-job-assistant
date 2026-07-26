@@ -34,6 +34,7 @@
     delayMinMs: 4000,
     delayMaxMs: 8000,
     agentDebugLogsEnabled: false,
+    agentDebugRetentionCount: 5,
     runState: {
       state: 'idle',
       found: 0,

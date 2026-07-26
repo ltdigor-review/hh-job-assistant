@@ -238,9 +238,13 @@ function buildInjection(contentScriptSource) {
               listener = fn;
             }
           },
-          sendMessage(message) {
+          sendMessage(message, callback) {
             messages.push(message);
-            return Promise.resolve({ ok: true });
+            const response = { ok: true };
+            if (typeof callback === 'function') {
+              queueMicrotask(() => callback(response));
+            }
+            return Promise.resolve(response);
           },
           getManifest() {
             return { version: 'test' };

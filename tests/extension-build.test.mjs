@@ -18,6 +18,19 @@ async function readJson(path) {
   return JSON.parse(await readFile(new URL(path, root), 'utf8'));
 }
 
+async function startDebugRun(runId = `test-run-${crypto.randomUUID()}`) {
+  await globalThis.HHJobAssistantLog.reset('test', 'auto_apply_started', {
+    runId,
+    mode: 'test'
+  });
+  return runId;
+}
+
+function debugEntries(localData) {
+  const runId = localData.agentDebugActiveRunId;
+  return runId ? localData[`agentDebugRun:${runId}`]?.entries || [] : [];
+}
+
 function resumeCandidateFacts(text, age = 27, source = 'resume-personal-age') {
   let hash = 0x811c9dc5;
   for (const character of String(text || '')) {
@@ -242,6 +255,7 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   assert.match(defaultsSource, /employmentPreference:\s*\[\]/);
   assert.match(defaultsSource, /workFormatPreference:\s*\[\]/);
   assert.match(defaultsSource, /agentDebugLogsEnabled:\s*false/);
+  assert.match(defaultsSource, /agentDebugRetentionCount:\s*5/);
   assert.doesNotMatch(defaultsSource, /experimentalFeaturesEnabled|chatUnreadOnly|chatReplyMode|chatLimit|chatReports/);
   assert.match(defaultsSource, /globalThis\.HHJA_DEFAULTS/);
 
@@ -707,6 +721,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('test-assistance-log');
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
@@ -747,10 +762,11 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(systemContent, /Relevant profile with adjacent experience and delivery tools/);
   assert.match(systemContent, /250 000 руб\. на руки/);
   assert.match(systemContent, /Telegram: @candidate_tg/);
-  const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
-  const groqTestRequestLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_request');
-  const groqResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
-  const groqTestResponseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_test_assist_response');
+  const entries = debugEntries(localData);
+  const groqPayloadLog = entries.find((entry) => entry.event === 'groq_request_payload');
+  const groqTestRequestLog = entries.find((entry) => entry.event === 'groq_test_assist_request');
+  const groqResponseLog = entries.find((entry) => entry.event === 'groq_response_payload');
+  const groqTestResponseLog = entries.find((entry) => entry.event === 'groq_test_assist_response');
   assert.equal(groqPayloadLog.details.task, 'test_assist');
   assert.equal(groqPayloadLog.details.model, 'openai/gpt-oss-120b');
   assert.deepEqual(groqPayloadLog.details.messageLengths, requestBody.messages.map((message) => ({
@@ -769,10 +785,11 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
   assert.equal(groqTestRequestLog.details.task, 'test_assist');
-  assert.equal(groqTestRequestLog.details.requestBody.model, 'openai/gpt-oss-120b');
-  assert.deepEqual(groqTestRequestLog.details.requestBody.messages, requestBody.messages);
-  assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Relevant profile with adjacent experience and delivery tools/);
-  assert.match(JSON.stringify(groqTestRequestLog.details.requestBody), /Какую зарплату ожидаете\?/);
+  assert.equal(groqTestRequestLog.details.requestBody.redacted, true);
+  assert.ok(groqTestRequestLog.details.requestBody.length > 0);
+  assert.match(groqTestRequestLog.details.requestBody.fingerprint, /^[0-9a-f]{8}$/);
+  assert.doesNotMatch(JSON.stringify(groqTestRequestLog.details.requestBody), /Relevant profile with adjacent experience and delivery tools/);
+  assert.doesNotMatch(JSON.stringify(groqTestRequestLog.details.requestBody), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqTestRequestLog.details), /gsk_test/);
   assert.ok(groqResponseLog.details.responseLength > 30);
   assert.equal(groqResponseLog.details.content, undefined);
@@ -1175,6 +1192,7 @@ test('Groq invalid structured JSON is not retried', async () => {
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('invalid-structured-json-log');
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener({
@@ -1190,7 +1208,7 @@ test('Groq invalid structured JSON is not retried', async () => {
   assert.match(response.error, /некорректный JSON/);
   assert.equal(calls, 1);
   assert.deepEqual(maxTokensByCall, [700]);
-  const responseLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_response_payload');
+  const responseLog = debugEntries(localData).find((entry) => entry.event === 'groq_response_payload');
   assert.equal(responseLog.details.attempt, 1);
   assert.equal(responseLog.details.finishReason, 'stop');
 });
@@ -1249,6 +1267,7 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('empty-response-log');
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
@@ -1269,7 +1288,7 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.match(response.error, /попытки 1\/1/);
   assert.match(response.error, /max_tokens=700/);
   assert.match(response.error, /completion_tokens=300/);
-  const emptyErrorLogs = localData.agentDebugLog.filter((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
+  const emptyErrorLogs = debugEntries(localData).filter((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
   assert.equal(emptyErrorLogs.length, 1);
   assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
   assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 700);
@@ -1992,6 +2011,7 @@ test('Groq prompt caps large payload components', async () => {
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('large-payload-log');
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
@@ -2009,7 +2029,7 @@ test('Groq prompt caps large payload components', async () => {
 
   assert.equal(response.ok, true);
   assert.equal(requestBody.max_tokens, 700);
-  const groqPayloadLog = localData.agentDebugLog.find((entry) => entry.event === 'groq_request_payload');
+  const groqPayloadLog = debugEntries(localData).find((entry) => entry.event === 'groq_request_payload');
   assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 6000);
   assert.ok(requestBody.messages.filter((message) => message.role === 'system').some((message) => message.content.includes(`Telegram: @${'x'.repeat(199)}`)));
   assert.ok(groqPayloadLog.details.componentLengths.vacancy <= 2200);
@@ -2082,6 +2102,7 @@ test('Groq 429 response stores cooldown from retry-after', async () => {
   };
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('rate-limit-log');
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
@@ -2099,7 +2120,7 @@ test('Groq 429 response stores cooldown from retry-after', async () => {
   assert.equal(response.ok, false);
   assert.equal(fetchCalls, 1);
   assert.ok(Date.parse(localData.groqCooldownUntil) > Date.now());
-  assert.ok(localData.agentDebugLog.some((entry) => entry.event === 'groq_rate_limit_cooldown'));
+  assert.ok(debugEntries(localData).some((entry) => entry.event === 'groq_rate_limit_cooldown'));
 });
 
 test('content script registers one message listener', async () => {
@@ -2283,8 +2304,9 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /Local Extension Settings/);
   assert.match(js, /run_result/);
   assert.match(js, /HHJA_EXTENSION_ID/);
-  assert.match(js, /agentDebugLogText/);
-  assert.match(js, /agentDebugLogFile/);
+  assert.match(js, /const runRecords = extractJsonObjects/);
+  assert.match(js, /--file/);
+  assert.match(js, /Invalid debug file JSON at line/);
 });
 
 test('repo script smoke tests Groq cover-letter output without logging secrets', async () => {
@@ -2316,6 +2338,8 @@ test('README describes purpose, features, and installation without config detail
     'Автоматическая подготовка сопроводительных писем.',
     'Подготовка ответов на вопросы работодателей',
     'Поднятие резюме на hh.ru.',
+    'обезличенные диагностические логи последних запусков',
+    'Скачать .debug',
     '## Как установить',
     'Загрузить распакованное расширение',
     'Войдите в hh.ru'
@@ -2354,9 +2378,11 @@ test('README describes purpose, features, and installation without config detail
     assert.doesNotMatch(readme, new RegExp(stale.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
-  assert.match(agents, /Analyze extension logs from local Chrome\/Chromium profile storage/);
-  assert.match(agents, /agentDebugLogFile/);
-  assert.match(agents, /agentDebugLogText/);
+  assert.match(agents, /Analyze extension logs from a user-provided `\.debug` file/);
+  assert.match(agents, /inspect:logs -- --file <path>/);
+  assert.match(agents, /agentDebugRunIndex/);
+  assert.match(agents, /agentDebugActiveRunId/);
+  assert.match(agents, /agentDebugRun:<runId>/);
   assert.match(agents, /authorized hh\.ru profile/);
 
   assert.doesNotMatch(checklist, /Logs\/debug section|Inspect Agent debug|debug clear|Agent debug shows/);
@@ -2433,77 +2459,31 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /url\.searchParams\.has\('vacancyId'\)/);
 });
 
-test('agent debug log is a timestamped local profile artifact outside the popup', async () => {
+test('agent debug log keeps anonymized retained runs outside the popup without extra permissions', async () => {
   const js = await readFile(new URL('src/agent-log.js', root), 'utf8');
   const background = await readFile(new URL('src/background.js', root), 'utf8');
   const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
   const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
 
-  assert.match(js, /agentDebugLogFile/);
-  assert.match(js, /agentDebugLogText/);
+  assert.match(js, /agentDebugRunIndex/);
+  assert.match(js, /agentDebugActiveRunId/);
+  assert.match(js, /agentDebugRun:/);
+  assert.match(js, /agentDebugRetentionCount/);
   assert.match(js, /agentDebugLogsEnabled/);
-  assert.match(js, /setting\?\.\[ENABLED_KEY\] !== true/);
+  assert.match(js, /current\?\.\[ENABLED_KEY\] !== true/);
   assert.match(js, /function reset/);
-  assert.match(js, /hh-job-assistant-\$\{formatTimestampForFile/);
+  assert.match(js, /DEFAULT_RETENTION = 5/);
+  assert.match(js, /MAX_RETENTION = 20/);
+  assert.match(js, /redaction: 'anonymized'/);
+  assert.match(js, /SENSITIVE_DETAIL_KEYS/);
+  assert.match(js, /sanitizeUrl/);
+  assert.match(js, /buildDebugFile/);
   assert.match(js, /\.debug/);
   assert.match(js, /JSON\.stringify/);
-  assert.doesNotMatch(js, /chromeApi\?\.downloads|removeFile|conflictAction|offscreen|downloadId/);
   assert.match(background, /HHJobAssistantLog\?\.reset\?\./);
   assert.match(content, /HHJobAssistantLog\?\.reset\?\./);
   assert.ok(!manifest.permissions.includes('downloads'));
   assert.ok(!manifest.permissions.includes('offscreen'));
-});
-
-test('agent debug log writes only when explicitly enabled', async () => {
-  const source = await readFile(new URL('src/agent-log.js', root), 'utf8');
-  const storage = { agentDebugLogsEnabled: false };
-  const writes = [];
-  globalThis.chrome = {
-    storage: {
-      local: {
-        async get(keys) {
-          if (Array.isArray(keys)) {
-            return Object.fromEntries(keys.map((key) => [key, storage[key]]));
-          }
-          return {};
-        },
-        async set(value) {
-          writes.push(value);
-          Object.assign(storage, value);
-        }
-      }
-    }
-  };
-
-  try {
-    await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#agent-log-disabled-${crypto.randomUUID()}`);
-    await globalThis.HHJobAssistantLog.append('test', 'disabled_append', { value: 1 });
-    await globalThis.HHJobAssistantLog.reset('test', 'disabled_reset', { runId: 'run-1' });
-
-    assert.deepEqual(writes, []);
-    assert.equal(storage.agentDebugLog, undefined);
-    assert.equal(storage.agentDebugLogFile, undefined);
-    assert.equal(storage.agentDebugLogText, undefined);
-
-    storage.agentDebugLogsEnabled = true;
-    await globalThis.HHJobAssistantLog.append('test', 'enabled_append', {
-      value: 2,
-      message: 'Authorization: Bearer gsk_value_token',
-      url: 'https://api.example.test/path?key=gsk_query_token&safe=1',
-      nested: { apiKey: 'gsk_key_token' }
-    });
-
-    assert.equal(Array.isArray(storage.agentDebugLog), true);
-    assert.equal(storage.agentDebugLog[0].event, 'enabled_append');
-    assert.match(storage.agentDebugLogText, /enabled_append/);
-    assert.doesNotMatch(storage.agentDebugLogText, /gsk_value_token|gsk_query_token|gsk_key_token/);
-    assert.match(storage.agentDebugLogText, /\[redacted\]/);
-    assert.doesNotMatch(JSON.stringify(storage.agentDebugLog), /gsk_value_token|gsk_query_token|gsk_key_token/);
-    assert.match(JSON.stringify(storage.agentDebugLog), /\[redacted\]/);
-  } finally {
-    delete globalThis.chrome;
-    delete globalThis.HHJobAssistantLog;
-  }
 });
 
 test('popup view model reports exact readiness and blocker text', async () => {
@@ -2738,7 +2718,8 @@ test('options preserve masked Groq key unless user edits the key field', async (
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
-    agentDebugLogsEnabled: false
+    agentDebugLogsEnabled: false,
+    agentDebugRetentionCount: 5
   };
 
   function makeElement(id) {
@@ -2761,8 +2742,13 @@ test('options preserve masked Groq key unless user edits the key field', async (
       dataset: {},
       style: {},
       textContent: '',
+      disabled: false,
+      children: [],
       querySelectorAll(selector) {
         return selector === 'input[type="checkbox"]' ? this.inputs : [];
+      },
+      replaceChildren(...children) {
+        this.children = children;
       },
       setCustomValidity(value) {
         this.validationMessage = value;
@@ -2778,9 +2764,12 @@ test('options preserve masked Groq key unless user edits the key field', async (
     return element;
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'status', 'groqStatus', 'save', 'testGroq'];
+  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'groqStatus', 'save', 'testGroq'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
+  let debugRuns = [];
+  const downloadedRunIds = [];
+  const createdLinks = [];
 
   globalThis.HHJA_DEFAULTS = {
     groqModel: 'llama-3.3-70b-versatile',
@@ -2804,6 +2793,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     delayMinMs: 4000,
     delayMaxMs: 8000,
     agentDebugLogsEnabled: false,
+    agentDebugRetentionCount: 5,
     runState: {},
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
@@ -2814,6 +2804,34 @@ test('options preserve masked Groq key unless user edits the key field', async (
   globalThis.document = {
     getElementById(id) {
       return elements[id] || null;
+    },
+    createElement(tagName) {
+      const element = makeElement(tagName);
+      element.click = () => { element.clicked = true; };
+      element.remove = () => { element.removed = true; };
+      if (tagName === 'a') createdLinks.push(element);
+      return element;
+    },
+    body: {
+      append() {}
+    }
+  };
+  globalThis.HHJobAssistantLog = {
+    normalizeRetention(value) {
+      return Math.max(1, Math.min(Number.parseInt(value, 10) || 5, 20));
+    },
+    async listRuns() {
+      return debugRuns;
+    },
+    async trimHistory() {},
+    async clearHistory() {},
+    async getArtifact(runId) {
+      downloadedRunIds.push(runId);
+      return {
+        available: true,
+        name: `${runId}.debug`,
+        text: `${JSON.stringify({ event: 'debug_file_created', details: { formatVersion: 2, runId } })}\n`
+      };
     }
   };
   globalThis.chrome = {
@@ -2867,6 +2885,9 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.deepEqual(storage.workFormatPreference, []);
     assert.equal(storage.coverPrompt, 'default prompt');
     assert.equal(storage.employerQuestionPrompt, 'default employer prompt');
+    assert.equal(elements.agentDebugRetentionCount.value, 5);
+    assert.equal(elements.agentDebugRunSelect.disabled, true);
+    assert.equal(elements.downloadAgentDebugRun.disabled, true);
 
     elements.dailyLimit.value = '250';
     await handlers.get('save:click')();
@@ -2906,9 +2927,48 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.equal(storage.groqApiKey, 'gsk_test_before_save');
     assert.equal(groqKeySeenByTest, 'gsk_test_before_save');
     assert.equal(elements.groqStatus.textContent, 'Groq работает.');
+
+    debugRuns = [
+      {
+        id: 'run-new',
+        kind: 'auto_apply',
+        status: 'complete',
+        inProgress: false,
+        createdAt: '2026-07-26T10:00:00.000Z',
+        extensionVersion: '0.1.226'
+      },
+      {
+        id: 'run-old',
+        kind: 'resume_refresh',
+        status: 'error',
+        inProgress: false,
+        createdAt: '2026-07-25T10:00:00.000Z',
+        extensionVersion: '0.1.226'
+      }
+    ];
+    elements.agentDebugLogsEnabled.checked = true;
+    elements.agentDebugRetentionCount.value = '2';
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.agentDebugLogsEnabled, true);
+    assert.equal(storage.agentDebugRetentionCount, 2);
+    assert.equal(elements.agentDebugRunSelect.value, 'run-new');
+    assert.equal(elements.agentDebugRunSelect.children.length, 2);
+    assert.equal(elements.downloadAgentDebugRun.disabled, false);
+    assert.equal(elements.agentDebugStatus.textContent, 'Настройки логов сохранены.');
+
+    elements.agentDebugRunSelect.value = 'run-old';
+    await handlers.get('downloadAgentDebugRun:click')();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(downloadedRunIds, ['run-old']);
+    assert.equal(createdLinks.at(-1).download, 'run-old.debug');
+    assert.equal(createdLinks.at(-1).clicked, true);
+    assert.equal(createdLinks.at(-1).removed, true);
+    assert.equal(elements.agentDebugStatus.textContent, 'Файл .debug скачан.');
   } finally {
     delete globalThis.HHJA_DEFAULTS;
     delete globalThis.HHJA_LOCALIZE_ERROR;
+    delete globalThis.HHJobAssistantLog;
     delete globalThis.document;
     delete globalThis.chrome;
   }
@@ -2935,6 +2995,12 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(html, /value="hybrid">\s*<span>Гибрид<\/span>/);
   assert.doesNotMatch(html, /value="any">Любой|<option value="">Не выбрано<\/option>/);
   assert.match(html, /id="agentDebugLogsEnabled"/);
+  assert.match(html, /id="agentDebugRetentionCount" type="number" min="1" max="20" step="1"/);
+  assert.match(html, /id="agentDebugRunSelect"/);
+  assert.match(html, /id="downloadAgentDebugRun"/);
+  assert.match(html, /Если «Логи» включены, расширение локально хранит обезличенные логи последних запусков/);
+  assert.match(html, /По умолчанию сохраняются 5 запусков/);
+  assert.match(html, /выключение настройки очищает всю историю/);
   assert.match(html, /<h2>Промпты<\/h2>/);
   assert.ok(html.indexOf('<h2>Groq API</h2>') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /id="coverPrompt"/);
@@ -2969,7 +3035,14 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(js, /agentDebugLogsEnabled/);
   assert.match(js, /fields\.agentDebugLogsEnabled\.checked = values\.agentDebugLogsEnabled === true/);
   assert.match(js, /agentDebugLogsEnabled: fields\.agentDebugLogsEnabled\.checked/);
-  assert.match(js, /chrome\.storage\.local\.remove\(\['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText'\]\)/);
+  assert.match(js, /agentDebugRetentionCount: normalizeDebugRetention/);
+  assert.match(js, /debugLogApi\(\)\?\.clearHistory/);
+  assert.match(js, /debugLogApi\(\)\?\.trimHistory/);
+  assert.match(js, /debugLogApi\(\)\?\.getArtifact/);
+  assert.match(js, /new Blob/);
+  assert.match(js, /URL\.createObjectURL/);
+  assert.match(js, /URL\.revokeObjectURL/);
+  assert.match(js, /link\.download = artifact\.name/);
   assert.match(js, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
   assert.match(js, /Math\.max\(500/);
   assert.doesNotMatch(html, /id="resumeText"|Resume text|resumeRefreshEnabled|Enable daily resume refresh/);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from 'node:child_process';
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -21,6 +21,7 @@ const DEFAULT_STORAGE_DIR = join(
 function parseArgs(argv) {
   const args = {
     storageDir: process.env.HHJA_EXTENSION_STORAGE_DIR || DEFAULT_STORAGE_DIR,
+    file: '',
     since: process.env.HHJA_SINCE || '',
     json: false,
     output: ''
@@ -34,11 +35,38 @@ function parseArgs(argv) {
       args.since = argv[++index] || '';
     } else if (value === '--storage-dir') {
       args.storageDir = argv[++index] || args.storageDir;
+    } else if (value === '--file') {
+      args.file = argv[++index] || '';
     } else if (value === '--output') {
       args.output = argv[++index] || '';
     }
   }
   return args;
+}
+
+function parseDebugFile(file) {
+  const text = readFileSync(file, 'utf8');
+  const entries = [];
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error('entry must be an object');
+      }
+      entries.push(entry);
+    } catch (error) {
+      throw new Error(`Invalid debug file JSON at line ${index + 1}: ${error.message}`);
+    }
+  }
+  if (entries.length === 0) {
+    throw new Error('Debug file is empty');
+  }
+  const header = entries[0];
+  if (header.event !== 'debug_file_created' || !header.details?.formatVersion) {
+    throw new Error('Unsupported debug file header');
+  }
+  return { entries, header };
 }
 
 function extractJsonObjects(text, key) {
@@ -229,8 +257,66 @@ function extractLatestDebugFile(text) {
     .at(-1) || null;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+function buildFileReport(args) {
+  const { entries, header } = parseDebugFile(args.file);
+  const results = dedupeResults(
+    entries
+      .filter((entry) => entry.event === 'run_result' && entry.details)
+      .map((entry) => ({
+        ...entry.details,
+        timestamp: entry.details.timestamp || entry.timestamp || ''
+      })),
+    args.since
+  );
+  const states = entries
+    .filter((entry) => entry.event === 'run_state' && entry.details?.state)
+    .map((entry) => ({
+      ...entry.details,
+      updatedAt: entry.details.updatedAt || entry.timestamp || ''
+    }))
+    .sort((a, b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+  const starts = entries
+    .filter((entry) => ['auto_apply_started', 'resume_refresh_started', 'start_run'].includes(entry.event))
+    .map((entry) => ({
+      ...entry.details,
+      timestamp: entry.details?.timestamp || entry.timestamp || ''
+    }))
+    .sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+  const applied = results.filter((item) => /^applied/.test(item.status || ''));
+  const skipped = results.filter((item) => /^skipped/.test(item.status || ''));
+  const details = header.details || {};
+  return {
+    generatedAt: new Date().toISOString(),
+    sourceFile: args.file,
+    since: args.since,
+    counts: {
+      applied: applied.length,
+      skipped: skipped.length,
+      results: results.length,
+      events: Math.max(0, entries.length - 1)
+    },
+    latestStart: starts.at(-1) || null,
+    latestState: states.at(-1) || null,
+    latestDebugFile: {
+      name: details.fileName || args.file.split(/[\\/]/).at(-1) || '',
+      createdAt: details.createdAt || header.timestamp || '',
+      runId: details.runId || '',
+      kind: details.kind || '',
+      extensionVersion: details.extensionVersion || '',
+      status: details.status || '',
+      incomplete: details.incomplete === true,
+      truncated: details.truncated === true,
+      droppedEntries: Number(details.droppedEntries || 0),
+      formatVersion: details.formatVersion,
+      redaction: details.redaction || ''
+    },
+    hasLocalDebugText: false,
+    applied,
+    skipped
+  };
+}
+
+async function buildStorageReport(args) {
   if (!existsSync(args.storageDir)) {
     throw new Error(`Extension storage dir not found: ${args.storageDir}`);
   }
@@ -238,12 +324,17 @@ async function main() {
   const files = readdirSync(args.storageDir).map((name) => join(args.storageDir, name));
   const { stdout } = await execFileAsync('strings', files, { maxBuffer: 64 * 1024 * 1024 });
   const logArrays = extractJsonObjects(stdout, '"event":"run_result"').filter((item) => Array.isArray(item));
-  const logEntries = logArrays.flat();
+  const runRecords = extractJsonObjects(stdout, '"entries":')
+    .filter((item) => item?.meta && Array.isArray(item.entries));
+  const logEntries = [...logArrays.flat(), ...runRecords.flatMap((item) => item.entries)];
   const runResults = extractJsonObjects(stdout, '"status":"applied').filter((item) => item.status);
   const fragmentResults = extractRunResultFragments(stdout);
   const latestState = extractLatestRunState(stdout);
   const latestStart = extractLatestStartRun(stdout);
-  const latestDebugFile = extractLatestDebugFile(stdout);
+  const latestRunRecord = runRecords
+    .sort((a, b) => String(a.meta?.createdAt || '').localeCompare(String(b.meta?.createdAt || '')))
+    .at(-1);
+  const latestDebugFile = latestRunRecord?.meta || extractLatestDebugFile(stdout);
   const hasLocalDebugText = stdout.includes('agentDebugLogText');
 
   const results = dedupeResults(
@@ -257,7 +348,7 @@ async function main() {
   const applied = results.filter((item) => /^applied/.test(item.status || ''));
   const skipped = results.filter((item) => /^skipped/.test(item.status || ''));
 
-  const report = {
+  return {
     generatedAt: new Date().toISOString(),
     storageDir: args.storageDir,
     since: args.since,
@@ -273,6 +364,22 @@ async function main() {
     applied,
     skipped
   };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.file && !existsSync(args.file)) {
+    throw new Error(`Debug file not found: ${args.file}`);
+  }
+  const report = args.file ? buildFileReport(args) : await buildStorageReport(args);
+  const {
+    applied = [],
+    skipped = [],
+    latestState = null,
+    latestStart = null,
+    latestDebugFile = null,
+    hasLocalDebugText = false
+  } = report;
 
   if (args.output) {
     writeFileSync(args.output, `${JSON.stringify(report, null, 2)}\n`);

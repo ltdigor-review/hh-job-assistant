@@ -234,7 +234,8 @@ Result:
 - [ ] Edit cover-letter prompt.
 - [ ] Set daily apply limit.
 - [ ] Set delay min and max.
-- [ ] Toggle `Диагностический режим`.
+- [ ] Enable `Логи`.
+- [ ] Set `Хранить запусков` to a value in `1..20`.
 - [ ] Save settings.
 - [ ] Reload options page.
 
@@ -246,6 +247,8 @@ Expected result:
 - [ ] If max delay is lower than min delay, max is saved as min.
 - [ ] Changing resume URL clears cached parsed resume text.
 - [ ] Masked Groq key is preserved unless the user replaces it.
+- [ ] Log retention persists, defaults to `5`, and is clamped to `1..20`.
+- [ ] Disabling logs and saving immediately clears stored run history.
 
 Result:
 
@@ -496,17 +499,27 @@ Result:
 - Evidence:
 - Notes:
 
-### 16. Reports And Local Logs
+### 16. Reports And Downloadable Logs
 
+- [ ] Enable logs before starting an action.
 - [ ] Generate at least one apply result.
 - [ ] Open popup.
 - [ ] Inspect recent results.
-- [ ] Inspect local extension logs via `npm run inspect:logs` or profile storage.
+- [ ] Open settings and confirm the newest run appears in the saved-run selector.
+- [ ] Generate a second run and select the older run.
+- [ ] Click `Скачать .debug`.
+- [ ] Inspect the file with `npm run inspect:logs -- --file <path>`.
+- [ ] Lower `Хранить запусков`, save, and verify the oldest excess runs disappear.
+- [ ] Disable logs, save, and verify all history disappears.
 
 Expected result:
 
 - [ ] Recent results show applied/skipped/error messages.
-- [ ] Local logs include `agentDebugLogFile`, `agentDebugLogText`, `runState`, and recent events.
+- [ ] The selector shows date, action type, status, and extension version for each retained run.
+- [ ] The selected run downloads as one valid NDJSON `.debug` file.
+- [ ] The file contains technical events but no API key, token, resume/profile text, salary, Telegram, vacancy title, employer question, answer, prompt, or URL query/fragment.
+- [ ] Storage keeps no more than configured N runs and deletes the oldest first.
+- [ ] Saving with logs disabled removes `agentDebugRunIndex`, `agentDebugActiveRunId`, and all `agentDebugRun:<runId>` records.
 - [ ] Popup refreshes without reload.
 
 Result:
@@ -547,14 +560,14 @@ Result:
 | Install/load extension | Chrome Load unpacked | Manifest, permissions, popup/options/content scripts | `extension-build.test.mjs` |
 | Popup health | Open popup on hh.ru and non-hh page | Extension ready, tab status, version | `extension-build.test.mjs` |
 | Popup current action/copy | Open popup during active run or error | Compact current action, no secondary detail text, copyable status/errors | `extension-build.test.mjs` |
-| Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, diagnostic mode | `extension-build.test.mjs` |
+| Options settings | Open settings, save/reload | Model, resume URL, salary, prompt, limits, delays, log retention | `extension-build.test.mjs` |
 | Auto-apply | `Запуск откликов` | Limit, delays, submit confirmation, status-before-delay, logs | `content-auto-apply.test.mjs`, `hh-ui-flow.test.mjs` |
 | Employer questions | Auto-apply on test forms | Text/radio/checkbox, salary fallback, bad output skip, return to search after HH opens vacancy detail | `content-auto-apply.test.mjs` |
 | HH generated resume response | Auto-apply on HH response modal | `Сгенерировать резюме` button is clicked and confirmed | `content-auto-apply.test.mjs` |
 | Stop | `Стоп` | Queue cleared, stopped state, local log event | `content-auto-apply.test.mjs` |
 | Keyboard command | `Alt+Shift+A` | Valid URL guard, start auto-apply | `extension-build.test.mjs` |
 | Resume refresh | `Обновить резюме` | Configured URL, edit/save/raise, error states | `resume-refresh.test.mjs` |
-| Reports/logs | Popup plus local storage | Recent results, local debug artifact | `extension-build.test.mjs` |
+| Reports/logs | Settings plus local storage | Retained run selector, anonymized `.debug` download, retention and deletion | `debug-log-history.test.mjs`, `extension-build.test.mjs` |
 | Safety errors | Login/captcha/Groq/selector failures | Stop/skip/error with evidence | `content-auto-apply.test.mjs`, `resume-refresh.test.mjs` |
 
 ## Test Case Result Template

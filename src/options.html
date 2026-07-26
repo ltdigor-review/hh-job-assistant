@@ -193,6 +193,53 @@
         background: #f8fafc;
       }
 
+      .diagnostic-card {
+        margin: 0 0 20px;
+        padding: 16px;
+        border: 1px solid #d8e0ea;
+        border-radius: 8px;
+        background: #f8fafc;
+      }
+
+      .diagnostic-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .diagnostic-head h2 {
+        margin: 0;
+      }
+
+      .diagnostic-hint {
+        margin: 10px 0 0;
+        color: #64748b;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .diagnostic-fields {
+        display: grid;
+        grid-template-columns: minmax(140px, .35fr) minmax(260px, 1fr);
+        gap: 14px;
+        align-items: end;
+      }
+
+      .diagnostic-actions {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 12px;
+      }
+
+      #agentDebugStatus {
+        min-height: 20px;
+        color: #475569;
+        font-size: 13px;
+      }
+
       .resume-profile-card label:first-child {
         margin-top: 0;
       }
@@ -220,7 +267,7 @@
       }
 
       button:disabled {
-        cursor: wait;
+        cursor: not-allowed;
         opacity: .6;
       }
 
@@ -263,7 +310,8 @@
         }
 
         .page-head,
-        .row {
+        .row,
+        .diagnostic-fields {
           grid-template-columns: 1fr;
         }
 
@@ -278,12 +326,35 @@
     <main>
       <div class="page-head">
         <h1>HH Job Assistant</h1>
-        <label class="switch" for="agentDebugLogsEnabled">
-          <span>Логи</span>
-          <input id="agentDebugLogsEnabled" type="checkbox">
-          <span class="switch-track" aria-hidden="true"></span>
-        </label>
       </div>
+
+      <section class="diagnostic-card" aria-labelledby="diagnosticLogsTitle">
+        <div class="diagnostic-head">
+          <h2 id="diagnosticLogsTitle">Диагностические логи</h2>
+          <label class="switch" for="agentDebugLogsEnabled">
+            <span>Логи</span>
+            <input id="agentDebugLogsEnabled" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <p class="diagnostic-hint">Если «Логи» включены, расширение локально хранит обезличенные логи последних запусков. По умолчанию сохраняются 5 запусков. Старые логи удаляются автоматически, а выключение настройки очищает всю историю. Включите логи до запуска.</p>
+        <div class="diagnostic-fields">
+          <div>
+            <label for="agentDebugRetentionCount">Хранить запусков</label>
+            <input id="agentDebugRetentionCount" type="number" min="1" max="20" step="1">
+          </div>
+          <div>
+            <label for="agentDebugRunSelect">Сохранённый запуск</label>
+            <select id="agentDebugRunSelect" disabled>
+              <option value="">Сохранённых запусков нет</option>
+            </select>
+          </div>
+        </div>
+        <div class="diagnostic-actions">
+          <button id="downloadAgentDebugRun" class="secondary" type="button" disabled>Скачать .debug</button>
+          <div id="agentDebugStatus" role="status" aria-live="polite"></div>
+        </div>
+      </section>
 
       <label for="resumeUrl">Ссылка на резюме hh.ru</label>
       <input id="resumeUrl" type="url" placeholder="https://hh.ru/resume/...">
@@ -399,6 +470,7 @@
       <div id="status" role="status"></div>
     </main>
     <script src="error-text.js"></script>
+    <script src="agent-log.js"></script>
     <script src="defaults.js"></script>
     <script src="options.js"></script>
   </body>

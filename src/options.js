@@ -34,11 +34,15 @@ const fields = {
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
-  agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled')
+  agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled'),
+  agentDebugRetentionCount: document.getElementById('agentDebugRetentionCount'),
+  agentDebugRunSelect: document.getElementById('agentDebugRunSelect'),
+  downloadAgentDebugRun: document.getElementById('downloadAgentDebugRun')
 };
 
 const statusNode = document.getElementById('status');
 const groqStatusNode = document.getElementById('groqStatus');
+const agentDebugStatusNode = document.getElementById('agentDebugStatus');
 const resumeProfileStatusNode = document.getElementById('resumeProfileStatus');
 const resumeProfileButtons = [
   document.getElementById('buildResumeProfile'),
@@ -46,6 +50,8 @@ const resumeProfileButtons = [
 ];
 let savedGroqKeyMasked = false;
 let groqKeyDirty = false;
+let agentDebugRuns = [];
+let agentDebugDownloadInProgress = false;
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
@@ -62,6 +68,122 @@ function setGroqStatus(text, isError = false) {
 
 function setResumeProfileStatus(text, isError = false) {
   setStatus(text, isError, resumeProfileStatusNode);
+}
+
+function debugLogApi() {
+  return globalThis.HHJobAssistantLog || null;
+}
+
+function normalizeDebugRetention(value) {
+  return debugLogApi()?.normalizeRetention?.(value) ??
+    Math.max(1, Math.min(Number.parseInt(value, 10) || DEFAULTS.agentDebugRetentionCount, 20));
+}
+
+function formatDebugRunLabel(run) {
+  const kindLabels = {
+    auto_apply: 'Отклики',
+    resume_refresh: 'Поднятие резюме'
+  };
+  const statusLabels = {
+    running: 'выполняется',
+    scanning: 'выполняется',
+    applying: 'выполняется',
+    waiting_for_dialog: 'выполняется',
+    generating_cover_letter: 'выполняется',
+    filling_cover_letter: 'выполняется',
+    submitting: 'выполняется',
+    refreshing_resumes: 'выполняется',
+    complete: 'завершён',
+    dry_run_complete: 'завершён',
+    stopped: 'остановлен',
+    paused: 'приостановлен',
+    error: 'ошибка',
+    interrupted: 'прерван'
+  };
+  const timestamp = Date.parse(run.createdAt || '');
+  const date = Number.isFinite(timestamp)
+    ? new Intl.DateTimeFormat('ru-RU', {
+        dateStyle: 'short',
+        timeStyle: 'medium'
+      }).format(new Date(timestamp))
+    : 'без даты';
+  const kind = kindLabels[run.kind] || 'Запуск';
+  const status = run.inProgress ? 'выполняется' : (statusLabels[run.status] || run.status || 'статус неизвестен');
+  const version = run.extensionVersion ? `v${run.extensionVersion}` : 'версия неизвестна';
+  return `${date} · ${kind} · ${status} · ${version}`;
+}
+
+function syncDebugControls() {
+  const enabled = fields.agentDebugLogsEnabled.checked;
+  const hasRuns = agentDebugRuns.length > 0;
+  fields.agentDebugRunSelect.disabled = !enabled || !hasRuns;
+  fields.downloadAgentDebugRun.disabled = !enabled || !hasRuns || agentDebugDownloadInProgress;
+}
+
+function renderDebugRuns(runs, preferredRunId = '') {
+  agentDebugRuns = Array.isArray(runs) ? runs : [];
+  const selectedId = agentDebugRuns.some((run) => run.id === preferredRunId)
+    ? preferredRunId
+    : agentDebugRuns[0]?.id || '';
+  const options = agentDebugRuns.length > 0
+    ? agentDebugRuns.map((run) => {
+        const option = document.createElement('option');
+        option.value = run.id;
+        option.textContent = formatDebugRunLabel(run);
+        return option;
+      })
+    : (() => {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = fields.agentDebugLogsEnabled.checked
+          ? 'Сохранённых запусков нет'
+          : 'Логи выключены';
+        return [option];
+      })();
+  fields.agentDebugRunSelect.replaceChildren(...options);
+  fields.agentDebugRunSelect.value = selectedId;
+  syncDebugControls();
+}
+
+async function loadDebugRuns() {
+  const preferredRunId = fields.agentDebugRunSelect.value;
+  const runs = fields.agentDebugLogsEnabled.checked
+    ? await debugLogApi()?.listRuns?.() || []
+    : [];
+  renderDebugRuns(runs, preferredRunId);
+}
+
+async function downloadSelectedDebugRun() {
+  const runId = fields.agentDebugRunSelect.value;
+  if (!runId) {
+    throw new Error('Выберите сохранённый запуск.');
+  }
+  agentDebugDownloadInProgress = true;
+  syncDebugControls();
+  setStatus('Готовлю файл…', false, agentDebugStatusNode);
+  let objectUrl = '';
+  try {
+    const artifact = await debugLogApi()?.getArtifact?.(runId);
+    if (!artifact?.available || !artifact.text || !artifact.name) {
+      throw new Error('Лог выбранного запуска не найден.');
+    }
+    const blob = new Blob([artifact.text], { type: 'application/x-ndjson;charset=utf-8' });
+    objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = artifact.name;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setStatus('Файл .debug скачан.', false, agentDebugStatusNode);
+  } finally {
+    if (objectUrl) {
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    }
+    agentDebugDownloadInProgress = false;
+    syncDebugControls();
+  }
 }
 
 function normalizeMultiPreference(value, allowedValues) {
@@ -119,10 +241,18 @@ async function loadOptions() {
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
   fields.agentDebugLogsEnabled.checked = values.agentDebugLogsEnabled === true;
+  fields.agentDebugRetentionCount.value = normalizeDebugRetention(
+    values.agentDebugRetentionCount ?? DEFAULTS.agentDebugRetentionCount
+  );
+  await loadDebugRuns();
 }
 
 async function saveOptions() {
-  const current = await chrome.storage.local.get(['resumeUrl']);
+  const current = await chrome.storage.local.get([
+    'resumeUrl',
+    'agentDebugLogsEnabled',
+    'agentDebugRetentionCount'
+  ]);
   const normalizedResumeUrl = fields.resumeUrl.value.trim();
   if (normalizedResumeUrl) {
     try {
@@ -166,7 +296,8 @@ async function saveOptions() {
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 200)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
-    agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked
+    agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked,
+    agentDebugRetentionCount: normalizeDebugRetention(fields.agentDebugRetentionCount.value)
   };
 
   if (patch.delayMaxMs < patch.delayMinMs) {
@@ -194,9 +325,12 @@ async function saveOptions() {
 
   await chrome.storage.local.set(patch);
   if (!patch.agentDebugLogsEnabled) {
-    await chrome.storage.local.remove(['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText']);
+    await debugLogApi()?.clearHistory?.();
+  } else {
+    await debugLogApi()?.trimHistory?.(patch.agentDebugRetentionCount);
   }
   await loadOptions();
+  setStatus('Настройки логов сохранены.', false, agentDebugStatusNode);
   setStatus('Сохранено.');
 }
 
@@ -255,6 +389,17 @@ fields.groqApiKey.addEventListener('input', () => {
   groqKeyDirty = true;
 });
 
+fields.agentDebugLogsEnabled.addEventListener('change', () => {
+  setStatus('Сохраните настройки, чтобы применить изменение.', false, agentDebugStatusNode);
+  syncDebugControls();
+});
+
+fields.downloadAgentDebugRun.addEventListener('click', () => {
+  downloadSelectedDebugRun().catch((error) => {
+    setStatus(localizeError(error, 'Не удалось скачать .debug.'), true, agentDebugStatusNode);
+  });
+});
+
 document.getElementById('save').addEventListener('click', () => {
   saveOptions().catch((error) => setStatus(localizeError(error), true));
 });
@@ -272,3 +417,17 @@ document.getElementById('editResumeProfile').addEventListener('click', () => {
 });
 
 loadOptions().catch((error) => setStatus(localizeError(error), true));
+
+chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
+  if (
+    areaName === 'local' &&
+    (
+      changes.agentDebugRunIndex ||
+      changes.agentDebugActiveRunId ||
+      changes.agentDebugLogsEnabled ||
+      changes.agentDebugRetentionCount
+    )
+  ) {
+    loadOptions().catch((error) => setStatus(localizeError(error), true, agentDebugStatusNode));
+  }
+});

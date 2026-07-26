@@ -529,7 +529,13 @@ async function appendAgentLog(event, details = {}) {
 }
 
 async function ensureDefaults() {
-  const current = await storageGet(Object.keys(DEFAULTS));
+  const logApi = globalThis.HHJobAssistantLog;
+  const logStateKeys = [
+    logApi?.INDEX_KEY,
+    logApi?.ACTIVE_RUN_KEY,
+    ...(logApi?.LEGACY_KEYS || [])
+  ].filter(Boolean);
+  const current = await storageGet([...Object.keys(DEFAULTS), ...logStateKeys]);
   const patch = {};
   const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt']);
 
@@ -570,8 +576,22 @@ async function ensureDefaults() {
     await storageSet(patch);
   }
 
-  if (current.agentDebugLogsEnabled !== true) {
-    await storageRemove(['agentDebugLog', 'agentDebugLogFile', 'agentDebugLogText']);
+  const legacyLogKeys = (logApi?.LEGACY_KEYS || []).filter((key) => current[key] !== undefined);
+  if (legacyLogKeys.length > 0) {
+    await storageRemove(legacyLogKeys);
+  }
+
+  if (
+    current.agentDebugLogsEnabled !== true &&
+    (current[logApi?.INDEX_KEY] !== undefined || current[logApi?.ACTIVE_RUN_KEY] !== undefined)
+  ) {
+    await logApi?.clearHistory?.();
+  } else if (
+    current.agentDebugLogsEnabled === true &&
+    Array.isArray(current[logApi?.INDEX_KEY]) &&
+    current[logApi.INDEX_KEY].length > (patch.agentDebugRetentionCount || current.agentDebugRetentionCount || DEFAULTS.agentDebugRetentionCount)
+  ) {
+    await logApi?.trimHistory?.(patch.agentDebugRetentionCount || current.agentDebugRetentionCount);
   }
 }
 
