@@ -1,10 +1,12 @@
 import './log-sanitize.js';
 import './agent-log.js';
 import './error-text.js';
+import './ai-providers.js';
 import './defaults.js';
 import './config-readiness.js';
 
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
+const AI_PROVIDERS = globalThis.HHJA_AI_PROVIDERS;
 
 const OLD_DEFAULT_COVER_PROMPTS = new Set([
   'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
@@ -23,39 +25,18 @@ const LEGACY_DEFAULT_DELAYS = [
   [8000, 15000],
   [1500, 3000]
 ];
-const GROQ_REQUEST_TIMEOUT_MS = 35000;
 const RESPONSE_NAVIGATION_WATCHDOG_MS = 45000;
 const RESPONSE_NAVIGATION_WATCHDOG_ALARM = 'hhja-response-navigation-watchdog';
 const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
 const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
 const RESUME_PROFILE_MAX_CHARS = 6000;
 const RESUME_PROFILE_WEAKNESSES_MAX_CHARS = 3000;
-const RESUME_PROFILE_MODEL_MAX_TOKENS = 2400;
-const RESUME_PROFILE_MODEL_RETRY_MAX_TOKENS = 4000;
 const RESUME_PROFILE_MODEL_ATTEMPTS = 2;
-const RESUME_PROFILE_MODEL_RESPONSE_FORMAT = Object.freeze({
-  type: 'json_schema',
-  json_schema: {
-    name: 'hh_resume_profile',
-    strict: true,
-    schema: {
-      type: 'object',
-      properties: {
-        profile: { type: 'string' },
-        weaknesses: { type: 'array', items: { type: 'string' } }
-      },
-      required: ['profile', 'weaknesses'],
-      additionalProperties: false
-    }
-  }
-});
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
-const GROQ_QUESTION_MODEL = 'openai/gpt-oss-120b';
-const GROQ_COVER_LETTER_MODEL = 'llama-3.1-8b-instant';
-const GROQ_COVER_LETTER_MAX_TOKENS = 120;
-const GROQ_TEST_ASSIST_MAX_TOKENS = 700;
+const GROQ_QUESTION_MODEL = AI_PROVIDERS.getTaskCapability('groq', 'test_assist').model;
+const GROQ_COVER_LETTER_MODEL = AI_PROVIDERS.getTaskCapability('groq', 'cover_letter').model;
 const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_QUOTA_WAIT_MAX_MS = 60000;
 const GROQ_DAILY_RATE_TOKEN_LIMITS = Object.freeze({
@@ -69,34 +50,6 @@ const GROQ_DAILY_REQUEST_LIMITS = Object.freeze({
 const GROQ_PUBLISHED_TPM_LIMITS = Object.freeze({
   [GROQ_QUESTION_MODEL]: 8000,
   [GROQ_COVER_LETTER_MODEL]: 6000
-});
-const EMPLOYER_ANSWER_RESPONSE_FORMAT = Object.freeze({
-  type: 'json_schema',
-  json_schema: {
-    name: 'hh_employer_answers',
-    strict: true,
-    schema: {
-      type: 'object',
-      properties: {
-        answers: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' },
-              answer: { type: 'string' },
-              selectedOptions: { type: 'array', items: { type: 'string' } }
-            },
-            required: ['id', 'answer', 'selectedOptions'],
-            additionalProperties: false
-          }
-        },
-        coverLetter: { type: 'string' }
-      },
-      required: ['answers', 'coverLetter'],
-      additionalProperties: false
-    }
-  }
 });
 const EMPLOYER_ANSWER_INTERNAL_INSTRUCTION = [
   'Верни один JSON-объект по заданной схеме.',
@@ -144,12 +97,16 @@ function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
 }
 
-function getGroqRequestTimeoutMs() {
+function getProviderRequestTimeoutMs(providerId) {
+  const providerOverride = Number(globalThis.__HH_JOB_ASSISTANT_TEST_AI_TIMEOUT_MS__);
   const testOverride = Number(globalThis.__HH_JOB_ASSISTANT_TEST_GROQ_TIMEOUT_MS__);
-  if (Number.isFinite(testOverride) && testOverride > 0) {
+  if (Number.isFinite(providerOverride) && providerOverride > 0) {
+    return providerOverride;
+  }
+  if (providerId === 'groq' && Number.isFinite(testOverride) && testOverride > 0) {
     return testOverride;
   }
-  return GROQ_REQUEST_TIMEOUT_MS;
+  return AI_PROVIDERS.getProvider(providerId).timeoutMs;
 }
 
 function cleanPlainText(value) {
@@ -319,10 +276,11 @@ function emptyQuotaModelUsage() {
 
 function normalizeQuotaState(value) {
   const utcDay = getUtcDay();
-  if (!value || value.utcDay !== utcDay) return { utcDay, models: {} };
+  if (!value || value.utcDay !== utcDay) return { utcDay, models: {}, providers: {} };
   return {
     utcDay,
-    models: value.models && typeof value.models === 'object' ? value.models : {}
+    models: value.models && typeof value.models === 'object' ? value.models : {},
+    providers: value.providers && typeof value.providers === 'object' ? value.providers : {}
   };
 }
 
@@ -484,32 +442,105 @@ async function recordGroqUsage({ task, model, requestBody, response, usage }) {
   return normalized;
 }
 
-function enqueueGroqHttp(work) {
+async function recordProviderUsage({ providerId, task, model, usage }) {
+  const state = await getQuotaState();
+  const providerState = state.providers?.[providerId] && typeof state.providers[providerId] === 'object'
+    ? state.providers[providerId]
+    : {};
+  const models = providerState.models && typeof providerState.models === 'object'
+    ? providerState.models
+    : {};
+  const normalized = normalizeUsage(usage);
+  const entry = {
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cachedTokens: 0,
+    reasoningTokens: 0,
+    ...(models[model] || {})
+  };
+  const promptTokens = normalized.promptTokens ?? 0;
+  const completionTokens = normalized.completionTokens ?? 0;
+  const totalTokens = normalized.totalTokens ?? (promptTokens + completionTokens);
+  entry.requests += 1;
+  entry.promptTokens += promptTokens;
+  entry.completionTokens += completionTokens;
+  entry.totalTokens += totalTokens;
+  entry.cachedTokens += normalized.cachedTokens;
+  entry.reasoningTokens += normalized.reasoningTokens;
+  state.providers = {
+    ...state.providers,
+    [providerId]: {
+      ...providerState,
+      models: {
+        ...models,
+        [model]: entry
+      }
+    }
+  };
+  await storeQuotaState(state);
+  await appendAgentLog('ai_provider_usage', {
+    provider: providerId,
+    task,
+    model,
+    requests: entry.requests,
+    promptTokens,
+    completionTokens,
+    cachedTokens: normalized.cachedTokens,
+    reasoningTokens: normalized.reasoningTokens
+  });
+  return normalized;
+}
+
+function enqueueAiHttp(work) {
   const queued = groqHttpQueue.then(work, work);
   groqHttpQueue = queued.catch(() => {});
   return queued;
 }
 
-async function fetchGroqCompletion({ task, model, groqApiKey, requestBody }) {
-  return enqueueGroqHttp(async () => {
-    await preflightGroqQuota({ task, model, requestBody });
+function aiProviderError(message, code, fallbackEligible = false, cause = undefined) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  error.aiFallbackEligible = fallbackEligible;
+  return error;
+}
+
+async function fetchProviderCompletion({ providerId, task, model, apiKey, requestBody }) {
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  return enqueueAiHttp(async () => {
+    if (provider.quotaPolicy === 'groq') {
+      await preflightGroqQuota({ task, model, requestBody });
+    }
     const controller = new AbortController();
-    const timeoutMs = getGroqRequestTimeoutMs();
+    const timeoutMs = getProviderRequestTimeoutMs(provider.id);
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let response;
     try {
-      response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      response = await fetch(provider.endpoint, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${groqApiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json'
         },
         signal: controller.signal,
         body: JSON.stringify(requestBody)
       });
     } catch (error) {
-      if (error?.name === 'AbortError') throw new Error(`Запрос Groq не уложился в ${timeoutMs} мс`);
-      throw error;
+      if (error?.name === 'AbortError') {
+        throw aiProviderError(
+          `Запрос ${provider.label} не уложился в ${timeoutMs} мс`,
+          'HHJA_AI_PROVIDER_TIMEOUT',
+          true,
+          error
+        );
+      }
+      throw aiProviderError(
+        `Не удалось подключиться к ${provider.label}: ${error?.message || 'ошибка сети'}`,
+        'HHJA_AI_PROVIDER_NETWORK',
+        true,
+        error
+      );
     } finally {
       clearTimeout(timeoutId);
     }
@@ -525,7 +556,11 @@ async function fetchGroqCompletion({ task, model, groqApiKey, requestBody }) {
     } else if (typeof response.json === 'function') {
       data = await response.json().catch(() => null);
     }
-    await recordGroqUsage({ task, model, requestBody, response, usage: data?.usage });
+    if (provider.quotaPolicy === 'groq') {
+      await recordGroqUsage({ task, model, requestBody, response, usage: data?.usage });
+    } else {
+      await recordProviderUsage({ providerId: provider.id, task, model, usage: data?.usage });
+    }
     return { response, responseText, data };
   });
 }
@@ -555,12 +590,48 @@ async function ensureDefaults() {
     logApi?.ACTIVE_RUN_KEY,
     ...(logApi?.LEGACY_KEYS || [])
   ].filter(Boolean);
-  const current = await storageGet([...Object.keys(DEFAULTS), ...logStateKeys]);
+  const current = await storageGet([
+    ...Object.keys(DEFAULTS),
+    'aiFallbackEnabled',
+    'groqApiKey',
+    ...logStateKeys
+  ]);
   const patch = {};
   const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt']);
 
+  const credentials = AI_PROVIDERS.normalizeCredentials(current.aiProviderCredentials, current.groqApiKey);
+  if (current.aiProvider === undefined) {
+    patch.aiProvider = credentials.groq?.apiKey ? 'groq' : DEFAULTS.aiProvider;
+  } else {
+    patch.aiProvider = AI_PROVIDERS.normalizeProviderId(current.aiProvider);
+  }
+  if (JSON.stringify(credentials) !== JSON.stringify(current.aiProviderCredentials || {})) {
+    patch.aiProviderCredentials = credentials;
+  }
+  if (credentials.groq?.apiKey && current.groqApiKey !== credentials.groq.apiKey) {
+    patch.groqApiKey = credentials.groq.apiKey;
+  }
+  const normalizedPrimaryProvider = patch.aiProvider || current.aiProvider || DEFAULTS.aiProvider;
+  const fallbackProvider = AI_PROVIDERS.normalizeFallbackProvider(current, normalizedPrimaryProvider);
+  if (current.aiFallbackProvider !== fallbackProvider) {
+    patch.aiFallbackProvider = fallbackProvider;
+  }
+  const cooldowns = current.aiProviderCooldowns && typeof current.aiProviderCooldowns === 'object'
+    ? { ...current.aiProviderCooldowns }
+    : {};
+  if (current.groqCooldownUntil && !cooldowns.groq) cooldowns.groq = current.groqCooldownUntil;
+  if (JSON.stringify(cooldowns) !== JSON.stringify(current.aiProviderCooldowns || {})) {
+    patch.aiProviderCooldowns = cooldowns;
+  }
+
   for (const [key, value] of Object.entries(DEFAULTS)) {
-    if (current[key] === undefined || (promptKeys.has(key) && !String(current[key] || '').trim())) {
+    if (
+      key !== 'aiProvider' &&
+      key !== 'aiFallbackProvider' &&
+      key !== 'aiProviderCredentials' &&
+      key !== 'aiProviderCooldowns' &&
+      (current[key] === undefined || (promptKeys.has(key) && !String(current[key] || '').trim()))
+    ) {
       patch[key] = value;
     }
   }
@@ -737,7 +808,7 @@ function buildGroqMessages({ task, resumeText, candidateFacts = null, expectedSa
           resumeText || '(резюме не указано)',
           '',
           'Точные данные кандидата:',
-          `Возраст: ${candidateFacts.age} лет`,
+          candidateFacts?.age ? `Возраст: ${candidateFacts.age} лет` : 'Возраст: точные данные отсутствуют',
           '',
           'Ожидаемая зарплата кандидата:',
           expectedSalary || '(зарплата не указана)',
@@ -1066,11 +1137,11 @@ function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) 
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('Groq вернул некорректный JSON профиля резюме');
+    throw aiProviderError('AI-провайдер вернул некорректный JSON профиля резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
   }
   const profile = cleanPlainText(parsed?.profile).slice(0, RESUME_PROFILE_MAX_CHARS);
   if (profile.length < 40) {
-    throw new Error('Groq вернул слишком короткий профиль резюме');
+    throw aiProviderError('AI-провайдер вернул слишком короткий профиль резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
   }
   const weaknessValues = Array.isArray(parsed?.weaknesses)
     ? parsed.weaknesses
@@ -1087,14 +1158,34 @@ function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) 
 }
 
 async function callResumeProfileModel({ sourceText = '', currentProfile = '', editComment = '', mode = 'build' }) {
-  const { groqApiKey, groqCooldownUntil = '' } = await storageGet([
+  const {
+    aiProvider,
+    aiProviderCredentials = {},
+    aiFallbackProvider,
+    aiFallbackEnabled,
+    aiFallbackToGroq = false,
+    groqApiKey
+  } = await storageGet([
+    'aiProvider',
+    'aiProviderCredentials',
+    'aiFallbackProvider',
+    'aiFallbackEnabled',
+    'aiFallbackToGroq',
     'groqApiKey',
-    'groqCooldownUntil'
   ]);
-  if (!groqApiKey) throw new Error('Ключ Groq API не настроен');
-  const cooldownUntilMs = Date.parse(groqCooldownUntil || 0);
-  if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now()) {
-    throw new Error(`Groq временно ограничил запросы. Пауза до ${groqCooldownUntil}.`);
+  const settings = {
+    aiProvider,
+    aiProviderCredentials,
+    aiFallbackProvider,
+    aiFallbackEnabled,
+    aiFallbackToGroq,
+    groqApiKey
+  };
+  const primaryProviderId = AI_PROVIDERS.normalizeProviderId(aiProvider);
+  const primaryProvider = AI_PROVIDERS.getProvider(primaryProviderId);
+  const primaryApiKey = AI_PROVIDERS.getApiKey(settings, primaryProviderId);
+  if (!primaryApiKey) {
+    throw aiProviderError(`Ключ ${primaryProvider.label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED', false);
   }
 
   const task = mode === 'edit' ? 'resume_profile_edit' : 'resume_profile_build';
@@ -1107,76 +1198,81 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
         { role: 'system', content: RESUME_PROFILE_BUILD_INSTRUCTION },
         { role: 'user', content: `Текст резюме:\n${String(sourceText).slice(0, 8000)}` }
       ];
-  for (let attempt = 1; attempt <= RESUME_PROFILE_MODEL_ATTEMPTS; attempt += 1) {
-    const requestBody = {
-      model: GROQ_QUESTION_MODEL,
-      messages,
-      temperature: 0,
-      max_tokens: attempt === 1 ? RESUME_PROFILE_MODEL_MAX_TOKENS : RESUME_PROFILE_MODEL_RETRY_MAX_TOKENS,
-      reasoning_effort: 'low',
-      response_format: RESUME_PROFILE_MODEL_RESPONSE_FORMAT
-    };
-    await appendAgentLog('resume_profile_request_start', {
-      task,
-      model: requestBody.model,
+  const logDetails = {
       sourceLength: String(sourceText).length,
       sourceHash: sourceText ? hashText(sourceText) : '',
       profileLength: String(currentProfile).length,
       profileHash: currentProfile ? hashText(currentProfile) : '',
       commentLength: String(editComment).length,
-      commentHash: editComment ? hashText(editComment) : '',
-      attempt
-    });
+      commentHash: editComment ? hashText(editComment) : ''
+  };
 
-    const { response, responseText, data } = await fetchGroqCompletion({
-      task,
-      model: requestBody.model,
-      groqApiKey,
-      requestBody
-    });
-    if (!response.ok) {
-      if (response.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
-        await storageSet({ groqCooldownUntil: new Date(Date.now() + retryAfterMs).toISOString() });
+  const runProvider = async (providerId, apiKey) => {
+    for (let attempt = 1; attempt <= RESUME_PROFILE_MODEL_ATTEMPTS; attempt += 1) {
+      try {
+        const completion = await executeAiProviderRequest({
+          providerId,
+          apiKey,
+          task,
+          messages,
+          logDetails,
+          attempt,
+          maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS
+        });
+        parseResumeProfileResponse(completion.content, { includeWeaknesses: mode !== 'edit' });
+        return completion.content;
+      } catch (error) {
+        if (
+          attempt < RESUME_PROFILE_MODEL_ATTEMPTS &&
+          error?.code === 'HHJA_AI_PROVIDER_INVALID_OUTPUT'
+        ) {
+          continue;
+        }
+        if (providerId === 'groq' && error?.code === 'HHJA_AI_PROVIDER_INVALID_OUTPUT') {
+          error.code = 'HHJA_GROQ_PROFILE_INVALID_RESPONSE';
+        }
+        throw error;
       }
-      throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
     }
-    const content = String(data?.choices?.[0]?.message?.content || '').trim();
-    const finishReason = data?.choices?.[0]?.finish_reason || '';
-    if (!content || finishReason === 'length') {
-      const normalizedUsage = normalizeUsage(data?.usage);
-      await appendAgentLog('resume_profile_request_error', {
-        task,
-        attempt,
-        maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS,
-        finishReason,
-        maxTokens: requestBody.max_tokens,
-        responseSummary: summarizeGroqResponse(data),
-        usage: { reasoningTokens: normalizedUsage.reasoningTokens }
-      });
-      if (attempt < RESUME_PROFILE_MODEL_ATTEMPTS) continue;
-      const error = new Error(formatGroqEmptyResponseError({
-        task,
-        status: response.status,
-        finishReason,
-        attempt,
-        maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS,
-        maxTokens: requestBody.max_tokens,
-        usage: data?.usage
-      }));
-      error.code = 'HHJA_GROQ_PROFILE_INVALID_RESPONSE';
-      throw error;
-    }
+    throw aiProviderError('AI-провайдер вернул пустой профиль резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
+  };
+
+  try {
+    const content = await runProvider(primaryProviderId, primaryApiKey);
     await appendAgentLog('resume_profile_request_complete', {
+      provider: primaryProviderId,
       task,
       responseLength: content.length,
       responseHash: hashText(content),
-      usage: normalizeUsage(data?.usage),
-      attempt
+    });
+    return content;
+  } catch (error) {
+    const fallbackProviderId = AI_PROVIDERS.normalizeFallbackProvider(settings, primaryProviderId);
+    const fallbackApiKey = fallbackProviderId
+      ? AI_PROVIDERS.getApiKey(settings, fallbackProviderId)
+      : '';
+    if (
+      !fallbackProviderId ||
+      !fallbackApiKey ||
+      error?.aiFallbackEligible !== true
+    ) {
+      throw error;
+    }
+    await appendAgentLog('ai_provider_fallback_start', {
+      task,
+      fromProvider: primaryProviderId,
+      toProvider: fallbackProviderId,
+      reason: error.code || 'HHJA_AI_PROVIDER_ERROR'
+    });
+    const content = await runProvider(fallbackProviderId, fallbackApiKey);
+    await appendAgentLog('ai_provider_fallback_complete', {
+      task,
+      fromProvider: primaryProviderId,
+      toProvider: fallbackProviderId,
+      reason: error.code || 'HHJA_AI_PROVIDER_ERROR'
     });
     return content;
   }
-  throw new Error('Groq вернул пустой или обрезанный профиль резюме');
 }
 
 async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() } = {}) {
@@ -1296,6 +1392,11 @@ async function buildAutomationSettingsAudit() {
   const current = await storageGet([
     'agentDebugLogsEnabled',
     'agentDebugRetentionCount',
+    'aiFallbackProvider',
+    'aiFallbackEnabled',
+    'aiFallbackToGroq',
+    'aiProvider',
+    'aiProviderCredentials',
     'dailyLimit',
     'employmentPreference',
     'expectedSalary',
@@ -1326,6 +1427,9 @@ async function buildAutomationSettingsAudit() {
     /удален|remote/i.test(resumeText) ? 'remote' : '',
     /гибрид|hybrid/i.test(resumeText) ? 'hybrid' : ''
   ].filter(Boolean);
+  const selectedProvider = AI_PROVIDERS.normalizeProviderId(current.aiProvider);
+  const selectedProviderKey = AI_PROVIDERS.getApiKey(current, selectedProvider);
+  const fallbackProvider = AI_PROVIDERS.normalizeFallbackProvider(current, selectedProvider);
   const checks = {
     resumeUrlConfigured: Boolean(resumeUrl),
     resumeUrlCurrent: Boolean(resumeUrl && normalizeResumeUrl(current.resumeParsedUrl) === resumeUrl),
@@ -1346,7 +1450,8 @@ async function buildAutomationSettingsAudit() {
     debugLogsEnabled: current.agentDebugLogsEnabled === true,
     debugRetention20: Number(current.agentDebugRetentionCount) >= 20,
     resumeAutoRefreshEnabled: current.resumeProfileAutoRefreshEnabled === true,
-    groqKeyConfigured: Boolean(String(current.groqApiKey || '').trim())
+    aiProviderKeyConfigured: Boolean(selectedProviderKey),
+    fallbackProviderReady: !fallbackProvider || Boolean(AI_PROVIDERS.getApiKey(current, fallbackProvider))
   };
   const issues = Object.entries(checks)
     .filter(([, passed]) => passed === false)
@@ -1362,16 +1467,7 @@ async function buildAutomationSettingsAudit() {
   return audit;
 }
 
-function getMaxTokensForTask(task) {
-  if (task === 'test_assist') return GROQ_TEST_ASSIST_MAX_TOKENS;
-  return GROQ_COVER_LETTER_MAX_TOKENS;
-}
-
-function getGroqModelForTask(task) {
-  return getQuotaModelForTask(task);
-}
-
-function getGroqTaskLabel(task) {
+function getAiTaskLabel(task) {
   if (task === 'test_assist') return 'ответы на вопросы работодателя';
   if (task === 'resume_profile_build' || task === 'resume_profile_edit') return 'профиль резюме';
   return 'сопроводительное письмо';
@@ -1392,7 +1488,7 @@ function normalizeUsage(usage = {}) {
   };
 }
 
-function summarizeGroqResponse(data = {}) {
+function summarizeAiResponse(data = {}) {
   const choices = Array.isArray(data?.choices) ? data.choices : [];
   return {
     id: data?.id || '',
@@ -1416,10 +1512,10 @@ function parseEmployerAnswerResponse(content) {
   try {
     parsed = JSON.parse(String(content || '').trim());
   } catch {
-    throw new Error('Groq вернул некорректный JSON ответов работодателю');
+    throw aiProviderError('AI-провайдер вернул некорректный JSON ответов работодателю', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
   }
   if (!parsed || !Array.isArray(parsed.answers) || typeof parsed.coverLetter !== 'string') {
-    throw new Error('Groq вернул неполный структурированный ответ работодателю');
+    throw aiProviderError('AI-провайдер вернул неполный структурированный ответ работодателю', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
   }
   const seen = new Set();
   const answers = parsed.answers.map((item) => {
@@ -1431,7 +1527,7 @@ function parseEmployerAnswerResponse(content) {
       item.selectedOptions.some((option) => typeof option !== 'string') ||
       seen.has(item.id)
     ) {
-      throw new Error('Groq вернул дублирующиеся или некорректные идентификаторы ответов');
+      throw aiProviderError('AI-провайдер вернул дублирующиеся или некорректные идентификаторы ответов', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
     }
     seen.add(item.id);
     return {
@@ -1443,10 +1539,10 @@ function parseEmployerAnswerResponse(content) {
   return { answers, coverLetter: cleanPlainText(parsed.coverLetter) };
 }
 
-function formatGroqEmptyResponseError({ task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
+function formatAiEmptyResponseError({ providerLabel, task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
   const normalizedUsage = normalizeUsage(usage);
   const parts = [
-    `задача: ${getGroqTaskLabel(task)}`,
+    `задача: ${getAiTaskLabel(task)}`,
     `HTTP ${status || 200}`,
     finishReason ? `finish_reason=${finishReason}` : '',
     `попытки ${attempt}/${maxAttempts}`,
@@ -1455,11 +1551,240 @@ function formatGroqEmptyResponseError({ task, status, finishReason, attempt, max
   if (normalizedUsage.completionTokens != null) {
     parts.push(`completion_tokens=${normalizedUsage.completionTokens}`);
   }
-  return `Groq вернул пустой ответ (${parts.filter(Boolean).join(', ')}). Если finish_reason=length, модель уперлась в лимит вывода и не вернула message.content.`;
+  return `${providerLabel} вернул пустой ответ (${parts.filter(Boolean).join(', ')}). Если finish_reason=length, модель уперлась в лимит вывода и не вернула message.content.`;
 }
 
-async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false }) {
+function getProviderCooldown(settings, providerId) {
+  const cooldowns = settings.aiProviderCooldowns && typeof settings.aiProviderCooldowns === 'object'
+    ? settings.aiProviderCooldowns
+    : {};
+  return String(cooldowns[providerId] || (providerId === 'groq' ? settings.groqCooldownUntil : '') || '');
+}
+
+async function setProviderCooldown(providerId, cooldownUntil) {
+  const { aiProviderCooldowns = {} } = await storageGet(['aiProviderCooldowns']);
+  const patch = {
+    aiProviderCooldowns: {
+      ...(aiProviderCooldowns && typeof aiProviderCooldowns === 'object' ? aiProviderCooldowns : {}),
+      [providerId]: cooldownUntil
+    }
+  };
+  if (providerId === 'groq') patch.groqCooldownUntil = cooldownUntil;
+  await storageSet(patch);
+}
+
+function buildProviderRequestBody({ providerId, task, messages, attempt = 1 }) {
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  const capability = AI_PROVIDERS.getTaskCapability(provider.id, task);
+  const requestBody = {
+    model: capability.model,
+    messages,
+    temperature: task.startsWith('resume_profile_') ? 0 : 0.2,
+    max_tokens: AI_PROVIDERS.getTaskMaxTokens(provider.id, task, attempt),
+    ...provider.requestExtras,
+    ...capability.requestExtras
+  };
+  if (capability.responseFormat) requestBody.response_format = capability.responseFormat;
+  return requestBody;
+}
+
+function validateProviderCoverLetter(content) {
+  const text = cleanPlainText(content);
+  if (text.length < 20) return 'too_short';
+  if (text.length > 220) return 'too_long';
+  if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'list';
+  if (text.split(/[.!?]+/).map(cleanPlainText).filter(Boolean).length > 2) return 'too_many_sentences';
+  if (/(?:резюме кандидата|текст вакансии|choice group|text question|ответы на вопросы работодателя)/i.test(text)) {
+    return 'protocol_leak';
+  }
+  return '';
+}
+
+async function executeAiProviderRequest({ providerId, apiKey, task, messages, logDetails = {}, attempt = 1, maxAttempts = 1 }) {
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  const current = await storageGet(['aiProviderCooldowns', 'groqCooldownUntil']);
+  const cooldownUntil = getProviderCooldown(current, provider.id);
+  const cooldownUntilMs = Date.parse(cooldownUntil || 0);
+  if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now()) {
+    await appendAgentLog('ai_request_skipped', {
+      provider: provider.id,
+      task,
+      reason: 'cooldown',
+      cooldownUntil
+    });
+    throw aiProviderError(
+      `${provider.label} временно ограничил запросы. Пауза до ${cooldownUntil}.`,
+      'HHJA_AI_PROVIDER_COOLDOWN',
+      true
+    );
+  }
+
+  const requestBody = buildProviderRequestBody({ providerId: provider.id, task, messages, attempt });
+  const startDetails = {
+    provider: provider.id,
+    task,
+    model: requestBody.model,
+    attempt,
+    ...logDetails
+  };
+  await appendAgentLog('ai_request_start', startDetails);
+  if (provider.id === 'groq') await appendAgentLog('groq_request_start', startDetails);
+  const payloadDetails = {
+    provider: provider.id,
+    task,
+    endpoint: provider.endpoint,
+    method: 'POST',
+    model: requestBody.model,
+    enableThinking: requestBody.enable_thinking === true,
+    responseFormat: requestBody.response_format?.type || '',
+    messageCount: requestBody.messages.length,
+    messageLengths: requestBody.messages.map((message) => ({
+      role: message.role,
+      contentLength: String(message.content || '').length
+    })),
+    temperature: requestBody.temperature,
+    maxTokens: requestBody.max_tokens,
+    attempt,
+    ...logDetails
+  };
+  await appendAgentLog('ai_request_payload', payloadDetails);
+  if (provider.id === 'groq') {
+    await appendAgentLog('groq_request_payload', payloadDetails);
+    if (task === 'test_assist') {
+      await appendAgentLog('groq_test_assist_request', {
+        task,
+        endpoint: provider.endpoint,
+        method: 'POST',
+        requestBody
+      });
+    }
+  }
+
+  const { response, responseText, data } = await fetchProviderCompletion({
+    providerId: provider.id,
+    task,
+    model: requestBody.model,
+    apiKey,
+    requestBody
+  });
+  if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+      const nextCooldown = new Date(Date.now() + retryAfterMs).toISOString();
+      await setProviderCooldown(provider.id, nextCooldown);
+      await appendAgentLog('ai_rate_limit_cooldown', {
+        provider: provider.id,
+        task,
+        cooldownUntil: nextCooldown,
+        retryAfterMs
+      });
+      if (provider.id === 'groq') {
+        await appendAgentLog('groq_rate_limit_cooldown', {
+          task,
+          cooldownUntil: nextCooldown,
+          retryAfterMs
+        });
+      }
+    }
+    const errorDetails = {
+      provider: provider.id,
+      task,
+      status: response.status,
+      responseTextLength: responseText.length,
+      responseTextHash: hashText(responseText),
+      attempt,
+      maxAttempts
+    };
+    await appendAgentLog('ai_request_error', errorDetails);
+    if (provider.id === 'groq') await appendAgentLog('groq_request_error', errorDetails);
+    if (task === 'resume_profile_build' || task === 'resume_profile_edit') {
+      await appendAgentLog('resume_profile_request_error', {
+        ...errorDetails,
+        usage: { reasoningTokens: normalizeUsage(data?.usage).reasoningTokens }
+      });
+    }
+    throw aiProviderError(
+      `Запрос ${provider.label} завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`,
+      'HHJA_AI_PROVIDER_HTTP',
+      true
+    );
+  }
+
+  const content = String(data?.choices?.[0]?.message?.content || '').trim();
+  const finishReason = data?.choices?.[0]?.finish_reason || '';
+  if (!content || finishReason === 'length') {
+    const errorDetails = {
+      provider: provider.id,
+      task,
+      status: response.status,
+      error: content ? 'truncated_response' : 'empty_response',
+      attempt,
+      maxAttempts,
+      finishReason,
+      maxTokens: requestBody.max_tokens,
+      responseSummary: summarizeAiResponse(data)
+    };
+    await appendAgentLog('ai_request_error', errorDetails);
+    if (provider.id === 'groq') await appendAgentLog('groq_request_error', errorDetails);
+    if (task === 'resume_profile_build' || task === 'resume_profile_edit') {
+      await appendAgentLog('resume_profile_request_error', {
+        ...errorDetails,
+        usage: { reasoningTokens: normalizeUsage(data?.usage).reasoningTokens }
+      });
+    }
+    throw aiProviderError(
+      formatAiEmptyResponseError({
+        providerLabel: provider.label,
+        task,
+        status: response.status,
+        finishReason,
+        attempt,
+        maxAttempts,
+        maxTokens: requestBody.max_tokens,
+        usage: data?.usage
+      }),
+      'HHJA_AI_PROVIDER_INVALID_OUTPUT',
+      true
+    );
+  }
+
+  const usage = normalizeUsage(data?.usage);
+  const responseDetails = {
+    provider: provider.id,
+    task,
+    responseLength: content.length,
+    responseHash: hashText(content),
+    finishReason,
+    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+    model: data?.model || requestBody.model,
+    usage,
+    attempt
+  };
+  await appendAgentLog('ai_response_payload', responseDetails);
+  if (provider.id === 'groq') await appendAgentLog('groq_response_payload', responseDetails);
+  let structured = null;
+  if (task === 'test_assist') {
+    structured = parseEmployerAnswerResponse(content);
+  } else if (task === 'cover_letter' && AI_PROVIDERS.getTaskCapability(provider.id, task).validateCoverLetter) {
+    const invalidReason = validateProviderCoverLetter(content);
+    if (invalidReason) {
+      throw aiProviderError(
+        `${provider.label} вернул неподходящее сопроводительное письмо: ${invalidReason}`,
+        'HHJA_AI_PROVIDER_INVALID_OUTPUT',
+        true
+      );
+    }
+  }
+  return { provider, requestBody, content, data, usage, finishReason, structured };
+}
+
+async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false }, options = {}) {
   const {
+    aiProvider,
+    aiProviderCredentials = {},
+    aiFallbackProvider,
+    aiFallbackEnabled,
+    aiFallbackToGroq = false,
     groqApiKey,
     expectedSalary = '',
     employmentPreference = DEFAULTS.employmentPreference,
@@ -1467,21 +1792,24 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     telegramUsername = DEFAULTS.telegramUsername,
     coverPrompt = DEFAULTS.coverPrompt,
     employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
-    groqCooldownUntil = ''
-  } = await storageGet(['groqApiKey', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'groqCooldownUntil']);
-
-  if (!groqApiKey) {
-    throw new Error('Ключ Groq API не настроен');
-  }
-
-  const cooldownUntilMs = Date.parse(groqCooldownUntil || 0);
-  if (Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now()) {
-    await appendAgentLog('groq_request_skipped', {
-      task,
-      reason: 'cooldown',
-      cooldownUntil: groqCooldownUntil
-    });
-    throw new Error(`Groq временно ограничил запросы. Пауза до ${groqCooldownUntil}.`);
+  } = await storageGet(['aiProvider', 'aiProviderCredentials', 'aiFallbackProvider', 'aiFallbackEnabled', 'aiFallbackToGroq', 'groqApiKey', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt']);
+  const settings = {
+    aiProvider,
+    aiProviderCredentials,
+    aiFallbackProvider,
+    aiFallbackEnabled,
+    aiFallbackToGroq,
+    groqApiKey
+  };
+  const primaryProviderId = AI_PROVIDERS.normalizeProviderId(options.providerId || aiProvider);
+  const primaryProvider = AI_PROVIDERS.getProvider(primaryProviderId);
+  const primaryApiKey = String(
+    Object.prototype.hasOwnProperty.call(options, 'apiKey')
+      ? options.apiKey
+      : AI_PROVIDERS.getApiKey(settings, primaryProviderId)
+  ).trim();
+  if (!primaryApiKey) {
+    throw aiProviderError(`Ключ ${primaryProvider.label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED', false);
   }
 
   const profileState = await storageGet([
@@ -1523,55 +1851,18 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     questions: Array.isArray(questions) ? questions : [],
     coverLetterRequested: Boolean(coverLetterRequested)
   };
-  const model = getGroqModelForTask(task);
-  await appendAgentLog('groq_request_start', {
+  const messages = buildGroqMessages({
     task,
-    model,
+    ...payloadParts
+  });
+  const logDetails = {
     vacancyTextLength: String(vacancyText).length,
     extraTextLength: String(extraText).length,
     questionCount: payloadParts.questions.length,
     coverLetterRequested: payloadParts.coverLetterRequested,
     resumeSourceLength: String(resumeSourceText).length,
     resumeBriefLength: payloadParts.resumeText.length,
-    resumeBriefVersion: resumeContext.version
-  });
-
-  const requestBody = {
-    model,
-    messages: buildGroqMessages({
-      task,
-      ...payloadParts
-    }),
-    temperature: 0.2,
-    max_tokens: getMaxTokensForTask(task)
-  };
-  if (task === 'test_assist') requestBody.response_format = EMPLOYER_ANSWER_RESPONSE_FORMAT;
-  if (task === 'test_assist') {
-    await appendAgentLog('groq_test_assist_request', {
-      task,
-      endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-      method: 'POST',
-      requestBody: {
-        model: requestBody.model,
-        messages: requestBody.messages,
-        temperature: requestBody.temperature,
-        max_tokens: requestBody.max_tokens,
-        response_format: requestBody.response_format
-      }
-    });
-  }
-  await appendAgentLog('groq_request_payload', {
-    task,
-    endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-    method: 'POST',
-    model: requestBody.model,
-    messageCount: requestBody.messages.length,
-    messageLengths: requestBody.messages.map((message) => ({
-      role: message.role,
-      contentLength: String(message.content || '').length
-    })),
-    temperature: requestBody.temperature,
-    maxTokens: requestBody.max_tokens,
+    resumeBriefVersion: resumeContext.version,
     componentLengths: {
       resumeSource: resumeContext.sourceLength,
       resumeBrief: payloadParts.resumeText.length,
@@ -1589,85 +1880,109 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     },
     resumeBriefVersion: resumeContext.version,
     resumeBriefCached: resumeContext.cached
-  });
-  const { response, responseText, data } = await fetchGroqCompletion({ task, model, groqApiKey, requestBody });
-  if (!response.ok) {
-    if (response.status === 429) {
-      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
-      const cooldownUntil = new Date(Date.now() + retryAfterMs).toISOString();
-      await storageSet({ groqCooldownUntil: cooldownUntil });
-      await appendAgentLog('groq_rate_limit_cooldown', { task, cooldownUntil, retryAfterMs });
+  };
+
+  let completion;
+  let fallbackReason = '';
+  try {
+    completion = await executeAiProviderRequest({
+      providerId: primaryProviderId,
+      apiKey: primaryApiKey,
+      task,
+      messages,
+      logDetails
+    });
+  } catch (error) {
+    const fallbackProviderId = AI_PROVIDERS.normalizeFallbackProvider(settings, primaryProviderId);
+    const fallbackApiKey = fallbackProviderId
+      ? AI_PROVIDERS.getApiKey(settings, fallbackProviderId)
+      : '';
+    const canFallback = options.disableFallback !== true &&
+      Boolean(fallbackProviderId) &&
+      Boolean(fallbackApiKey) &&
+      error?.aiFallbackEligible === true;
+    if (!canFallback) throw error;
+    fallbackReason = error.code || 'HHJA_AI_PROVIDER_ERROR';
+    await appendAgentLog('ai_provider_fallback_start', {
+      task,
+      fromProvider: primaryProviderId,
+      toProvider: fallbackProviderId,
+      reason: fallbackReason
+    });
+    try {
+      completion = await executeAiProviderRequest({
+        providerId: fallbackProviderId,
+        apiKey: fallbackApiKey,
+        task,
+        messages,
+        logDetails
+      });
+      await appendAgentLog('ai_provider_fallback_complete', {
+        task,
+        fromProvider: primaryProviderId,
+        toProvider: fallbackProviderId,
+        reason: fallbackReason
+      });
+    } catch (fallbackError) {
+      await appendAgentLog('ai_provider_fallback_error', {
+        task,
+        fromProvider: primaryProviderId,
+        toProvider: fallbackProviderId,
+        reason: fallbackReason,
+        errorCode: fallbackError?.code || 'HHJA_UNKNOWN_ERROR'
+      });
+      throw fallbackError;
     }
-    await appendAgentLog('groq_request_error', {
-      task,
-      status: response.status,
-      responseTextLength: responseText.length,
-      responseTextHash: hashText(responseText),
-      attempt: 1,
-      maxAttempts: 1
-    });
-    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
   }
 
-  const content = data?.choices?.[0]?.message?.content?.trim();
-  const finishReason = data?.choices?.[0]?.finish_reason || '';
-  if (!content || finishReason === 'length') {
-    await appendAgentLog('groq_request_error', {
-      task,
-      status: response.status,
-      error: content ? 'truncated_response' : 'empty_response',
-      attempt: 1,
-      maxAttempts: 1,
-      finishReason,
-      maxTokens: requestBody.max_tokens,
-      responseSummary: summarizeGroqResponse(data)
-    });
-    throw new Error(formatGroqEmptyResponseError({
-      task,
-      status: response.status,
-      finishReason,
-      attempt: 1,
-      maxAttempts: 1,
-      maxTokens: requestBody.max_tokens,
-      usage: data?.usage
-    }));
-  }
-
-  const usage = normalizeUsage(data?.usage);
-  await appendAgentLog('groq_response_payload', {
-    task,
-    responseLength: content.length,
-    responseHash: hashText(content),
-    finishReason,
-    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
-    model: data?.model || model,
-    usage,
-    attempt: 1
-  });
+  const { content, data, usage, finishReason, provider } = completion;
   if (task === 'test_assist') {
-    const structured = parseEmployerAnswerResponse(content);
-    await appendAgentLog('groq_test_assist_response', {
+    const structured = completion.structured;
+    await appendAgentLog('ai_test_assist_response', {
+      provider: provider.id,
       task,
       answerCount: structured.answers.length,
       coverLetterLength: structured.coverLetter.length,
       finishReason,
-      model: data?.model || model,
+      model: data?.model || completion.requestBody.model,
       usage,
       attempt: 1
     });
-    await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
-    return { text: content, ...structured, usage, fallbackReason: '' };
+    if (provider.id === 'groq') {
+      await appendAgentLog('groq_test_assist_response', {
+        task,
+        answerCount: structured.answers.length,
+        coverLetterLength: structured.coverLetter.length,
+        finishReason,
+        model: data?.model || completion.requestBody.model,
+        usage,
+        attempt: 1
+      });
+    }
+    await appendAgentLog('ai_request_complete', { provider: provider.id, task, responseLength: content.length, usage, attempt: 1 });
+    if (provider.id === 'groq') {
+      await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
+    }
+    return { text: content, ...structured, provider: provider.id, usage, fallbackReason };
   }
-  await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
-  return { text: content, answers: [], coverLetter: content, usage, fallbackReason: '' };
+  await appendAgentLog('ai_request_complete', { provider: provider.id, task, responseLength: content.length, usage, attempt: 1 });
+  if (provider.id === 'groq') {
+    await appendAgentLog('groq_request_complete', { task, responseLength: content.length, usage, attempt: 1 });
+  }
+  return { text: content, answers: [], coverLetter: content, provider: provider.id, usage, fallbackReason };
 }
 
-async function testGroq() {
-  const result = await callGroq({
+async function testAiProvider(providerId, apiKey, hasApiKeyOverride = false) {
+  const options = {
+    providerId,
+    disableFallback: true
+  };
+  if (hasApiKeyOverride) options.apiKey = apiKey;
+  const result = await callAi({
     task: 'cover_letter',
     vacancyText: 'Вакансия: Java developer. Требуется знание Spring Boot и SQL.'
-  });
-  return { ok: true, sampleLength: result.text.length };
+  }, options);
+  return { ok: true, provider: result.provider, sampleLength: result.text.length };
 }
 
 async function getTabDocumentReadyState(tabId) {
@@ -2211,7 +2526,14 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
 }
 
 async function startAutoApplyFromActiveTab() {
-  globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet(['groqApiKey', 'resumeUrl', 'coverPrompt', 'employerQuestionPrompt']));
+  globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet([
+    'aiProvider',
+    'aiProviderCredentials',
+    'groqApiKey',
+    'resumeUrl',
+    'coverPrompt',
+    'employerQuestionPrompt'
+  ]));
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
     throw new Error('Перед запуском откликов откройте страницу поиска вакансий или форму отклика на hh.ru.');
@@ -2315,7 +2637,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'GENERATE_COVER_LETTER': {
-        const result = await callGroq({
+        const result = await callAi({
           task: message.task || 'cover_letter',
           vacancyText: message.vacancyText || '',
           extraText: message.extraText || '',
@@ -2350,15 +2672,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true, ...result });
         break;
       }
+      case 'TEST_AI_PROVIDER': {
+        const result = await testAiProvider(
+          message.providerId,
+          message.apiKey,
+          Object.prototype.hasOwnProperty.call(message, 'apiKey')
+        );
+        sendResponse(result);
+        break;
+      }
       case 'TEST_GROQ': {
-        const result = await testGroq();
+        const result = await testAiProvider('groq');
         sendResponse(result);
         break;
       }
       case 'REFRESH_RESUMES_NOW': {
         const { resumeUrl } = await storageGet(['resumeUrl']);
         const resumeMissing = globalThis.HHJA_CONFIG_READINESS
-          .evaluate({ resumeUrl, groqApiKey: 'unused', coverPrompt: 'unused', employerQuestionPrompt: 'unused' })
+          .evaluate({
+            aiProvider: 'groq',
+            aiProviderCredentials: { groq: { apiKey: 'unused' } },
+            resumeUrl,
+            coverPrompt: 'unused',
+            employerQuestionPrompt: 'unused'
+          })
           .missing.some((item) => item.code === 'resume_url');
         if (resumeMissing) {
           throw new Error('Укажите ссылку на резюме в настройках');

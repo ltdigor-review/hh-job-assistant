@@ -46,7 +46,9 @@ function isAutoApplyInProgress(runState = {}, tabState = {}) {
   return isActiveRun(runState) || tabState.autoApplyInProgress === true;
 }
 
-function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false, readiness = { ready: true, missing: [] } }) {
+function deriveStatus({ runState = {}, tabState = {}, aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false }, readiness = { ready: true, missing: [] } }) {
+  const providerLabel = aiProviderStatus.label ||
+    `${String(aiProviderStatus.provider || '').charAt(0).toUpperCase()}${String(aiProviderStatus.provider || '').slice(1)}`;
   const lastError = localizeError(runState.lastError);
   if (runState.state === 'error') {
     return {
@@ -120,7 +122,7 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false, readin
     };
   }
 
-  if (!hasGroqKey) {
+  if (!aiProviderStatus.configured) {
     return {
       tone: 'warn',
       title: 'ГОТОВО, без автоответов',
@@ -131,7 +133,7 @@ function deriveStatus({ runState = {}, tabState = {}, hasGroqKey = false, readin
   return {
     tone: 'ok',
     title: 'ГОТОВО',
-    detail: 'hh.ru открыт · Groq подключен'
+    detail: `hh.ru открыт · ${providerLabel} подключен`
   };
 }
 
@@ -163,7 +165,7 @@ function deriveContinueTitle({ activeRun, tabReady, canContinue }) {
 export function derivePopupView({
   runState = {},
   tabState = {},
-  hasGroqKey = false,
+  aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false },
   readiness = { ready: true, missing: [] }
 } = {}) {
   const activeRun = isAutoApplyInProgress(runState, tabState);
@@ -171,7 +173,7 @@ export function derivePopupView({
   const canContinue = tabReady && tabState.canContinueAutoApply === true;
   const restartLabel = RESTART_LABEL_STATES.has(runState.state);
   return {
-    status: deriveStatus({ runState, tabState, hasGroqKey, readiness }),
+    status: deriveStatus({ runState, tabState, aiProviderStatus, readiness }),
     currentAction: deriveCurrentAction(runState),
     buttons: {
       autoApplyDisabled: activeRun || !readiness.ready || !tabReady || !tabState.canStartAutoApply,

@@ -102,7 +102,8 @@
         margin: 0;
       }
 
-      .checkbox {
+      .checkbox,
+      .checkbox-row {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -110,8 +111,13 @@
         font-weight: 400;
       }
 
-      .checkbox input {
+      .checkbox input,
+      .checkbox-row input {
         width: auto;
+      }
+
+      .checkbox-row[hidden] {
+        display: none;
       }
 
       .page-head {
@@ -294,9 +300,14 @@
         color: #475569;
       }
 
-      #groqStatus {
+      #aiProviderStatus {
         min-height: 20px;
         margin-top: 8px;
+        color: #475569;
+      }
+
+      #configuredProviders {
+        margin-top: 10px;
         color: #475569;
       }
 
@@ -440,20 +451,29 @@
         </div>
       </div>
 
-      <h2>Groq API</h2>
-      <label for="groqModel">Модель для вопросов работодателя</label>
-      <select id="groqModel" disabled>
-        <option value="openai/gpt-oss-120b">OpenAI GPT-OSS 120B</option>
-      </select>
-      <p class="hint">Сопроводительные письма автоматически отправляются в Llama 3.1 8B Instant.</p>
+      <h2>AI-провайдер</h2>
+      <label for="aiProvider">Основной провайдер</label>
+      <select id="aiProvider"></select>
+      <p id="aiProviderModel" class="hint"></p>
 
-      <label for="groqApiKey">Ключ Groq API</label>
-      <input id="groqApiKey" type="password" autocomplete="off" placeholder="gsk_...">
+      <label for="credentialProvider">Ключ какого провайдера редактировать</label>
+      <select id="credentialProvider"></select>
 
-      <div class="field-action">
-        <button id="testGroq" class="secondary" type="button">Проверить Groq</button>
-        <div id="groqStatus" role="status"></div>
+      <label id="aiProviderApiKeyLabel" for="aiProviderApiKey">API-ключ</label>
+      <input id="aiProviderApiKey" type="password" autocomplete="off">
+      <p id="aiProviderCredentialHint" class="hint"></p>
+
+      <div class="actions field-action">
+        <button id="saveProviderCredential" class="secondary" type="button">Сохранить ключ</button>
+        <button id="deleteProviderCredential" class="secondary" type="button">Удалить ключ</button>
+        <button id="testAiProvider" class="secondary" type="button">Проверить провайдера</button>
       </div>
+      <div id="aiProviderStatus" role="status"></div>
+      <div id="configuredProviders" role="status"></div>
+
+      <label for="aiFallbackProvider">Резервный провайдер</label>
+      <select id="aiFallbackProvider"></select>
+      <p class="hint">Повторяет только подходящие неуспешные запросы. Нужен сохранённый ключ.</p>
 
       <h2>Промпты</h2>
 
@@ -472,6 +492,7 @@
     <script src="error-text.js"></script>
     <script src="log-sanitize.js"></script>
     <script src="agent-log.js"></script>
+    <script src="ai-providers.js"></script>
     <script src="defaults.js"></script>
     <script src="options.js"></script>
   </body>

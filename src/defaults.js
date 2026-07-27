@@ -1,5 +1,10 @@
 (function installDefaults() {
   globalThis.HHJA_DEFAULTS = {
+  aiProvider: 'qwen',
+  aiFallbackProvider: '',
+  aiFallbackToGroq: false,
+    aiProviderCredentials: {},
+    aiProviderCooldowns: {},
     groqModel: 'openai/gpt-oss-120b',
     resumeText: '',
     resumeUrl: '',
@@ -21,7 +26,8 @@
     groqCooldownUntil: '',
     aiQuotaUsage: {
       utcDay: '',
-      models: {}
+      models: {},
+      providers: {}
     },
     expectedSalary: '',
     telegramUsername: '',

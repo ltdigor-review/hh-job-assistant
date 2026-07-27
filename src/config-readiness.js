@@ -1,21 +1,36 @@
 (function installConfigReadiness() {
-  const REQUIRED = [
-    ['groq_api_key', 'ключ Groq API', (value) => Boolean(String(value || '').trim())],
-    ['resume_url', 'ссылка на резюме hh.ru', (value) => {
+  function providerId(config) {
+    if (!config.aiProvider && String(config.groqApiKey || '').trim()) return 'groq';
+    return globalThis.HHJA_AI_PROVIDERS?.normalizeProviderId?.(config.aiProvider) ||
+      (config.aiProvider === 'groq' ? 'groq' : 'qwen');
+  }
+
+  function providerApiKey(config) {
+    const id = providerId(config);
+    return globalThis.HHJA_AI_PROVIDERS?.getApiKey?.(config, id) ||
+      String(config.aiProviderCredentials?.[id]?.apiKey || '').trim() ||
+      (id === 'groq' ? String(config.groqApiKey || '').trim() : '');
+  }
+
+  function evaluate(config = {}) {
+    const selectedProvider = providerId(config);
+    const providerLabel = globalThis.HHJA_AI_PROVIDERS?.getProvider?.(selectedProvider)?.label ||
+      `${selectedProvider.charAt(0).toUpperCase()}${selectedProvider.slice(1)}`;
+    const required = [
+      ['ai_provider_api_key', `ключ ${providerLabel} API`, () => Boolean(providerApiKey(config))],
+      ['resume_url', 'ссылка на резюме hh.ru', (value) => {
       try {
         const url = new URL(String(value || '').trim());
         return url.protocol === 'https:' && (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) && /^\/resume\/[^/?#]+/.test(url.pathname);
       } catch {
         return false;
       }
-    }]
-  ];
-
-  function evaluate(config = {}) {
-    const missing = REQUIRED
-      .filter(([code, label, valid]) => !valid(config[code === 'groq_api_key' ? 'groqApiKey' : code === 'resume_url' ? 'resumeUrl' : code.replace(/_([a-z])/g, (_, char) => char.toUpperCase())]))
+      }]
+    ];
+    const missing = required
+      .filter(([code, , valid]) => !valid(code === 'resume_url' ? config.resumeUrl : undefined))
       .map(([code, label]) => ({ code, label }));
-    return { ready: missing.length === 0, missing };
+    return { ready: missing.length === 0, missing, provider: selectedProvider };
   }
 
   function assertReady(config = {}) {

@@ -50,7 +50,11 @@ const FOLLOWUP_CONFIRM_SETTLE_MS = 300;
 const POST_FILL_SETTLE_MS = 1000;
 const POST_SUBMIT_SETTLE_MS = 5000;
 const SUBMIT_CONFIRM_TIMEOUT_MS = 15000;
-const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
+const AI_PROVIDER_IDS = Object.keys(globalThis.HHJA_AI_PROVIDERS?.PROVIDERS || {});
+const RUNTIME_MESSAGE_TIMEOUT_MS =
+  globalThis.HHJA_AI_PROVIDERS?.getRequestChainTimeoutMs?.(
+    AI_PROVIDER_IDS.length > 0 ? AI_PROVIDER_IDS : ['qwen', 'groq']
+  ) ?? 170000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
 const AUTO_APPLY_STOP_BEFORE_SUBMIT_TTL_MS = 15 * 60 * 1000;
 const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
@@ -1960,6 +1964,8 @@ async function getConfig() {
     'employmentPreference',
     'workFormatPreference',
     'expectedSalary',
+    'aiProvider',
+    'aiProviderCredentials',
     'groqApiKey',
     'resumeUrl',
     'coverPrompt',
@@ -1972,6 +1978,8 @@ async function getConfig() {
     employmentPreference: normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     expectedSalary: String(values.expectedSalary || '').trim(),
+    aiProvider: values.aiProvider,
+    aiProviderCredentials: values.aiProviderCredentials,
     groqApiKey: values.groqApiKey,
     resumeUrl: values.resumeUrl,
     coverPrompt: values.coverPrompt,
@@ -1997,7 +2005,7 @@ async function generateCoverLetter(vacancyText) {
     vacancyText
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Запрос сопроводительного письма Groq не уложился во время.',
+    timeoutMessage: 'Запрос сопроводительного письма к AI-провайдеру не уложился во время.',
     cancelOnStop: true
   });
   if (!response?.ok) {
@@ -2006,30 +2014,15 @@ async function generateCoverLetter(vacancyText) {
   const text = sanitizeGeneratedText(response.text);
   const invalidReason = getCoverLetterInvalidReason(text);
   if (invalidReason) {
-    throw new Error(`Groq вернул неподходящее сопроводительное письмо: ${invalidReason}`);
+    throw new Error(`AI-провайдер вернул неподходящее сопроводительное письмо: ${invalidReason}`);
   }
   return text;
-}
-
-function isMissingGroqKeyError(error) {
-  return /groq api key is not configured|ключ groq api не настроен/i.test(error instanceof Error ? error.message : String(error));
-}
-
-function isRecoverableGroqError(error) {
-  return /groq request failed: 429|groq .*timed out|rate limit|запрос groq завершился ошибкой: 429|запрос groq не уложился|запрос .* groq не уложился|groq временно ограничил запросы|пауза до|cooldown|дневной ai-бюджет|квота .*исчерпан|минутн.*квот|groq вернул (?:пустой ответ|неподходящее сопроводительное письмо|некорректный json|неполный структурированный|дублирующиеся)/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function isFatalAutoApplyError(error) {
   return /login|captcha|anti-bot|слишком много запросов|не робот|страница входа|антибот/i.test(
     error instanceof Error ? error.message : String(error)
   );
-}
-
-function missingGroqMessage(kind) {
-  if (kind === 'test') {
-    return 'Пропущено: не указан ключ Groq API, а вакансия требует ответы на вопросы работодателя или тест.';
-  }
-  return 'Пропущено: не указан ключ Groq API, а вакансия требует сопроводительное письмо.';
 }
 
 async function generateTestAssistance(vacancyText, questions, coverLetterRequested) {
@@ -2041,7 +2034,7 @@ async function generateTestAssistance(vacancyText, questions, coverLetterRequest
     coverLetterRequested
   }, {
     timeoutMs: getRuntimeMessageTimeoutMs(),
-    timeoutMessage: 'Запрос помощи с вопросами Groq не уложился во время.',
+    timeoutMessage: 'Запрос помощи с вопросами к AI-провайдеру не уложился во время.',
     cancelOnStop: true
   });
   if (!response?.ok) {
@@ -2165,7 +2158,7 @@ function parseLegacyStructuredAnswers(text, expectedDescriptors) {
     const label = descriptor.kind === 'choice' ? 'Choice group' : 'Text question';
     const marker = new RegExp(`(?:^|\\n)\\s*${label}\\s+${legacyIndex}\\s*:\\s*`, 'ig');
     const matches = [...source.matchAll(marker)];
-    if (matches.length !== 1) throw new Error('Groq вернул неоднозначные или пропущенные метки ответов');
+    if (matches.length !== 1) throw new Error('AI-провайдер вернул неоднозначные или пропущенные метки ответов');
     const start = matches[0].index + matches[0][0].length;
     const remaining = source.slice(start);
     const end = remaining.search(/\n\s*(?:Text question|Choice group)\s+\d+\s*:/i);
@@ -2183,13 +2176,13 @@ function parseLegacyStructuredAnswers(text, expectedDescriptors) {
 
 function validateStructuredAssistance(response, expectedDescriptors, { coverLetterRequested = false } = {}) {
   if (!Array.isArray(response?.answers) && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
-    throw new Error('Groq не вернул обязательный структурированный массив answers');
+    throw new Error('AI-провайдер не вернул обязательный структурированный массив answers');
   }
   const sourceAnswers = Array.isArray(response?.answers)
     ? response.answers
     : parseLegacyStructuredAnswers(response?.text, expectedDescriptors);
   if (sourceAnswers.length !== expectedDescriptors.length) {
-    throw new Error('Groq вернул неправильное количество структурированных ответов');
+    throw new Error('AI-провайдер вернул неправильное количество структурированных ответов');
   }
   const expectedById = new Map(expectedDescriptors.map((descriptor) => [descriptor.id, descriptor]));
   const seen = new Set();
@@ -2198,19 +2191,19 @@ function validateStructuredAssistance(response, expectedDescriptors, { coverLett
     const id = cleanText(item?.id);
     const descriptor = expectedById.get(id);
     if (!descriptor || seen.has(id) || typeof item.answer !== 'string' || !Array.isArray(item.selectedOptions)) {
-      throw new Error('Groq вернул неизвестный или дублирующийся идентификатор ответа');
+      throw new Error('AI-провайдер вернул неизвестный или дублирующийся идентификатор ответа');
     }
     seen.add(id);
     const selectedOptions = item.selectedOptions.map(cleanText).filter(Boolean);
     if (descriptor.kind === 'text' && selectedOptions.length > 0) {
-      throw new Error('Groq смешал текстовый ответ и варианты выбора');
+      throw new Error('AI-провайдер смешал текстовый ответ и варианты выбора');
     }
     if (descriptor.kind === 'choice') {
       if (selectedOptions.some((option) => !descriptor.options.includes(option))) {
-        throw new Error('Groq вернул вариант, которого нет в форме HH');
+        throw new Error('AI-провайдер вернул вариант, которого нет в форме HH');
       }
       if ((descriptor.inputType === 'radio' && selectedOptions.length !== 1) || selectedOptions.length === 0) {
-        throw new Error('Groq не выбрал допустимый вариант формы HH');
+        throw new Error('AI-провайдер не выбрал допустимый вариант формы HH');
       }
     }
     answers.set(id, {
@@ -2219,9 +2212,9 @@ function validateStructuredAssistance(response, expectedDescriptors, { coverLett
       selectedOptions
     });
   }
-  if (seen.size !== expectedById.size) throw new Error('Groq пропустил обязательный идентификатор ответа');
+  if (seen.size !== expectedById.size) throw new Error('AI-провайдер пропустил обязательный идентификатор ответа');
   const coverLetter = cleanText(response?.coverLetter || '');
-  if (!coverLetterRequested && coverLetter) throw new Error('Groq вернул лишнее сопроводительное письмо');
+  if (!coverLetterRequested && coverLetter) throw new Error('AI-провайдер вернул лишнее сопроводительное письмо');
   return { answers, coverLetter };
 }
 

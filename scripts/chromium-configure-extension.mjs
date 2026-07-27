@@ -98,6 +98,9 @@ function pickConfig(fileEnv) {
   };
 
   const patch = {};
+  const aiProvider = read('HHJA_AI_PROVIDER');
+  const aiApiKey = read('HHJA_AI_API_KEY');
+  const qwenApiKey = read('HHJA_QWEN_API_KEY', 'QWEN_API_KEY');
   const groqApiKey = read('HHJA_GROQ_API_KEY', 'GROQ_API_KEY');
   const groqModel = read('HHJA_GROQ_MODEL', 'GROQ_MODEL');
   const resumeUrl = read('HHJA_RESUME_URL', 'RESUME_URL');
@@ -106,6 +109,19 @@ function pickConfig(fileEnv) {
   const delayMinMs = read('HHJA_DELAY_MIN_MS');
   const delayMaxMs = read('HHJA_DELAY_MAX_MS');
 
+  const normalizedProvider = ['qwen', 'groq'].includes(aiProvider.toLowerCase())
+    ? aiProvider.toLowerCase()
+    : qwenApiKey
+      ? 'qwen'
+      : groqApiKey
+        ? 'groq'
+        : '';
+  const credentials = {};
+  if (qwenApiKey) credentials.qwen = { apiKey: qwenApiKey };
+  if (groqApiKey) credentials.groq = { apiKey: groqApiKey };
+  if (normalizedProvider && aiApiKey) credentials[normalizedProvider] = { apiKey: aiApiKey };
+  if (normalizedProvider) patch.aiProvider = normalizedProvider;
+  if (Object.keys(credentials).length > 0) patch.aiProviderCredentials = credentials;
   if (groqApiKey) patch.groqApiKey = groqApiKey;
   if (groqModel) patch.groqModel = groqModel;
   if (resumeUrl) patch.resumeUrl = resumeUrl;
@@ -249,12 +265,20 @@ async function waitForExtensionTarget(session) {
 async function setExtensionStorage(session, sessionId, patch) {
   const expression = `new Promise((resolve) => {
     const patch = ${JSON.stringify(patch)};
-    chrome.storage.local.set(patch, () => {
-      chrome.storage.local.get(Object.keys(patch), (value) => {
-        resolve(Object.fromEntries(Object.entries(value).map(([key, item]) => [
-          key,
-          key === 'groqApiKey' ? Boolean(item) : item
-        ])));
+    chrome.storage.local.get(['aiProviderCredentials'], (current) => {
+      if (patch.aiProviderCredentials) {
+        patch.aiProviderCredentials = {
+          ...(current.aiProviderCredentials || {}),
+          ...patch.aiProviderCredentials
+        };
+      }
+      chrome.storage.local.set(patch, () => {
+        chrome.storage.local.get(Object.keys(patch), (value) => {
+          resolve(Object.fromEntries(Object.entries(value).map(([key, item]) => [
+            key,
+            key === 'groqApiKey' || key === 'aiProviderCredentials' ? Boolean(item) : item
+          ])));
+        });
       });
     });
   })`;
@@ -303,7 +327,7 @@ try {
     configuredKeys: Object.keys(patch).sort(),
     storedEvidence: Object.fromEntries(Object.entries(stored).map(([key, value]) => [
       key,
-      key === 'groqApiKey' ? Boolean(value) : value
+      key === 'groqApiKey' || key === 'aiProviderCredentials' ? Boolean(value) : value
     ]))
   }, null, 2));
 } catch (error) {

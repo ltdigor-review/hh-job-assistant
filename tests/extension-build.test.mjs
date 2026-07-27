@@ -66,12 +66,14 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.host_permissions.includes('https://hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://*.hh.ru/*'));
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
+  assert.ok(manifest.host_permissions.includes('https://token-plan.ap-southeast-1.maas.aliyuncs.com/*'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
   assert.deepEqual(manifest.content_scripts[0].js, [
     'src/log-sanitize.js',
     'src/agent-log.js',
     'src/error-text.js',
       'src/action-overlay.js',
+      'src/ai-providers.js',
       'src/defaults.js',
       'src/config-readiness.js',
     'src/content-text.js',
@@ -2303,13 +2305,28 @@ test('resume profile auto refresh does not require HH to display exact age', asy
   assert.equal(profileRequest.max_tokens, 2400);
   assert.match(profileRequest.messages[0].content, /не длиннее 6000 символов/);
 
+  delete localData.groqApiKey;
+  localData.aiProvider = 'qwen';
+  localData.aiProviderCredentials = { qwen: { apiKey: 'sk-qwen-test' } };
+  localData.aiFallbackProvider = '';
+  localData.aiFallbackToGroq = false;
   const audited = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
   assert.equal(audited.ok, true);
   assert.equal(audited.audit.checks.resumeProfileAvailable, true);
   assert.equal(audited.audit.checks.resumeProfileFresh, true);
   assert.equal(audited.audit.checks.contactConfigured, true);
   assert.equal(audited.audit.checks.expectedSalaryMatchesResume, true);
+  assert.equal(audited.audit.checks.aiProviderKeyConfigured, true);
+  assert.equal(audited.audit.checks.fallbackProviderReady, true);
   assert.equal(audited.audit.ready, true);
+
+  localData.aiFallbackProvider = 'groq';
+  localData.aiFallbackToGroq = true;
+  const fallbackAudit = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(fallbackAudit.ok, true);
+  assert.equal(fallbackAudit.audit.checks.fallbackProviderReady, false);
+  assert.ok(fallbackAudit.audit.issues.includes('fallbackProviderReady'));
+  assert.equal(fallbackAudit.audit.ready, false);
 });
 
 test('Groq prompt caps large payload components', async () => {
@@ -2617,7 +2634,9 @@ test('repo script can configure the persistent Chromium extension storage', asyn
   assert.match(js, /chrome\.storage\.local\.set\(patch/);
   assert.match(js, /configuredKeys/);
   assert.match(js, /storedEvidence/);
-  assert.match(js, /key === 'groqApiKey' \? Boolean/);
+  assert.match(js, /key === 'groqApiKey' \|\| key === 'aiProviderCredentials' \? Boolean/);
+  assert.match(js, /HHJA_AI_PROVIDER/);
+  assert.match(js, /HHJA_AI_API_KEY/);
   assert.doesNotMatch(js, /console\.log\(.*groqApiKey.*patch/s);
 });
 
@@ -2886,7 +2905,7 @@ test('popup view model reports exact readiness and blocker text', async () => {
     derivePopupView({
       runState: { state: 'idle' },
       tabState: { kind: 'ready', canStartAutoApply: true },
-      hasGroqKey: true
+      aiProviderStatus: { provider: 'groq', configured: true }
     }).status,
     { tone: 'ok', title: 'ГОТОВО', detail: 'hh.ru открыт · Groq подключен' }
   );
@@ -2894,7 +2913,7 @@ test('popup view model reports exact readiness and blocker text', async () => {
   const withoutGroq = derivePopupView({
     runState: { state: 'idle' },
     tabState: { kind: 'ready', canStartAutoApply: true },
-    hasGroqKey: false
+    aiProviderStatus: { provider: 'qwen', configured: false }
   });
   assert.equal(withoutGroq.status.tone, 'warn');
   assert.equal(withoutGroq.status.title, 'ГОТОВО, без автоответов');
@@ -3104,10 +3123,19 @@ test('trusted page shortcut shares a single-flight live start guard', async () =
   assert.match(content, /start_run_duplicate_ignored/);
 });
 
-test('options preserve masked Groq key unless user edits the key field', async () => {
+test('options preserve generic credential drafts and selected fallback provider', async () => {
   const source = await readFile(new URL('src/options.js', root), 'utf8');
+  const providersSource = await readFile(new URL('src/ai-providers.js', root), 'utf8');
+  vm.runInThisContext(providersSource);
   const handlers = new Map();
   const storage = {
+    aiProvider: 'qwen',
+    aiFallbackProvider: 'groq',
+    aiFallbackToGroq: true,
+    aiProviderCredentials: {
+      qwen: { apiKey: 'sk_qwen_saved' },
+      groq: { apiKey: 'gsk_saved' }
+    },
     groqApiKey: 'gsk_saved',
     groqModel: 'llama-3.3-70b-versatile',
     resumeUrl: '',
@@ -3171,14 +3199,20 @@ test('options preserve masked Groq key unless user edits the key field', async (
     return element;
   }
 
-  const ids = ['groqApiKey', 'groqModel', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'groqStatus', 'save', 'testGroq'];
+  const ids = ['aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
+  let delayedProviderTestResolver = null;
+  let delayNextProviderTest = false;
   let debugRuns = [];
   const downloadedRunIds = [];
   const createdLinks = [];
 
   globalThis.HHJA_DEFAULTS = {
+    aiProvider: 'qwen',
+    aiFallbackProvider: '',
+    aiFallbackToGroq: false,
+    aiProviderCredentials: {},
     groqModel: 'llama-3.3-70b-versatile',
     resumeText: '',
     resumeUrl: '',
@@ -3262,10 +3296,22 @@ test('options preserve masked Groq key unless user edits the key field', async (
     },
     runtime: {
       async sendMessage(message) {
-        if (message?.type === 'TEST_GROQ') {
-          groqKeySeenByTest = storage.groqApiKey || null;
+        if (message?.type === 'TEST_AI_PROVIDER') {
+          groqKeySeenByTest = message.apiKey ||
+            storage.aiProviderCredentials?.[message.providerId]?.apiKey ||
+            null;
+          if (delayNextProviderTest) {
+            delayNextProviderTest = false;
+            return new Promise((resolve) => {
+              delayedProviderTestResolver = () => resolve({
+                ok: true,
+                provider: message.providerId,
+                sampleLength: 2
+              });
+            });
+          }
         }
-        return { ok: true, sampleLength: 2 };
+        return { ok: true, provider: message.providerId, sampleLength: 2 };
       }
     }
   };
@@ -3276,13 +3322,22 @@ test('options preserve masked Groq key unless user edits the key field', async (
 
     assert.equal(elements.coverPrompt.value, 'default prompt');
     assert.equal(elements.employerQuestionPrompt.value, 'default employer prompt');
+    assert.equal(elements.credentialProvider.value, 'qwen');
+    assert.equal(elements.aiProviderApiKey.value, '********');
+    assert.equal(elements.aiFallbackProvider.value, 'groq');
+    assert.match(elements.configuredProviders.textContent, /Qwen — настроен/);
+    assert.match(elements.configuredProviders.textContent, /Groq — настроен/);
+    assert.doesNotMatch(elements.configuredProviders.textContent, /sk_qwen_saved|gsk_saved/);
+    assert.deepEqual(elements.aiFallbackProvider.children.map((option) => option.value), ['', 'groq']);
 
-    await handlers.get('testGroq:click')();
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    await handlers.get('testAiProvider:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
     assert.equal(groqKeySeenByTest, 'gsk_saved');
 
-    handlers.get('groqApiKey:focus')();
+    handlers.get('aiProviderApiKey:focus')();
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_saved');
@@ -3313,27 +3368,76 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.equal(storage.employerQuestionPrompt, 'custom employer prompt');
     assert.equal(storage.telegramUsername, '@candidate_tg');
 
-    handlers.get('groqApiKey:focus')();
-    elements.groqApiKey.value = 'gsk_new';
-    handlers.get('groqApiKey:input')();
-    await handlers.get('save:click')();
+    elements.credentialProvider.value = 'qwen';
+    handlers.get('credentialProvider:change')();
+    handlers.get('aiProviderApiKey:focus')();
+    elements.aiProviderApiKey.value = 'sk_qwen_new';
+    handlers.get('aiProviderApiKey:input')();
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    handlers.get('aiProviderApiKey:focus')();
+    elements.aiProviderApiKey.value = 'gsk_new';
+    handlers.get('aiProviderApiKey:input')();
+    elements.credentialProvider.value = 'qwen';
+    handlers.get('credentialProvider:change')();
+    assert.equal(elements.aiProviderApiKey.value, 'sk_qwen_new');
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    assert.equal(elements.aiProviderApiKey.value, 'gsk_new');
+    await handlers.get('saveProviderCredential:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, 'gsk_new');
+    assert.equal(storage.aiProviderCredentials.qwen.apiKey, 'sk_qwen_saved');
+    assert.equal(elements.aiProviderApiKey.value, '********');
 
-    handlers.get('groqApiKey:focus')();
-    elements.groqApiKey.value = '';
-    handlers.get('groqApiKey:input')();
-    await handlers.get('save:click')();
+    elements.credentialProvider.value = 'qwen';
+    handlers.get('credentialProvider:change')();
+    await handlers.get('saveProviderCredential:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.aiProviderCredentials.qwen.apiKey, 'sk_qwen_new');
+    assert.equal(storage.aiProviderCredentials.groq.apiKey, 'gsk_new');
+
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    await handlers.get('deleteProviderCredential:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.groqApiKey, '');
+    assert.equal(storage.aiProviderCredentials.qwen.apiKey, 'sk_qwen_new');
+    assert.equal(storage.aiProviderCredentials.groq, undefined);
+    assert.equal(storage.aiFallbackProvider, '');
+    assert.equal(elements.aiFallbackProvider.value, '');
+    assert.deepEqual(elements.aiFallbackProvider.children.map((option) => option.value), ['']);
 
-    elements.groqApiKey.value = '  gsk_test_before_save  ';
-    handlers.get('groqApiKey:input')();
-    await handlers.get('testGroq:click')();
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    elements.aiProviderApiKey.value = '  gsk_test_before_save  ';
+    handlers.get('aiProviderApiKey:input')();
+    await handlers.get('testAiProvider:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(storage.groqApiKey, 'gsk_test_before_save');
+    assert.equal(storage.groqApiKey, '');
     assert.equal(groqKeySeenByTest, 'gsk_test_before_save');
-    assert.equal(elements.groqStatus.textContent, 'Groq работает.');
+    assert.equal(elements.aiProviderStatus.textContent, 'Groq работает.');
+
+    elements.aiProvider.value = 'qwen';
+    handlers.get('aiProvider:change')();
+    assert.equal(elements.aiProviderStatus.textContent, '');
+    elements.aiFallbackProvider.value = 'groq';
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.aiProvider, 'qwen');
+    assert.equal(storage.aiFallbackProvider, 'groq');
+    assert.equal(storage.aiFallbackToGroq, true);
+
+    elements.credentialProvider.value = 'groq';
+    handlers.get('credentialProvider:change')();
+    delayNextProviderTest = true;
+    handlers.get('testAiProvider:click')();
+    assert.equal(typeof delayedProviderTestResolver, 'function');
+    elements.credentialProvider.value = 'qwen';
+    handlers.get('credentialProvider:change')();
+    delayedProviderTestResolver();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(elements.aiProviderStatus.textContent, '');
 
     debugRuns = [
       {
@@ -3374,6 +3478,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     assert.equal(elements.agentDebugStatus.textContent, 'Файл .debug скачан.');
   } finally {
     delete globalThis.HHJA_DEFAULTS;
+    delete globalThis.HHJA_AI_PROVIDERS;
     delete globalThis.HHJA_LOCALIZE_ERROR;
     delete globalThis.HHJobAssistantLog;
     delete globalThis.document;
@@ -3409,18 +3514,21 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(html, /По умолчанию сохраняются 5 запусков/);
   assert.match(html, /выключение настройки очищает всю историю/);
   assert.match(html, /<h2>Промпты<\/h2>/);
-  assert.ok(html.indexOf('<h2>Groq API</h2>') < html.indexOf('<h2>Промпты</h2>'));
+  assert.ok(html.indexOf('<h2>AI-провайдер</h2>') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /id="coverPrompt"/);
   assert.match(html, /<label for="telegramUsername">Ник в Telegram для ответов<\/label>\s*<input id="telegramUsername" type="text" placeholder="@username">/);
   assert.match(js, /telegramUsername: document\.getElementById\('telegramUsername'\)/);
   assert.match(js, /telegramUsername: fields\.telegramUsername\.value\.trim\(\)/);
   assert.match(html, /id="employerQuestionPrompt"/);
   assert.match(html, /Логи/);
-  assert.match(html, /<div class="field-action">\s*<button id="testGroq" class="secondary" type="button">Проверить Groq<\/button>\s*<div id="groqStatus" role="status"><\/div>\s*<\/div>/);
-  assert.ok(html.indexOf('id="testGroq"') < html.indexOf('id="groqStatus"'));
-  assert.ok(html.indexOf('id="groqStatus"') < html.indexOf('<h2>Промпты</h2>'));
+  assert.match(html, /id="saveProviderCredential"/);
+  assert.match(html, /id="deleteProviderCredential"/);
+  assert.match(html, /id="testAiProvider"/);
+  assert.match(html, /id="aiProviderStatus"/);
+  assert.ok(html.indexOf('id="testAiProvider"') < html.indexOf('id="aiProviderStatus"'));
+  assert.ok(html.indexOf('id="aiProviderStatus"') < html.indexOf('<h2>Промпты</h2>'));
   assert.match(html, /<div class="actions">\s*<button id="save" type="button">Сохранить<\/button>\s*<\/div>/);
-  assert.ok(html.indexOf('id="testGroq"') < html.indexOf('<div class="actions">'));
+  assert.ok(html.indexOf('id="testAiProvider"') < html.indexOf('<div class="actions">'));
   assert.match(html, /\.switch-track/);
   assert.match(html, /id="delayMinMs" type="number" min="500" step="250"/);
   assert.match(html, /id="delayMaxMs" type="number" min="500" step="250"/);
@@ -3435,9 +3543,9 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(js, /employerQuestionPrompt/);
   assert.match(js, /new URL\(normalizedResumeUrl\)/);
   assert.match(js, /setCustomValidity\('Укажите ссылку на резюме hh\.ru вида https:\/\/hh\.ru\/resume\/\.\.\.'\)/);
-  assert.match(js, /savedGroqKeyMasked/);
-  assert.match(js, /groqKeyDirty/);
-  assert.match(js, /fields\.groqApiKey\.dataset\.masked !== 'true' && \(!savedGroqKeyMasked \|\| groqKeyDirty\)/);
+  assert.match(js, /credentialDrafts/);
+  assert.match(js, /fields\.aiProviderApiKey\.dataset\.masked === 'true'/);
+  assert.match(js, /aiFallbackProvider/);
   assert.match(js, /Math\.max\(0\.1/);
   assert.match(js, /agentDebugLogsEnabled/);
   assert.match(js, /fields\.agentDebugLogsEnabled\.checked = values\.agentDebugLogsEnabled === true/);
@@ -3461,14 +3569,30 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.doesNotMatch(js, /chatUnreadOnly|chatReplyMode|chatLimit|experimentalFeaturesEnabled|chatAssistantSettings|syncExperimentalSections|auto_send/);
 });
 
-test('options expose fixed Groq task model routing', async () => {
+test('options expose registry-driven credentials and fallback provider controls', async () => {
   const html = await readFile(new URL('src/options.html', root), 'utf8');
   const js = await readFile(new URL('src/options.js', root), 'utf8');
+  const providers = await readFile(new URL('src/ai-providers.js', root), 'utf8');
+  const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
 
-  assert.match(html, /<select id="groqModel" disabled>/);
-  assert.match(html, /value="openai\/gpt-oss-120b"/);
-  assert.match(html, /Сопроводительные письма автоматически отправляются в Llama 3\.1 8B Instant/);
-  assert.doesNotMatch(html, /value="llama-3\.3-70b-versatile"|value="openai\/gpt-oss-20b"/);
-  assert.match(js, /openai\/gpt-oss-120b/);
-  assert.doesNotMatch(html, /<input id="groqModel"/);
+  assert.match(html, /<select id="aiProvider">/);
+  assert.match(html, /<select id="credentialProvider">/);
+  assert.match(html, /id="aiProviderApiKey"/);
+  assert.match(html, /id="saveProviderCredential"/);
+  assert.match(html, /id="deleteProviderCredential"/);
+  assert.match(html, /id="configuredProviders"/);
+  assert.match(html, /<select id="aiFallbackProvider">/);
+  assert.match(html, /id="aiProviderStatus"/);
+  assert.doesNotMatch(html, /id="qwenApiKey"|id="groqApiKey"|id="aiFallbackToGroq"|id="groqStatus"/);
+  assert.match(js, /Object\.values\(AI_PROVIDERS\.PROVIDERS\)/);
+  assert.match(js, /credentialDrafts/);
+  assert.match(js, /aiProviderCredentials/);
+  assert.match(js, /aiFallbackProvider/);
+  assert.doesNotMatch(js, /providerKeyFields|qwenApiKey|fields\.groqApiKey/);
+  assert.match(js, /provider\.settingsModelSummary/);
+  assert.match(providers, /getTaskCapability/);
+  assert.match(providers, /getTaskMaxTokens/);
+  assert.match(providers, /getRequestChainTimeoutMs/);
+  assert.match(content, /Object\.keys\(globalThis\.HHJA_AI_PROVIDERS\?\.PROVIDERS \|\| \{\}\)/);
+  assert.match(content, /getRequestChainTimeoutMs\?\.\(/);
 });

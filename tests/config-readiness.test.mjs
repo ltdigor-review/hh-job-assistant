@@ -21,13 +21,27 @@ test('readiness requires all launch settings in stable order', () => {
   const result = readiness().evaluate({});
   assert.equal(result.ready, false);
   assert.deepEqual(Array.from(result.missing, (item) => item.code), [
-    'groq_api_key',
+    'ai_provider_api_key',
     'resume_url'
   ]);
   assert.deepEqual(Array.from(result.missing, (item) => item.label), [
-    'ключ Groq API',
+    'ключ Qwen API',
     'ссылка на резюме hh.ru'
   ]);
+});
+
+test('readiness selects provider credentials and preserves legacy Groq keys', () => {
+  const qwen = readiness().evaluate({
+    aiProvider: 'qwen',
+    aiProviderCredentials: { qwen: { apiKey: 'sk-test' } },
+    resumeUrl: valid.resumeUrl
+  });
+  assert.equal(qwen.ready, true);
+  assert.equal(qwen.provider, 'qwen');
+
+  const legacyGroq = readiness().evaluate(valid);
+  assert.equal(legacyGroq.ready, true);
+  assert.equal(legacyGroq.provider, 'groq');
 });
 
 test('readiness accepts regional https hh resume URLs', () => {

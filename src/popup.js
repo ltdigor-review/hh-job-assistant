@@ -1,4 +1,5 @@
 import { derivePopupView } from './popup-view.js';
+import './ai-providers.js';
 import './config-readiness.js';
 
 function localizeError(error, fallback) {
@@ -26,7 +27,7 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
-let hasGroqKey = false;
+let aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false };
 let readiness = { ready: false, missing: [] };
 let copyToastTimeout = null;
 
@@ -70,7 +71,7 @@ function renderView() {
   const view = derivePopupView({
     runState: lastRunState,
     tabState: lastTabState,
-    hasGroqKey,
+    aiProviderStatus,
     readiness
   });
 
@@ -102,10 +103,10 @@ function renderView() {
 
 function resultMessage(item) {
   if (item.status === 'skipped_missing_groq_key') {
-    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует сопроводительное письмо, но ключ Groq API не указан.`;
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует сопроводительное письмо, но ключ AI-провайдера не указан.`;
   }
   if (item.status === 'skipped_test_missing_groq_key') {
-    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует ответы на вопросы работодателя или тест, но ключ Groq API не указан.`;
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует ответы на вопросы работодателя или тест, но ключ AI-провайдера не указан.`;
   }
   if (item.status === 'skipped_hh_daily_response_limit') {
     return 'Исчерпан лимит в 200 откликов в день. HH временно не дает отправлять новые отклики.';
@@ -244,8 +245,13 @@ async function refreshPopup() {
   // GET_STATUS waits for background default initialization. Read storage only
   // afterwards so a cold popup cannot observe an incomplete migration.
   const runtimeError = await readRuntimeState();
-  const settings = await chrome.storage.local.get(['groqApiKey', 'resumeUrl']);
-  hasGroqKey = Boolean(settings.groqApiKey);
+  const settings = await chrome.storage.local.get(['aiProvider', 'aiProviderCredentials', 'groqApiKey', 'resumeUrl']);
+  const provider = globalThis.HHJA_AI_PROVIDERS.normalizeProviderId(settings.aiProvider);
+  aiProviderStatus = {
+    provider,
+    label: globalThis.HHJA_AI_PROVIDERS.getProvider(provider).label,
+    configured: Boolean(globalThis.HHJA_AI_PROVIDERS.getApiKey(settings, provider))
+  };
   readiness = globalThis.HHJA_CONFIG_READINESS.evaluate(settings);
   lastTabState = runtimeError || await readTabState();
 

@@ -1,24 +1,14 @@
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
+const AI_PROVIDERS = globalThis.HHJA_AI_PROVIDERS;
 
-const GROQ_MODELS = new Set([
-  'openai/gpt-oss-120b'
-]);
-
-const OLD_DEFAULT_COVER_PROMPTS = new Set([
-  'Напиши короткое сопроводительное письмо для отклика на вакансию. Тон: деловой, уверенный, без выдуманного опыта.',
-  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, без плейсхолдеров, без шаблонных скобок, без выдуманного опыта. Только готовый текст письма.',
-  'Напиши сопроводительное письмо на русском: 3-4 коротких предложения, до 450 символов. Без списков, заголовков, markdown, плейсхолдеров, шаблонных скобок, неизвестных имен и выдуманного опыта. Не пересказывай резюме или вакансию. Только готовый текст письма.',
-  'Напиши короткий живой отклик на русском: 1-2 простых предложения, до 220 символов. Без обращения, канцелярита, HR-клише, списков, markdown, выдуманного опыта и пересказа резюме или вакансии. Только готовый текст.',
-  'Напиши одну живую строку для отклика hh.ru: 70-160 символов, по-русски, без приветствия. Используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт". Только текст.',
-  'Напиши одну живую строку для отклика hh.ru: 70-150 символов, по-русски, без приветствия. Пиши от первого лица и используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт", "соответствует требованиям". Только текст.',
-  'Напиши одну живую строку для отклика hh.ru: 50-150 символов, по-русски, без приветствия. Пиши от первого лица и используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт", "соответствует требованиям". Только текст.'
-]);
 const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_contract']);
 const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 
 const fields = {
-  groqApiKey: document.getElementById('groqApiKey'),
-  groqModel: document.getElementById('groqModel'),
+  aiProvider: document.getElementById('aiProvider'),
+  credentialProvider: document.getElementById('credentialProvider'),
+  aiProviderApiKey: document.getElementById('aiProviderApiKey'),
+  aiFallbackProvider: document.getElementById('aiFallbackProvider'),
   resumeUrl: document.getElementById('resumeUrl'),
   resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   resumeProfileText: document.getElementById('resumeProfileText'),
@@ -41,15 +31,20 @@ const fields = {
 };
 
 const statusNode = document.getElementById('status');
-const groqStatusNode = document.getElementById('groqStatus');
+const aiProviderStatusNode = document.getElementById('aiProviderStatus');
+const aiProviderModelNode = document.getElementById('aiProviderModel');
+const aiProviderApiKeyLabelNode = document.getElementById('aiProviderApiKeyLabel');
+const aiProviderCredentialHintNode = document.getElementById('aiProviderCredentialHint');
+const configuredProvidersNode = document.getElementById('configuredProviders');
 const agentDebugStatusNode = document.getElementById('agentDebugStatus');
 const resumeProfileStatusNode = document.getElementById('resumeProfileStatus');
 const resumeProfileButtons = [
   document.getElementById('buildResumeProfile'),
   document.getElementById('editResumeProfile')
 ];
-let savedGroqKeyMasked = false;
-let groqKeyDirty = false;
+const credentialDrafts = new Map();
+let credentialEditorProviderId = '';
+let aiProviderTestGeneration = 0;
 let agentDebugRuns = [];
 let agentDebugDownloadInProgress = false;
 
@@ -62,8 +57,131 @@ function setStatus(text, isError = false, node = statusNode) {
   node.style.color = isError ? '#b91c1c' : '#475569';
 }
 
-function setGroqStatus(text, isError = false) {
-  setStatus(text, isError, groqStatusNode);
+function setAiProviderStatus(text, isError = false) {
+  setStatus(text, isError, aiProviderStatusNode);
+}
+
+function selectedProviderId() {
+  return AI_PROVIDERS.normalizeProviderId(fields.aiProvider.value);
+}
+
+function providers() {
+  return Object.values(AI_PROVIDERS.PROVIDERS);
+}
+
+function createProviderOption(provider) {
+  const option = document.createElement('option');
+  option.value = provider.id;
+  option.textContent = `${provider.label} (${provider.id})`;
+  return option;
+}
+
+function populateProviderSelectors() {
+  const providerOptions = () => providers().map(createProviderOption);
+  fields.aiProvider.replaceChildren(...providerOptions());
+  fields.credentialProvider.replaceChildren(...providerOptions());
+}
+
+function renderFallbackProviders(preferredValue = fields.aiFallbackProvider.value) {
+  const off = document.createElement('option');
+  off.value = '';
+  off.textContent = 'Выключен';
+  const options = providers()
+    .filter((provider) => {
+      const draft = credentialDrafts.get(provider.id);
+      return provider.id !== selectedProviderId() && Boolean(String(draft?.apiKey || '').trim());
+    })
+    .map(createProviderOption);
+  fields.aiFallbackProvider.replaceChildren(off, ...options);
+  fields.aiFallbackProvider.value = options.some((option) => option.value === preferredValue)
+    ? preferredValue
+    : '';
+}
+
+function renderProviderControls() {
+  const providerId = selectedProviderId();
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  aiProviderModelNode.textContent = provider.settingsModelSummary;
+  renderFallbackProviders();
+}
+
+function currentCredentialDraft(providerId = credentialEditorProviderId) {
+  return credentialDrafts.get(providerId);
+}
+
+function captureCredentialDraft() {
+  const draft = currentCredentialDraft();
+  if (!draft || !draft.dirty || fields.aiProviderApiKey.dataset.masked === 'true') return;
+  draft.apiKey = fields.aiProviderApiKey.value;
+}
+
+function renderConfiguredProviders() {
+  configuredProvidersNode.textContent = providers()
+    .map((provider) => {
+      const draft = credentialDrafts.get(provider.id);
+      const configured = Boolean(String(draft?.apiKey || '').trim());
+      return `${provider.label} — ${configured ? 'настроен' : 'не настроен'}`;
+    })
+    .join(' · ');
+}
+
+function renderCredentialConfiguration() {
+  renderConfiguredProviders();
+  renderFallbackProviders();
+}
+
+function renderCredentialEditor(providerId = fields.credentialProvider.value) {
+  captureCredentialDraft();
+  credentialEditorProviderId = AI_PROVIDERS.normalizeProviderId(providerId);
+  fields.credentialProvider.value = credentialEditorProviderId;
+  const provider = AI_PROVIDERS.getProvider(credentialEditorProviderId);
+  const draft = currentCredentialDraft();
+  aiProviderApiKeyLabelNode.textContent = provider.credentialLabel || `Ключ ${provider.label} API`;
+  aiProviderCredentialHintNode.textContent = provider.settingsModelSummary;
+  fields.aiProviderApiKey.placeholder = provider.credentialPlaceholder || '';
+  fields.aiProviderApiKey.value = draft?.masked && !draft?.dirty ? '********' : (draft?.apiKey || '');
+  fields.aiProviderApiKey.dataset.masked = draft?.masked && !draft?.dirty ? 'true' : 'false';
+  renderCredentialConfiguration();
+}
+
+async function persistCurrentCredential() {
+  captureCredentialDraft();
+  const providerId = AI_PROVIDERS.normalizeProviderId(fields.credentialProvider.value);
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  const draft = credentialDrafts.get(providerId);
+  const apiKey = String(draft?.apiKey || '').trim();
+  const current = await chrome.storage.local.get([
+    'aiProvider',
+    'aiProviderCredentials',
+    'aiFallbackProvider',
+    'aiFallbackEnabled',
+    'aiFallbackToGroq',
+    'groqApiKey'
+  ]);
+  const credentials = AI_PROVIDERS.setApiKey(
+    AI_PROVIDERS.normalizeCredentials(current.aiProviderCredentials, current.groqApiKey),
+    providerId,
+    apiKey
+  );
+  const patch = {
+    aiProviderCredentials: credentials,
+    groqApiKey: String(credentials.groq?.apiKey || '')
+  };
+  const storedFallbackProvider = AI_PROVIDERS.normalizeFallbackProvider(
+    current,
+    current.aiProvider || selectedProviderId()
+  );
+  if (!apiKey && (fields.aiFallbackProvider.value === providerId || storedFallbackProvider === providerId)) {
+    patch.aiFallbackProvider = '';
+    patch.aiFallbackEnabled = false;
+    patch.aiFallbackToGroq = false;
+  }
+  await chrome.storage.local.set(patch);
+  draft.apiKey = apiKey;
+  draft.masked = Boolean(apiKey);
+  draft.dirty = false;
+  renderCredentialEditor(providerId);
+  setAiProviderStatus(apiKey ? `Ключ ${provider.label} сохранён.` : `Ключ ${provider.label} удалён.`);
 }
 
 function setResumeProfileStatus(text, isError = false) {
@@ -219,13 +337,27 @@ function getMultiCheckboxValue(field, allowedValues) {
 }
 
 async function loadOptions() {
-  const values = await chrome.storage.local.get(Object.keys({ ...DEFAULTS, groqApiKey: '' }));
+  const values = await chrome.storage.local.get(Object.keys({
+    ...DEFAULTS,
+    groqApiKey: '',
+    aiFallbackEnabled: false
+  }));
+  const credentials = AI_PROVIDERS.normalizeCredentials(values.aiProviderCredentials, values.groqApiKey);
 
-  fields.groqApiKey.value = values.groqApiKey ? '********' : '';
-  fields.groqApiKey.dataset.masked = values.groqApiKey ? 'true' : 'false';
-  savedGroqKeyMasked = Boolean(values.groqApiKey);
-  groqKeyDirty = false;
-  fields.groqModel.value = GROQ_MODELS.has(values.groqModel) ? values.groqModel : DEFAULTS.groqModel;
+  populateProviderSelectors();
+  fields.aiProvider.value = AI_PROVIDERS.normalizeProviderId(values.aiProvider);
+  credentialDrafts.clear();
+  for (const provider of providers()) {
+    const apiKey = String(credentials[provider.id]?.apiKey || '').trim();
+    credentialDrafts.set(provider.id, {
+      apiKey,
+      masked: Boolean(apiKey),
+      dirty: false
+    });
+  }
+  renderProviderControls();
+  renderFallbackProviders(AI_PROVIDERS.normalizeFallbackProvider(values, selectedProviderId()));
+  renderCredentialEditor(selectedProviderId());
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.resumeProfileText.value = values.resumeProfileText || '';
@@ -249,6 +381,8 @@ async function loadOptions() {
 
 async function saveOptions() {
   const current = await chrome.storage.local.get([
+    'aiProviderCredentials',
+    'groqApiKey',
     'resumeUrl',
     'agentDebugLogsEnabled',
     'agentDebugRetentionCount'
@@ -281,7 +415,10 @@ async function saveOptions() {
   }
 
   const patch = {
-    groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel,
+    aiProvider: selectedProviderId(),
+    aiFallbackProvider: fields.aiFallbackProvider.value,
+    aiFallbackEnabled: Boolean(fields.aiFallbackProvider.value),
+    aiFallbackToGroq: selectedProviderId() === 'qwen' && fields.aiFallbackProvider.value === 'groq',
     resumeUrl: normalizedResumeUrl,
     resumeCacheTtlHours: Math.max(0.1, Math.min(Number(fields.resumeCacheTtlHours.value) || DEFAULTS.resumeCacheTtlHours, 168)),
     resumeProfileText: fields.resumeProfileText.value.trim(),
@@ -319,9 +456,16 @@ async function saveOptions() {
     patch.resumeProfileCheckedAt = '';
   }
 
-  if (fields.groqApiKey.dataset.masked !== 'true' && (!savedGroqKeyMasked || groqKeyDirty)) {
-    patch.groqApiKey = fields.groqApiKey.value.trim();
+  captureCredentialDraft();
+  let credentials = AI_PROVIDERS.normalizeCredentials(current.aiProviderCredentials, current.groqApiKey);
+  for (const provider of providers()) {
+    const draft = credentialDrafts.get(provider.id);
+    if (draft?.dirty) {
+      credentials = AI_PROVIDERS.setApiKey(credentials, provider.id, draft.apiKey);
+    }
   }
+  patch.aiProviderCredentials = credentials;
+  patch.groqApiKey = String(credentials.groq?.apiKey || '');
 
   await chrome.storage.local.set(patch);
   if (!patch.agentDebugLogsEnabled) {
@@ -334,21 +478,30 @@ async function saveOptions() {
   setStatus('Сохранено.');
 }
 
-async function testGroq() {
-  setGroqStatus('Проверяю Groq...');
-  const patch = {
-    groqModel: GROQ_MODELS.has(fields.groqModel.value) ? fields.groqModel.value : DEFAULTS.groqModel
-  };
-  if (fields.groqApiKey.dataset.masked !== 'true') {
-    patch.groqApiKey = fields.groqApiKey.value.trim();
-  }
-  await chrome.storage.local.set(patch);
-  const response = await chrome.runtime.sendMessage({ type: 'TEST_GROQ' });
-  if (!response?.ok) {
-    setGroqStatus(localizeError(response?.error, 'Проверка Groq не прошла.'), true);
+async function testAiProvider() {
+  const generation = ++aiProviderTestGeneration;
+  captureCredentialDraft();
+  const providerId = AI_PROVIDERS.normalizeProviderId(fields.credentialProvider.value);
+  const provider = AI_PROVIDERS.getProvider(providerId);
+  setAiProviderStatus(`Проверяю ${provider.label}...`);
+  const isCurrent = () =>
+    generation === aiProviderTestGeneration && fields.credentialProvider.value === providerId;
+  let response;
+  try {
+    const message = { type: 'TEST_AI_PROVIDER', providerId };
+    const draft = credentialDrafts.get(providerId);
+    if (draft?.dirty) message.apiKey = String(draft.apiKey || '').trim();
+    response = await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    if (isCurrent()) setAiProviderStatus(localizeError(error, `Проверка ${provider.label} не прошла.`), true);
     return;
   }
-  setGroqStatus('Groq работает.');
+  if (!isCurrent()) return;
+  if (!response?.ok) {
+    setAiProviderStatus(localizeError(response?.error, `Проверка ${provider.label} не прошла.`), true);
+    return;
+  }
+  setAiProviderStatus(`${provider.label} работает.`);
 }
 
 async function runResumeProfileAction(type) {
@@ -378,15 +531,52 @@ async function runResumeProfileAction(type) {
   }
 }
 
-fields.groqApiKey.addEventListener('focus', () => {
-  if (fields.groqApiKey.dataset.masked === 'true') {
-    fields.groqApiKey.value = '';
-    fields.groqApiKey.dataset.masked = 'false';
+fields.aiProviderApiKey.addEventListener('focus', () => {
+  if (fields.aiProviderApiKey.dataset.masked === 'true') {
+    fields.aiProviderApiKey.value = '';
+    fields.aiProviderApiKey.dataset.masked = 'false';
   }
 });
 
-fields.groqApiKey.addEventListener('input', () => {
-  groqKeyDirty = true;
+fields.aiProviderApiKey.addEventListener('input', () => {
+  const draft = currentCredentialDraft();
+  if (!draft) return;
+  draft.dirty = true;
+  draft.masked = false;
+  draft.apiKey = fields.aiProviderApiKey.value;
+  renderCredentialConfiguration();
+});
+
+fields.credentialProvider.addEventListener('change', () => {
+  aiProviderTestGeneration += 1;
+  renderCredentialEditor(fields.credentialProvider.value);
+  setAiProviderStatus('');
+});
+
+fields.aiProvider.addEventListener('change', () => {
+  aiProviderTestGeneration += 1;
+  renderProviderControls();
+  setAiProviderStatus('');
+});
+
+document.getElementById('saveProviderCredential').addEventListener('click', () =>
+  persistCurrentCredential().catch((error) => {
+    setAiProviderStatus(localizeError(error, 'Не удалось сохранить ключ.'), true);
+  })
+);
+
+document.getElementById('deleteProviderCredential').addEventListener('click', () => {
+  const draft = currentCredentialDraft();
+  if (!draft) return;
+  draft.apiKey = '';
+  draft.masked = false;
+  draft.dirty = true;
+  fields.aiProviderApiKey.value = '';
+  fields.aiProviderApiKey.dataset.masked = 'false';
+  renderCredentialConfiguration();
+  return persistCurrentCredential().catch((error) => {
+    setAiProviderStatus(localizeError(error, 'Не удалось удалить ключ.'), true);
+  });
 });
 
 fields.agentDebugLogsEnabled.addEventListener('change', () => {
@@ -404,8 +594,8 @@ document.getElementById('save').addEventListener('click', () => {
   saveOptions().catch((error) => setStatus(localizeError(error), true));
 });
 
-document.getElementById('testGroq').addEventListener('click', () => {
-  testGroq().catch((error) => setGroqStatus(localizeError(error), true));
+document.getElementById('testAiProvider').addEventListener('click', () => {
+  testAiProvider();
 });
 
 document.getElementById('buildResumeProfile').addEventListener('click', () => {
