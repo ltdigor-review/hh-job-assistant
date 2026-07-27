@@ -1,6 +1,6 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.237",
+  "version": "0.1.239",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,5 +19,8 @@
     "diff:summary": "bash scripts/diff-summary.sh",
     "context:budget": "bash scripts/context-budget.sh",
     "test:all": "npm test && npm run test:extension && npm run test:hh"
+  },
+  "devDependencies": {
+    "classic-level": "3.0.0"
   }
 }

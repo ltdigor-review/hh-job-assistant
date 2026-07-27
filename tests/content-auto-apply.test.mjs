@@ -55,6 +55,7 @@ async function runContentAutoApply({
   questionControls = [],
   rerenderQuestionControlsOnChange = false,
   questionControlsAfterChange = null,
+  questionControlsAfterChanges = [],
   groqResponse = { ok: false, error: 'Groq API key is not configured' },
   runtimeMessageTimeoutMs = 0,
   runtimeSendErrors = {},
@@ -144,7 +145,7 @@ async function runContentAutoApply({
     }
   });
   let selectableControls = [];
-  let questionControlsRerendered = false;
+  let questionControlsRerenderCount = 0;
   function syncDialogQuestionControls() {
     if (!dialog) return;
     dialog.selectorMap['input[type="checkbox"]'] = selectableControls.filter((item) => item.type === 'checkbox').map((item) => item.input);
@@ -157,12 +158,16 @@ async function runContentAutoApply({
         value: item.value || item.label,
         attrs: { type: item.type, name: item.name || '', value: item.value || item.label },
         dispatch(event) {
-          if (event?.type !== 'change' || !rerenderQuestionControlsOnChange || questionControlsRerendered) return;
-          questionControlsRerendered = true;
+          if (event?.type !== 'change' || !rerenderQuestionControlsOnChange) return;
+          const rerenderSequence = questionControlsAfterChanges.length > 0
+            ? questionControlsAfterChanges
+            : [questionControlsAfterChange || questionControls];
+          if (questionControlsRerenderCount >= rerenderSequence.length) return;
           const checkedKeys = new Set(selectableControls
             .filter((candidate) => candidate.input.checked)
             .map((candidate) => `${candidate.name || ''}\n${candidate.label}`));
-          selectableControls = createSelectableControls(questionControlsAfterChange || questionControls);
+          selectableControls = createSelectableControls(rerenderSequence[questionControlsRerenderCount]);
+          questionControlsRerenderCount += 1;
           selectableControls.forEach((candidate) => {
             candidate.input.checked = checkedKeys.has(`${candidate.name || ''}\n${candidate.label}`);
           });
@@ -1048,7 +1053,7 @@ test('auto apply skips test vacancy when no fillable question fields are found',
   assert.match(result.appended.at(-1).error, /заполняемые поля HH не найдены/);
 });
 
-test('auto apply uses safe question fallback when resume profile is unavailable', async () => {
+test('auto apply never invents an employer text answer when the provider is unavailable', async () => {
   const result = await runContentAutoApply({
     startOnResponseForm: true,
     hasQuestionField: true,
@@ -1058,10 +1063,50 @@ test('auto apply uses safe question fallback when resume profile is unavailable'
     groqResponse: { ok: false, error: 'Промпт с резюме не заполнен' }
   });
 
-  assert.equal(result.submitClicks, 1);
+  assert.equal(result.submitClicks, 0);
   assert.equal(result.groqRequests.length, 1);
-  assert.equal(result.textareaValue, 'Готов подробно обсудить этот вопрос на интервью');
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+});
+
+test('auto apply asks AI for a non-age employer question without exact candidate age', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Опишите опыт управления командой',
+    dialogText: 'Ответьте на вопросы работодателя',
+    initialLocalStore: { resumeCandidateFacts: null },
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id,
+        answer: 'Руководил командой разработки из восьми специалистов.',
+        selectedOptions: []
+      })),
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, 'Руководил командой разработки из восьми специалистов.');
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply fails closed on an actual age question without an exact candidate age', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: 'Укажите ваш возраст и кратко опишите опыт',
+    dialogText: 'Ответьте на вопросы работодателя',
+    initialLocalStore: { resumeCandidateFacts: null },
+    groqResponse: { ok: true, text: 'Text question 1: 37' }
+  });
+
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_required_candidate_fact_missing');
 });
 
 test('auto apply does not submit test vacancy when Groq answers but no fields are found', async () => {
@@ -1825,7 +1870,7 @@ test('auto apply fills contenteditable employer question fields', async () => {
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply replaces model garbage with a safe question fallback', async () => {
+test('auto apply rejects model garbage without inventing a question answer', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1835,11 +1880,11 @@ test('auto apply replaces model garbage with a safe question fallback', async ()
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов подробно обсудить этот вопрос на интервью');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
 test('auto apply puts only labeled free-text answer into question field', async () => {
@@ -1881,7 +1926,7 @@ test('auto apply puts only labeled free-text answer into question field', async 
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply replaces leaked prompt context with a safe question fallback', async () => {
+test('auto apply rejects leaked prompt context without inventing a question answer', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -1899,11 +1944,11 @@ test('auto apply replaces leaked prompt context with a safe question fallback', 
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов подробно обсудить этот вопрос на интервью');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
 test('auto apply fills messenger contact locally without asking Groq', async () => {
@@ -2142,12 +2187,12 @@ test('auto apply rejects duplicate structured IDs and never pastes a raw respons
     })
   });
 
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
   assert.equal(result.groqRequests.length, 1);
-  assert.deepEqual(result.textareaValues, [
-    'Готов подробно обсудить этот вопрос на интервью',
-    'Готов подробно обсудить этот вопрос на интервью'
-  ]);
+  assert.deepEqual(result.textareaValues, ['', '']);
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Network answer|\{"answers"/);
 });
 
@@ -2169,12 +2214,12 @@ test('auto apply rejects missing and unknown structured IDs', async () => {
     })
   });
 
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
   assert.equal(result.groqRequests.length, 1);
-  assert.deepEqual(result.textareaValues, [
-    'Готов подробно обсудить этот вопрос на интервью',
-    'Готов подробно обсудить этот вопрос на интервью'
-  ]);
+  assert.deepEqual(result.textareaValues, ['', '']);
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Unknown answer/);
 });
 
@@ -2286,7 +2331,7 @@ test('auto apply accepts an equivalent HH control rerender after selecting a rad
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply still rejects a genuinely changed HH form after selecting a radio answer', async () => {
+test('auto apply re-snapshots a changed HH form and uses only exact current choices', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Готовы работать удаленно?\nДа\nНет\nОпишите релевантный опыт',
     hasTextarea: true,
@@ -2305,15 +2350,53 @@ test('auto apply still rejects a genuinely changed HH form after selecting a rad
     groqResponse: (message) => ({
       ok: true,
       answers: message.questions.map((question) => question.kind === 'choice'
-        ? { id: question.id, answer: '', selectedOptions: ['Да'] }
+        ? {
+            id: question.id,
+            answer: '',
+            selectedOptions: [question.options.includes('Да, полностью') ? 'Да, полностью' : 'Да']
+          }
         : { id: question.id, answer: 'Работал с распределенными командами', selectedOptions: [] }),
       coverLetter: ''
     })
   });
 
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.groqRequests.length, 2);
+  assert.deepEqual(result.groqRequests[1].questions.find((question) => question.kind === 'choice').options, ['Да, полностью', 'Нет']);
+  assert.deepEqual(result.checkedLabels, ['Да, полностью']);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply bounds dynamic conditional form re-snapshots to three', async () => {
+  const sequence = Array.from({ length: 4 }, (_, index) => [
+    { type: 'radio', name: `dynamic_${index}`, label: `Точный вариант ${index + 1}`, value: `value_${index + 1}` },
+    { type: 'radio', name: `dynamic_${index}`, label: `Другой вариант ${index + 1}`, value: `other_${index + 1}` }
+  ]);
+  const result = await runContentAutoApply({
+    dialogText: 'Уточните текущий вариант',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'dynamic_initial', label: 'Начальный вариант', value: 'initial' },
+      { type: 'radio', name: 'dynamic_initial', label: 'Другой начальный', value: 'initial_other' }
+    ],
+    rerenderQuestionControlsOnChange: true,
+    questionControlsAfterChanges: sequence,
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id,
+        answer: '',
+        selectedOptions: [question.options[0]]
+      })),
+      coverLetter: ''
+    })
+  });
+
   assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 4);
   assert.equal(result.appended.at(-1).status, 'skipped_question_form_changed');
 });
 
@@ -2960,7 +3043,7 @@ test('auto apply uses expected salary for salary question when Groq key is missi
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply uses safe local text and letter fallbacks without Groq key', async () => {
+test('auto apply keeps cover fallback but never invents employer text when provider fails', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Опишите опыт управления тестированием',
     hasTextarea: true,
@@ -2972,13 +3055,11 @@ test('auto apply uses safe local text and letter fallbacks without Groq key', as
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Готов подробно обсудить этот вопрос на интервью');
-  assert.equal(result.coverTextareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
 test('auto apply sends employer questions and mandatory cover letter in one structured request', async () => {

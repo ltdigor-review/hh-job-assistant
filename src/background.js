@@ -1,3 +1,4 @@
+import './log-sanitize.js';
 import './agent-log.js';
 import './error-text.js';
 import './defaults.js';
@@ -1488,14 +1489,9 @@ async function callGroq({ task = 'cover_letter', vacancyText = '', extraText = '
     'resumeProfileSourceHash',
     'resumeProfileBuiltAt'
   ]);
-  const resumeSourceText = await getResumeContext({ requireFacts: task === 'test_assist' });
+  const resumeSourceText = await getResumeContext();
   const { resumeCandidateFacts = null } = await storageGet(['resumeCandidateFacts']);
   const candidateFacts = normalizeResumeCandidateFacts(resumeCandidateFacts, hashText(resumeSourceText));
-  if (task === 'test_assist' && !candidateFacts) {
-    const error = new Error('Точные данные кандидата не извлечены из резюме HH');
-    error.code = 'HHJA_RESUME_CANDIDATE_FACTS_REQUIRED';
-    throw error;
-  }
   const profileText = String(profileState.resumeProfileText || '').trim();
   if (!profileText && task === 'test_assist') {
     const error = new Error('Промпт с резюме не заполнен');

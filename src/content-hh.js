@@ -59,6 +59,7 @@ const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
 const PRIVATE_QUESTION_AUDIT_KEY = 'agentPrivateQuestionAudit';
 const PRIVATE_QUESTION_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PRIVATE_QUESTION_AUDIT_MAX_ENTRIES = 200;
+const MAX_QUESTION_FORM_RESNAPSHOTS = 3;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
 const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
@@ -997,8 +998,7 @@ function isSalaryQuestion(field) {
 
 function isAgeQuestion(field) {
   const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
-  return /(?:^|\b)(?:возраст|сколько\s+вам\s+лет|ваш\s+возраст|age)(?:\b|$)/i.test(text)
-    && !/(?:опыт|стаж|experience|разработ|работа(?:ли|ете)?|коммерческ)/i.test(text);
+  return /(?:^|[^\p{L}\p{N}])(?:возраст|сколько\s+вам\s+лет|ваш\s+возраст|age)(?:[^\p{L}\p{N}]|$)/iu.test(text);
 }
 
 function allowsShortNumericQuestionAnswer(field) {
@@ -2089,6 +2089,7 @@ async function getDeterministicStructuredAnswers(snapshot) {
   const contact = cleanText(telegramUsername) || extractContactFromText(resumeSource);
   const answers = new Map();
   let blockedReason = '';
+  let blockedStatus = '';
 
   for (const descriptor of snapshot.textQuestions) {
     if (isAgeQuestion(descriptor.field)) {
@@ -2097,6 +2098,7 @@ async function getDeterministicStructuredAnswers(snapshot) {
         answers.set(descriptor.id, { id: descriptor.id, answer: String(age), selectedOptions: [] });
       } else {
         blockedReason = 'Пропущено: точный возраст не извлечён из резюме HH.';
+        blockedStatus = 'skipped_required_candidate_fact_missing';
       }
       continue;
     }
@@ -2105,6 +2107,7 @@ async function getDeterministicStructuredAnswers(snapshot) {
         answers.set(descriptor.id, { id: descriptor.id, answer: cleanText(expectedSalary), selectedOptions: [] });
       } else if (isNumericOnlyQuestionField(descriptor.field) && descriptor.required) {
         blockedReason = 'Пропущено: обязательное числовое поле зарплаты не заполнено в настройках.';
+        blockedStatus = 'skipped_required_numeric_salary_missing';
       } else {
         answers.set(descriptor.id, { id: descriptor.id, answer: 'По договорённости', selectedOptions: [] });
       }
@@ -2127,20 +2130,12 @@ async function getDeterministicStructuredAnswers(snapshot) {
       answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions });
     }
   }
-  return { answers, blockedReason };
+  return { answers, blockedReason, blockedStatus };
 }
 
 async function buildSafeStructuredFallback(snapshot, existingAnswers = new Map()) {
   const answers = new Map(existingAnswers);
   const preferences = await getQuestionPreferences();
-  for (const descriptor of snapshot.textQuestions) {
-    if (answers.has(descriptor.id)) continue;
-    answers.set(descriptor.id, {
-      id: descriptor.id,
-      answer: 'Готов подробно обсудить этот вопрос на интервью',
-      selectedOptions: []
-    });
-  }
   for (const descriptor of snapshot.choiceQuestions) {
     if (answers.has(descriptor.id)) continue;
     const preferred = getPreferredChoiceOptions(descriptor.group, preferences);
@@ -2657,7 +2652,7 @@ async function applyToVacancy(item, counters) {
     const questionFields = findQuestionFields(root);
     const questionControlGroups = findQuestionControlGroups(root);
     const coverLetterTextarea = findCoverLetterTextarea(root);
-    const questionSnapshot = createQuestionSnapshot(root, questionFields, questionControlGroups);
+    let questionSnapshot = createQuestionSnapshot(root, questionFields, questionControlGroups);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     const vacancyText = getVacancyText(item.card) || getVacancyText(document);
     const questionAudit = summarizeEmployerQuestionInputs(questionFields, questionControlGroups);
@@ -2683,25 +2678,16 @@ async function applyToVacancy(item, counters) {
       return;
     }
 
-    const deterministic = await getDeterministicStructuredAnswers(questionSnapshot);
-    if (deterministic.blockedReason) {
-      await skipQuestionForm('skipped_required_numeric_salary_missing', deterministic.blockedReason);
-      return;
-    }
-    let structuredAnswers = new Map(deterministic.answers);
+    let structuredAnswers = new Map();
     let letter = '';
-    const allDescriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
-    const aiDescriptors = allDescriptors.filter((descriptor) => !structuredAnswers.has(descriptor.id));
     const coverLetterRequested = Boolean(coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea)));
-    const aiNeeded = aiDescriptors.length > 0 || coverLetterRequested;
+    const initialDescriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
 
     await appendAgentLog('question_context_extracted', {
       vacancyId: item.vacancyId,
       textFields: questionFields.length,
       choiceGroups: questionControlGroups.length,
       contextLength: questionContext.length,
-      deterministicFields: structuredAnswers.size,
-      aiFields: aiDescriptors.length,
       coverLetterRequested
     });
     await appendAgentLog('question_test_detected', {
@@ -2710,94 +2696,142 @@ async function applyToVacancy(item, counters) {
       url: item.url,
       questions: questionAudit,
       questionContext,
-      questionIds: allDescriptors.map((descriptor) => descriptor.id)
+      questionIds: initialDescriptors.map((descriptor) => descriptor.id)
     });
 
-    if (aiNeeded) {
-      await setRunState({
-        state: 'generating_cover_letter',
-        ...counters,
-        currentAction: 'ИИ: готовлю один структурированный ответ для формы'
-      });
-      setBusyCursor(true);
-      try {
-        const response = await generateTestAssistance(
-          vacancyText,
-          aiDescriptors.map(toGroqQuestion),
-          coverLetterRequested
-        );
-        const validated = validateStructuredAssistance(response, aiDescriptors, { coverLetterRequested });
-        for (const [id, answer] of validated.answers) {
-          structuredAnswers.set(id, answer);
-        }
-        letter = validated.coverLetter;
-      } catch (error) {
-        if (isStopRequestedError(error)) {
-          await markStopped(counters);
-          closeDialog();
-          return;
-        }
-        await recordLocalAiFallback('test_assist', error?.code || localizeError(error));
-        structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
-        if (coverLetterRequested) letter = await getFallbackCoverLetter(vacancyText);
-        await appendAgentLog('question_structured_fallback', {
-          vacancyId: item.vacancyId,
-          reason: localizeError(error),
-          answers: structuredAnswers.size,
-          coverLetterRequested
-        });
-      } finally {
-        setBusyCursor(false);
-      }
-    }
-
-    if (await stopIfRequested(counters)) return;
-
-    let invalidReason = '';
-    for (const descriptor of questionSnapshot.textQuestions) {
-      const answer = structuredAnswers.get(descriptor.id)?.answer || '';
-      const reason = getQuestionAnswerInvalidReason(answer, descriptor.field);
-      if (!reason) continue;
-      invalidReason ||= reason;
-      structuredAnswers.delete(descriptor.id);
-    }
-    if (invalidReason) {
-      await recordLocalAiFallback('test_assist', 'semantic_answer_rejected');
-      structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
-      await appendAgentLog('question_text_rejected_bad_answer', {
-        vacancyId: item.vacancyId,
-        error: invalidReason,
-        fields: questionFields.length
-      });
-    }
-
-    if (!refreshQuestionSnapshot(questionSnapshot)) {
-      await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH изменилась до заполнения ответов.');
-      return;
-    }
-
     let selectedChoices = { selected: 0, labels: [] };
-    if (questionSnapshot.choiceQuestions.length > 0) {
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
-      setBusyCursor(true);
-      try {
-        selectedChoices = fillStructuredQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers);
-      } finally {
-        setBusyCursor(false);
-      }
-      const missingChoiceGroupIndexes = validateSelectedQuestionControls(questionControlGroups);
-      if (missingChoiceGroupIndexes.length > 0) {
-        const message = `Пропущено: безопасный вариант HH не найден (${missingChoiceGroupIndexes.join(', ')}).`;
-        await skipQuestionForm('skipped_choice_fill_not_verified', message);
+    let resnapshotCount = 0;
+    while (true) {
+      const deterministic = await getDeterministicStructuredAnswers(questionSnapshot);
+      if (deterministic.blockedReason) {
+        await skipQuestionForm(
+          deterministic.blockedStatus || 'skipped_bad_generated_answer',
+          deterministic.blockedReason
+        );
         return;
       }
-      await sleep(POST_FILL_SETTLE_MS);
-      if (await stopIfRequested(counters)) return;
-    }
+      structuredAnswers = new Map(deterministic.answers);
+      const descriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
+      const aiDescriptors = descriptors.filter((descriptor) => !structuredAnswers.has(descriptor.id));
+      const requestCoverLetter = coverLetterRequested && !letter;
+      const aiNeeded = aiDescriptors.length > 0 || requestCoverLetter;
 
-    if (!refreshQuestionSnapshot(questionSnapshot)) {
-      await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH изменилась во время заполнения ответов.');
-      return;
+      if (aiNeeded) {
+        await setRunState({
+          state: 'generating_cover_letter',
+          ...counters,
+          currentAction: 'ИИ: готовлю один структурированный ответ для формы'
+        });
+        setBusyCursor(true);
+        try {
+          const response = await generateTestAssistance(
+            vacancyText,
+            aiDescriptors.map(toGroqQuestion),
+            requestCoverLetter
+          );
+          const validated = validateStructuredAssistance(response, aiDescriptors, {
+            coverLetterRequested: requestCoverLetter
+          });
+          for (const [id, answer] of validated.answers) structuredAnswers.set(id, answer);
+          if (validated.coverLetter) letter = validated.coverLetter;
+        } catch (error) {
+          if (isStopRequestedError(error)) {
+            await markStopped(counters);
+            closeDialog();
+            return;
+          }
+          await recordLocalAiFallback('test_assist', error?.code || localizeError(error));
+          structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
+          if (requestCoverLetter) letter = await getFallbackCoverLetter(vacancyText);
+          await appendAgentLog('question_structured_fallback', {
+            vacancyId: item.vacancyId,
+            reason: localizeError(error),
+            answers: structuredAnswers.size,
+            coverLetterRequested: requestCoverLetter
+          });
+        } finally {
+          setBusyCursor(false);
+        }
+      }
+
+      if (await stopIfRequested(counters)) return;
+
+      let invalidReason = '';
+      for (const descriptor of questionSnapshot.textQuestions) {
+        const answer = structuredAnswers.get(descriptor.id)?.answer || '';
+        const reason = getQuestionAnswerInvalidReason(answer, descriptor.field);
+        if (!reason) continue;
+        invalidReason ||= reason;
+        structuredAnswers.delete(descriptor.id);
+      }
+      if (invalidReason) {
+        await recordLocalAiFallback('test_assist', 'semantic_answer_rejected');
+        structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
+        await appendAgentLog('question_text_rejected_bad_answer', {
+          vacancyId: item.vacancyId,
+          error: invalidReason,
+          fields: questionSnapshot.textQuestions.length
+        });
+      }
+
+      if (!refreshQuestionSnapshot(questionSnapshot)) {
+        resnapshotCount += 1;
+        if (resnapshotCount > MAX_QUESTION_FORM_RESNAPSHOTS) {
+          await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH слишком часто менялась во время заполнения.');
+          return;
+        }
+        questionSnapshot = createQuestionSnapshot(
+          root,
+          findQuestionFields(root),
+          findQuestionControlGroups(root)
+        );
+        await appendAgentLog('question_form_resnapshot', {
+          vacancyId: item.vacancyId,
+          attempt: resnapshotCount,
+          textFields: questionSnapshot.textQuestions.length,
+          choiceGroups: questionSnapshot.choiceQuestions.length
+        });
+        continue;
+      }
+
+      selectedChoices = { selected: 0, labels: [] };
+      if (questionSnapshot.choiceQuestions.length > 0) {
+        await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
+        setBusyCursor(true);
+        try {
+          selectedChoices = fillStructuredQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers);
+        } finally {
+          setBusyCursor(false);
+        }
+        const missingChoiceGroupIndexes = validateSelectedQuestionControls(
+          questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group)
+        );
+        if (missingChoiceGroupIndexes.length > 0) {
+          const message = `Пропущено: безопасный вариант HH не найден (${missingChoiceGroupIndexes.join(', ')}).`;
+          await skipQuestionForm('skipped_choice_fill_not_verified', message);
+          return;
+        }
+        await sleep(POST_FILL_SETTLE_MS);
+        if (await stopIfRequested(counters)) return;
+      }
+
+      if (refreshQuestionSnapshot(questionSnapshot)) break;
+      resnapshotCount += 1;
+      if (resnapshotCount > MAX_QUESTION_FORM_RESNAPSHOTS) {
+        await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH слишком часто менялась во время заполнения.');
+        return;
+      }
+      questionSnapshot = createQuestionSnapshot(
+        root,
+        findQuestionFields(root),
+        findQuestionControlGroups(root)
+      );
+      await appendAgentLog('question_form_resnapshot', {
+        vacancyId: item.vacancyId,
+        attempt: resnapshotCount,
+        textFields: questionSnapshot.textQuestions.length,
+        choiceGroups: questionSnapshot.choiceQuestions.length
+      });
     }
 
     if (questionSnapshot.choiceQuestions.length > 0) {

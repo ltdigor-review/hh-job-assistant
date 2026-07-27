@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const root = new URL('../', import.meta.url);
 const loggerSource = await readFile(new URL('src/agent-log.js', root), 'utf8');
+const sanitizerSource = await readFile(new URL('src/log-sanitize.js', root), 'utf8').catch(() => '');
 
 function createStorage(initial = {}) {
   const data = { ...initial };
@@ -49,6 +50,9 @@ async function loadLogger(storage) {
       }
     }
   };
+  if (sanitizerSource) {
+    await import(`data:text/javascript;base64,${Buffer.from(sanitizerSource).toString('base64')}#debug-sanitize-${crypto.randomUUID()}`);
+  }
   await import(`data:text/javascript;base64,${Buffer.from(loggerSource).toString('base64')}#debug-history-${crypto.randomUUID()}`);
   return globalThis.HHJobAssistantLog;
 }
@@ -56,6 +60,143 @@ async function loadLogger(storage) {
 function cleanupLogger() {
   delete globalThis.chrome;
   delete globalThis.HHJobAssistantLog;
+  delete globalThis.HHJA_LOG_SANITIZE;
+}
+
+async function writeClassicLevelStorage(dir, values) {
+  const { ClassicLevel } = await import('classic-level');
+  const db = new ClassicLevel(dir, { valueEncoding: 'utf8' });
+  await db.open();
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      await db.put(key, JSON.stringify(value));
+    }
+  } finally {
+    await db.close();
+  }
+}
+
+function storageFixture({
+  state = 'complete',
+  processed = 3,
+  runResults = null,
+  privateEntries = null,
+  droppedEntries = 0
+} = {}) {
+  const results = runResults || [
+    {
+      vacancyId: '101',
+      status: 'applied',
+      title: 'Secret Java Role',
+      url: 'https://hh.ru/vacancy/101?tracking=private#response',
+      error: '',
+      timestamp: '2026-07-27T10:00:02.000Z'
+    },
+    {
+      vacancyId: '102',
+      status: 'applied_test_assisted',
+      title: 'Secret QA Role',
+      url: 'https://hh.ru/vacancy/102?token=private',
+      error: 'Sensitive employer failure explanation',
+      timestamp: '2026-07-27T10:00:03.000Z'
+    },
+    {
+      vacancyId: '103',
+      status: 'skipped_response_unavailable',
+      title: 'Secret Python Role',
+      url: 'https://hh.ru/vacancy/103?query=private',
+      error: 'HHJA_SAFE_CODE',
+      timestamp: '2026-07-27T10:00:04.000Z'
+    }
+  ];
+  const auditEntries = privateEntries || [
+    {
+      timestamp: '2026-07-27T10:00:03.500Z',
+      runId: 'run-current',
+      vacancyId: '102',
+      url: 'https://hh.ru/vacancy/102?private=audit',
+      questions: {
+        textAnswers: [{ question: 'Private question', answer: 'Private answer' }],
+        choiceAnswers: [{ question: 'Private choice', selectedOptions: ['Private option'] }]
+      },
+      coverLetter: 'Private cover letter'
+    }
+  ];
+  return {
+    runResults: results,
+    runState: {
+      state,
+      processed,
+      applied: 2,
+      skipped: 1,
+      errors: 0,
+      currentAction: 'Secret current action',
+      lastError: '',
+      updatedAt: '2026-07-27T10:00:05.000Z'
+    },
+    dailyApplicationLedger: {
+      date: '2026-07-27',
+      legacySubmitted: 4,
+      newSubmitted: 12,
+      alreadyApplied: 7,
+      submittedVacancyIds: ['1', '2'],
+      alreadyAppliedVacancyIds: ['3'],
+      hhDailyLimitReached: false,
+      updatedAt: '2026-07-27T10:00:05.000Z'
+    },
+    automationSettingsAudit: {
+      checkedAt: '2026-07-27T09:59:59.000Z',
+      checks: { dailyLimit200: true },
+      issues: [],
+      ready: true
+    },
+    agentPrivateQuestionAudit: {
+      formatVersion: 1,
+      retentionDays: 7,
+      entries: auditEntries
+    },
+    agentDebugActiveRunId: 'run-current',
+    agentDebugRunIndex: [
+      {
+        id: 'run-current',
+        runId: 'run-current',
+        name: 'hh-job-assistant-auto-apply-current.debug',
+        createdAt: '2026-07-27T10:00:00.000Z',
+        updatedAt: '2026-07-27T10:00:05.000Z',
+        status: state,
+        inProgress: state !== 'complete',
+        droppedEntries
+      }
+    ],
+    'agentDebugRun:run-current': {
+      meta: {
+        id: 'run-current',
+        runId: 'run-current',
+        name: 'hh-job-assistant-auto-apply-current.debug',
+        createdAt: '2026-07-27T10:00:00.000Z',
+        updatedAt: '2026-07-27T10:00:05.000Z',
+        extensionVersion: '0.1.238',
+        status: state,
+        inProgress: state !== 'complete',
+        droppedEntries
+      },
+      entries: [
+        {
+          timestamp: '2026-07-27T10:00:00.000Z',
+          scope: 'content',
+          event: 'start_run',
+          details: {
+            runId: 'run-current',
+            mode: 'live',
+            limit: 200,
+            extensionVersion: '0.1.238',
+            flowVersion: 'list-click-return-v12',
+            url: 'https://hh.ru/search/vacancy?text=Private'
+          }
+        }
+      ]
+    }
+  };
 }
 
 test('debug history is opt-in, retains N runs, and downloads the selected run', async () => {
@@ -252,7 +393,7 @@ test('inspect:logs reads a downloaded debug file and rejects malformed NDJSON wi
       '--json'
     ], { cwd: new URL('.', root) });
     const report = JSON.parse(stdout);
-    assert.equal(report.sourceFile, file);
+    assert.deepEqual(report.source, { mode: 'debug_file', fileName: 'selected-run.debug' });
     assert.equal(report.latestDebugFile.runId, 'run-selected');
     assert.equal(report.latestState.state, 'complete');
     assert.equal(report.counts.applied, 1);
@@ -264,6 +405,214 @@ test('inspect:logs reads a downloaded debug file and rejects malformed NDJSON wi
       }),
       /Invalid debug file JSON at line 2/
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs fails closed for completed debug files with missing result identity or count', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-debug-incomplete-'));
+  const identityless = join(dir, 'identityless.debug');
+  const countMismatch = join(dir, 'count-mismatch.debug');
+  const header = {
+    timestamp: '2026-07-27T10:00:00.000Z',
+    scope: 'extension',
+    event: 'debug_file_created',
+    details: {
+      formatVersion: 2,
+      runId: 'run-incomplete',
+      extensionVersion: '0.1.239',
+      status: 'complete'
+    }
+  };
+
+  try {
+    await writeFile(identityless, [
+      header,
+      {
+        timestamp: '2026-07-27T10:00:01.000Z',
+        event: 'run_state',
+        details: { state: 'complete', processed: 1 }
+      },
+      {
+        timestamp: '2026-07-27T10:00:02.000Z',
+        event: 'run_result',
+        details: { status: 'skipped_unknown', title: 'Private identity-less title' }
+      }
+    ].map((line) => JSON.stringify(line)).join('\n'), 'utf8');
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/inspect-extension-log.mjs', '--file', identityless], {
+        cwd: new URL('.', root)
+      }),
+      /Completed report evidence incomplete: result_count_mismatch,identityless_result/
+    );
+
+    await writeFile(countMismatch, [
+      header,
+      {
+        timestamp: '2026-07-27T10:00:01.000Z',
+        event: 'run_state',
+        details: { state: 'complete', processed: 2 }
+      },
+      {
+        timestamp: '2026-07-27T10:00:02.000Z',
+        event: 'run_result',
+        details: { vacancyId: '101', status: 'applied' }
+      }
+    ].map((line) => JSON.stringify(line)).join('\n'), 'utf8');
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/inspect-extension-log.mjs', '--file', countMismatch], {
+        cwd: new URL('.', root)
+      }),
+      /Completed report evidence incomplete: result_count_mismatch/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs reads exact current evidence from a ClassicLevel snapshot and separates private audit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-source-'));
+  const output = join(dir, 'public.json');
+  const privateOutput = join(dir, 'private.json');
+  await writeClassicLevelStorage(join(dir, 'db'), storageFixture());
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/inspect-extension-log.mjs',
+      '--storage-dir',
+      join(dir, 'db'),
+      '--output',
+      output,
+      '--private-audit-output',
+      privateOutput,
+      '--json'
+    ], { cwd: new URL('.', root) });
+    const report = JSON.parse(stdout);
+    assert.deepEqual(report.source, { mode: 'leveldb_snapshot', storageName: 'db' });
+    assert.deepEqual(report.counts, {
+      applied: 2,
+      newSubmitted: 2,
+      alreadyApplied: 0,
+      skipped: 1,
+      results: 3
+    });
+    assert.equal(report.dailyLedger.newSubmitted, 12);
+    assert.equal(report.evidence.complete, true);
+    assert.equal(report.evidence.expectedResults, 3);
+    assert.equal(report.evidence.readResults, 3);
+    assert.equal(report.evidence.rejectedIdentityless, 0);
+    assert.equal(report.evidence.privateAuditExpected, 1);
+    assert.equal(report.evidence.privateAuditRead, 1);
+    assert.deepEqual(report.evidence.warnings, []);
+    assert.equal(report.latestState.updatedAt, '2026-07-27T10:00:05.000Z');
+    assert.equal(report.privateQuestionAudit.entriesCount, 1);
+    assert.equal(report.privateQuestionAudit.textAnswersCount, 1);
+    assert.equal(report.privateQuestionAudit.choiceAnswersCount, 1);
+    assert.equal(report.privateQuestionAudit.coverLettersCount, 1);
+    assert.equal(report.privateQuestionAudit.assistedResultsCount, 1);
+    assert.equal(report.privateQuestionAudit.missingAssistedAuditCount, 0);
+    assert.equal(report.privateQuestionAudit.orphanAuditCount, 0);
+    assert.equal(report.privateQuestionAuditRaw, undefined);
+    assert.equal(report.applied[0].title.redacted, true);
+    assert.equal(report.applied[0].url, 'https://hh.ru/vacancy/101');
+    assert.equal(report.applied[1].error.redacted, true);
+    assert.equal(report.skipped[0].error, 'HHJA_SAFE_CODE');
+    assert.doesNotMatch(stdout, /Secret Java Role|Sensitive employer|Private question|Private answer|Private cover letter/);
+
+    const publicText = await readFile(output, 'utf8');
+    const privateText = await readFile(privateOutput, 'utf8');
+    assert.doesNotMatch(publicText, /Private question|Private answer|Private cover letter/);
+    assert.match(privateText, /Private question/);
+    assert.match(privateText, /Private answer/);
+    assert.match(privateText, /Private cover letter/);
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.equal((await stat(privateOutput)).mode & 0o777, 0o600);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs rejects identity-less current rows from active evidence without leaking them', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-identity-'));
+  const values = storageFixture({
+    state: 'applying',
+    processed: 2,
+    runResults: [
+      {
+        vacancyId: '101',
+        status: 'applied',
+        title: 'Safe identity',
+        timestamp: '2026-07-27T10:00:02.000Z'
+      },
+      {
+        status: 'skipped_unknown',
+        title: 'Identity-less secret',
+        error: 'Identity-less private error',
+        timestamp: '2026-07-27T10:00:03.000Z'
+      }
+    ],
+    privateEntries: []
+  });
+  await writeClassicLevelStorage(join(dir, 'db'), values);
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/inspect-extension-log.mjs',
+      '--storage-dir',
+      join(dir, 'db'),
+      '--json'
+    ], { cwd: new URL('.', root) });
+    const report = JSON.parse(stdout);
+    assert.equal(report.counts.results, 1);
+    assert.equal(report.evidence.complete, false);
+    assert.equal(report.evidence.rejectedIdentityless, 1);
+    assert.ok(report.evidence.warnings.includes('identityless_result'));
+    assert.doesNotMatch(stdout, /Identity-less secret|Identity-less private error/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs retries then fails closed for incomplete completed LevelDB evidence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-incomplete-'));
+  await writeClassicLevelStorage(join(dir, 'db'), storageFixture({
+    processed: 4
+  }));
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        'scripts/inspect-extension-log.mjs',
+        '--storage-dir',
+        join(dir, 'db'),
+        '--json'
+      ], { cwd: new URL('.', root) }),
+      /Completed storage evidence incomplete.*result_count_mismatch/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs reports truncated debug history without rejecting complete exact LevelDB evidence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-truncated-debug-'));
+  await writeClassicLevelStorage(join(dir, 'db'), storageFixture({
+    droppedEntries: 479
+  }));
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/inspect-extension-log.mjs',
+      '--storage-dir',
+      join(dir, 'db'),
+      '--json'
+    ], { cwd: new URL('.', root) });
+    const report = JSON.parse(stdout);
+    assert.equal(report.evidence.complete, true);
+    assert.equal(report.evidence.debugHistoryTruncated, true);
+    assert.equal(report.evidence.droppedDebugEntries, 479);
+    assert.deepEqual(report.evidence.warnings, ['debug_history_truncated']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

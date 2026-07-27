@@ -68,6 +68,7 @@ test('manifest is valid MV3 and exposes popup UI', async () => {
   assert.ok(manifest.host_permissions.includes('https://api.groq.com/*'));
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://hh.ru/*', 'https://*.hh.ru/*']);
   assert.deepEqual(manifest.content_scripts[0].js, [
+    'src/log-sanitize.js',
     'src/agent-log.js',
     'src/error-text.js',
       'src/action-overlay.js',
@@ -189,6 +190,7 @@ test('version guard bumps json and regex files without stack-specific tooling', 
 
 test('javascript files parse', async () => {
   const files = [
+    'src/log-sanitize.js',
     'src/agent-log.js',
     'src/content-text.js',
     'src/content-dom.js',
@@ -268,6 +270,7 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   assert.match(contentSource, /agentPrivateQuestionAudit/);
   assert.match(contentSource, /GET_AUTOMATION_SETTINGS_AUDIT/);
   assert.match(optionsHtml, /<script src="defaults\.js"><\/script>\s*<script src="options\.js"><\/script>/);
+  assert.match(optionsHtml, /<script src="log-sanitize\.js"><\/script>\s*<script src="agent-log\.js"><\/script>/);
   assert.match(optionsHtml, /id="dailyLimit" type="number" min="1" max="200"/);
   assert.match(optionsSource, /const DEFAULTS = globalThis\.HHJA_DEFAULTS/);
   assert.match(optionsSource, /Math\.min\(Number\(fields\.dailyLimit\.value\) \|\| DEFAULTS\.dailyLimit, 200\)/);
@@ -2682,14 +2685,19 @@ test('extension log inspector reads Chrome profile storage', async () => {
   assert.match(js, /Local Extension Settings/);
   assert.match(js, /run_result/);
   assert.match(js, /HHJA_EXTENSION_ID/);
-  assert.match(js, /const runRecords = extractJsonObjects/);
+  assert.match(js, /import\('classic-level'\)/);
+  assert.match(js, /readExactStorageSnapshot/);
+  assert.match(js, /STORAGE_READ_ATTEMPTS = 3/);
+  assert.doesNotMatch(js, /extractJsonObjects|strings/);
   assert.match(js, /--file/);
   assert.match(js, /Invalid debug file JSON at line/);
   assert.match(js, /New submitted:/);
   assert.match(js, /Already applied:/);
   assert.match(js, /--private-audit-output/);
   assert.match(js, /mode: 0o600/);
-  assert.match(js, /privateQuestionAuditRaw: _privateQuestionAuditRaw/);
+  assert.match(js, /privateQuestionAuditRaw: rawAudit \|\| null/);
+  assert.match(js, /result_count_mismatch/);
+  assert.match(js, /private_audit_coverage_mismatch/);
 });
 
 test('repo script smoke tests Groq cover-letter output without logging secrets', async () => {
@@ -2844,6 +2852,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
 
 test('agent debug log keeps anonymized retained runs outside the popup without extra permissions', async () => {
   const js = await readFile(new URL('src/agent-log.js', root), 'utf8');
+  const sanitizer = await readFile(new URL('src/log-sanitize.js', root), 'utf8');
   const background = await readFile(new URL('src/background.js', root), 'utf8');
   const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
   const manifest = JSON.parse(await readFile(new URL('manifest.json', root), 'utf8'));
@@ -2858,8 +2867,9 @@ test('agent debug log keeps anonymized retained runs outside the popup without e
   assert.match(js, /DEFAULT_RETENTION = 5/);
   assert.match(js, /MAX_RETENTION = 20/);
   assert.match(js, /redaction: 'anonymized'/);
-  assert.match(js, /SENSITIVE_DETAIL_KEYS/);
-  assert.match(js, /sanitizeUrl/);
+  assert.match(js, /HHJA_LOG_SANITIZE/);
+  assert.match(sanitizer, /SENSITIVE_DETAIL_KEYS/);
+  assert.match(sanitizer, /sanitizeUrl/);
   assert.match(js, /buildDebugFile/);
   assert.match(js, /\.debug/);
   assert.match(js, /JSON\.stringify/);
