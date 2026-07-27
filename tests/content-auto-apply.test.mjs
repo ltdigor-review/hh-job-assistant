@@ -1698,13 +1698,16 @@ test('legacy stop-before-submit flag does not stop live application flow', async
 
 test('complete run clears an armed run-scoped stop-before-submit marker', async () => {
   const now = new Date();
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: false,
-    dailyLimit: 200,
-    expectedSalary: '600 000 ₽ на руки',
-    cardTitle: 'Руководитель разработки бэкенда Java',
-    cardText: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться',
+    dailyLimit: 1,
     initialLocalStore: {
       autoApplyStopBeforeSubmit: {
         armed: true,
@@ -1713,14 +1716,24 @@ test('complete run clears an armed run-scoped stop-before-submit marker', async 
         expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
         source: 'test'
       },
+      dailyApplicationLedger: {
+        date: today,
+        legacySubmitted: 0,
+        newSubmitted: 1,
+        alreadyApplied: 0,
+        submittedVacancyIds: ['already-submitted'],
+        alreadyAppliedVacancyIds: [],
+        hhDailyLimitReached: false,
+        updatedAt: now.toISOString()
+      },
       agentDebugLog: [],
       agentDebugLogsEnabled: true
     }
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
-  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
+  assert.deepEqual(result.appended, []);
+  assert.equal(result.submitClicks, 0);
   assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
   assert.equal(result.states.at(-1).state, 'complete');
   const guardEvents = result.localStore.agentDebugLog.map((entry) => entry.event);
@@ -1751,8 +1764,8 @@ test('stale run-scoped stop-before-submit marker is discarded by a new live run'
   });
 
   assert.equal(result.response.ok, true);
-  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
-  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
+  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 1);
   assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
   assert.equal(result.states.at(-1).state, 'complete');
 });
@@ -3161,72 +3174,57 @@ test('auto apply resumes the Moscow-day new-submit ledger across runs', async ()
   assert.deepEqual(result.localStore.dailyApplicationLedger.submittedVacancyIds, ['999', '123']);
 });
 
-test('daily 200 run skips adjacent QA lead roles before opening a response form', async () => {
-  const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
-    hasTextarea: false,
-    dailyLimit: 200,
-    cardTitle: 'Senior AQA Lead Java',
-    cardText: 'Senior AQA Lead Java\nМожно удалённо\nОткликнуться'
-  });
+test('daily 200 run applies heterogeneous completable vacancies without resume-match filtering', async () => {
+  const scenarios = [
+    {
+      title: 'Senior AQA Lead Java',
+      text: 'Senior AQA Lead Java\nМожно удалённо\nОткликнуться'
+    },
+    {
+      title: 'Tech Lead Python',
+      text: 'Tech Lead Python\nМожно удалённо\nОткликнуться'
+    },
+    {
+      title: 'Руководитель разработки бэкенда Java',
+      text: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться',
+      expectedSalary: '600 000 ₽ на руки'
+    },
+    {
+      title: 'Менеджер по продажам',
+      text: 'Менеджер по продажам промышленного оборудования\nРабота в офисе\nОткликнуться'
+    }
+  ];
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
-  assert.equal(result.appended.at(-1).error, 'excluded_lead_role');
-});
+  for (const scenario of scenarios) {
+    const result = await runContentAutoApply({
+      dialogText: 'Откликнуться',
+      hasTextarea: false,
+      dailyLimit: 200,
+      cardTitle: scenario.title,
+      cardText: scenario.text,
+      expectedSalary: scenario.expectedSalary,
+      initialLocalStore: {
+        agentDebugLog: [],
+        agentDebugLogsEnabled: true
+      }
+    });
 
-test('daily 200 run skips a Tech Lead vacancy below the configured resume salary floor', async () => {
-  const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
-    hasTextarea: false,
-    dailyLimit: 200,
-    cardTitle: 'Руководитель разработки бэкенда Java',
-    expectedSalary: '600 000 ₽ на руки',
-    cardText: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться'
-  });
-
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
-  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
-});
-
-test('daily 200 run skips a leadership vacancy for an explicitly different stack', async () => {
-  const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
-    hasTextarea: false,
-    dailyLimit: 200,
-    cardTitle: 'Tech Lead Python',
-    cardText: 'Tech Lead Python\nМожно удалённо\nОткликнуться'
-  });
-
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.submitClicks, 0);
-  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
-  assert.equal(result.appended.at(-1).error, 'stack_mismatch');
-});
-
-test('daily 200 run accepts a Java backend leadership vacancy without a conflicting salary', async () => {
-  const result = await runContentAutoApply({
-    dialogText: 'Откликнуться',
-    hasTextarea: false,
-    dailyLimit: 200,
-    cardTitle: 'Руководитель группы разработки Java backend',
-    expectedSalary: '600 000 ₽ на руки',
-    cardText: 'Руководитель группы разработки Java backend\nМожно удалённо\nОткликнуться'
-  });
-
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.appended.at(-1).status, 'applied');
+    assert.equal(result.response.ok, true, scenario.title);
+    assert.equal(result.response.applied, 1, scenario.title);
+    assert.equal(result.response.skipped, 0, scenario.title);
+    assert.equal(result.submitClicks, 1, scenario.title);
+    assert.equal(result.appended.at(-1).status, 'applied', scenario.title);
+    assert.equal(
+      result.appended.some((item) => item.status === 'skipped_not_resume_match'),
+      false,
+      scenario.title
+    );
+    assert.equal(
+      result.localStore.agentDebugLog.some((entry) => entry.event === 'vacancy_resume_gate_skipped'),
+      false,
+      scenario.title
+    );
+  }
 });
 
 test('auto apply clicks generate resume submit button in hh response dialog', async () => {

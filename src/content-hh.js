@@ -109,46 +109,6 @@ function getVacancyDedupeKey(item) {
   return '';
 }
 
-function parseSalaryAmounts(value) {
-  return [...String(value || '').matchAll(/(\d[\d\s\u00a0\u202f]{3,})\s*(?:₽|руб)/gi)]
-    .map((match) => Number(String(match[1]).replace(/\D/g, '')))
-    .filter((amount) => Number.isFinite(amount) && amount >= 10000 && amount <= 10000000);
-}
-
-function getExpectedSalaryAmount(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  const amount = Number(digits);
-  return Number.isFinite(amount) && amount >= 50000 && amount <= 10000000 ? amount : null;
-}
-
-function assessResumeVacancyMatch(item, expectedSalary = '') {
-  const title = cleanText(item?.title || '');
-  const text = cleanText(getVacancyText(item?.card) || title);
-  const normalizedTitle = title.toLowerCase();
-  const leadership = /(?:tech|team)\s*lead|engineering\s*manager|head\s+of|руководител|лид\s+(?:разработ|backend|бэкенд)|solution\s*architect|архитектор/i;
-  const targetStack = /java|kotlin|backend|back-end|бэкенд/i;
-  const foreignStack = /php|python|\.net|dotnet|golang|\bgo\b|frontend|react|flutter|mobile|android|ios|dwh|graphics|sdet|test\s+automation/i;
-  const excluded = /(?:^|\W)(?:aqa|qa|тестирован|quality\s*assurance|product|project|продакт|проджект|ux|ui|дизайн|dba|database\s+administrator|аналитик)(?:\W|$)/i;
-  if (excluded.test(normalizedTitle)) {
-    return { relevant: false, reason: 'excluded_lead_role' };
-  }
-  if (!leadership.test(normalizedTitle)) {
-    return { relevant: false, reason: 'leadership_title_missing' };
-  }
-  if (foreignStack.test(normalizedTitle) && !/java|kotlin/i.test(normalizedTitle)) {
-    return { relevant: false, reason: 'stack_mismatch' };
-  }
-  if (!targetStack.test(text)) {
-    return { relevant: false, reason: 'backend_stack_missing' };
-  }
-  const salaryFloor = getExpectedSalaryAmount(expectedSalary);
-  const salaryAmounts = parseSalaryAmounts(text);
-  if (salaryFloor && salaryAmounts.length > 0 && Math.max(...salaryAmounts) < salaryFloor) {
-    return { relevant: false, reason: 'salary_below_resume_floor' };
-  }
-  return { relevant: true, reason: '' };
-}
-
 function serializeProcessedVacancyIds(processedIds) {
   return Array.from(processedIds || []).filter(Boolean);
 }
@@ -3483,30 +3443,6 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       item.navigationQueue.processedCounted = true;
     }
     const appliedBeforeItem = counters.applied;
-    const resumeMatch = limit === 200
-      ? assessResumeVacancyMatch(item, config.expectedSalary)
-      : { relevant: true, reason: '' };
-    if (!resumeMatch.relevant) {
-      counters.skipped += 1;
-      await appendResult({
-        index: item.index,
-        vacancyId: item.vacancyId,
-        title: item.title,
-        url: item.url,
-        status: 'skipped_not_resume_match',
-        coverLetterUsed: false,
-        testDetected: item.testDetected,
-        error: resumeMatch.reason
-      });
-      await appendAgentLog('vacancy_resume_gate_skipped', {
-        vacancyId: item.vacancyId,
-        status: 'skipped_not_resume_match',
-        reason: resumeMatch.reason
-      });
-      await setRunState({ state: 'applying', ...counters, lastError: '' });
-      continue;
-    }
-
     try {
       if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
         await saveQueue(item.navigationQueue);
