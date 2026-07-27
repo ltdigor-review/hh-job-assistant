@@ -29,7 +29,25 @@ const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
 const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
 const RESUME_PROFILE_MAX_CHARS = 6000;
 const RESUME_PROFILE_WEAKNESSES_MAX_CHARS = 3000;
-const RESUME_PROFILE_MODEL_MAX_TOKENS = 3200;
+const RESUME_PROFILE_MODEL_MAX_TOKENS = 2400;
+const RESUME_PROFILE_MODEL_RETRY_MAX_TOKENS = 4000;
+const RESUME_PROFILE_MODEL_ATTEMPTS = 2;
+const RESUME_PROFILE_MODEL_RESPONSE_FORMAT = Object.freeze({
+  type: 'json_schema',
+  json_schema: {
+    name: 'hh_resume_profile',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        profile: { type: 'string' },
+        weaknesses: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['profile', 'weaknesses'],
+      additionalProperties: false
+    }
+  }
+});
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
@@ -1088,47 +1106,76 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
         { role: 'system', content: RESUME_PROFILE_BUILD_INSTRUCTION },
         { role: 'user', content: `Текст резюме:\n${String(sourceText).slice(0, 8000)}` }
       ];
-  const requestBody = {
-    model: GROQ_QUESTION_MODEL,
-    messages,
-    temperature: 0,
-    max_tokens: RESUME_PROFILE_MODEL_MAX_TOKENS
-  };
-  await appendAgentLog('resume_profile_request_start', {
-    task,
-    model: requestBody.model,
-    sourceLength: String(sourceText).length,
-    sourceHash: sourceText ? hashText(sourceText) : '',
-    profileLength: String(currentProfile).length,
-    profileHash: currentProfile ? hashText(currentProfile) : '',
-    commentLength: String(editComment).length,
-    commentHash: editComment ? hashText(editComment) : ''
-  });
+  for (let attempt = 1; attempt <= RESUME_PROFILE_MODEL_ATTEMPTS; attempt += 1) {
+    const requestBody = {
+      model: GROQ_QUESTION_MODEL,
+      messages,
+      temperature: 0,
+      max_tokens: attempt === 1 ? RESUME_PROFILE_MODEL_MAX_TOKENS : RESUME_PROFILE_MODEL_RETRY_MAX_TOKENS,
+      reasoning_effort: 'low',
+      response_format: RESUME_PROFILE_MODEL_RESPONSE_FORMAT
+    };
+    await appendAgentLog('resume_profile_request_start', {
+      task,
+      model: requestBody.model,
+      sourceLength: String(sourceText).length,
+      sourceHash: sourceText ? hashText(sourceText) : '',
+      profileLength: String(currentProfile).length,
+      profileHash: currentProfile ? hashText(currentProfile) : '',
+      commentLength: String(editComment).length,
+      commentHash: editComment ? hashText(editComment) : '',
+      attempt
+    });
 
-  const { response, responseText, data } = await fetchGroqCompletion({
-    task,
-    model: requestBody.model,
-    groqApiKey,
-    requestBody
-  });
-  if (!response.ok) {
-    if (response.status === 429) {
-      const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
-      await storageSet({ groqCooldownUntil: new Date(Date.now() + retryAfterMs).toISOString() });
+    const { response, responseText, data } = await fetchGroqCompletion({
+      task,
+      model: requestBody.model,
+      groqApiKey,
+      requestBody
+    });
+    if (!response.ok) {
+      if (response.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(response.headers?.get?.('retry-after')) || GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS;
+        await storageSet({ groqCooldownUntil: new Date(Date.now() + retryAfterMs).toISOString() });
+      }
+      throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
     }
-    throw new Error(`Запрос Groq завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`);
+    const content = String(data?.choices?.[0]?.message?.content || '').trim();
+    const finishReason = data?.choices?.[0]?.finish_reason || '';
+    if (!content || finishReason === 'length') {
+      const normalizedUsage = normalizeUsage(data?.usage);
+      await appendAgentLog('resume_profile_request_error', {
+        task,
+        attempt,
+        maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS,
+        finishReason,
+        maxTokens: requestBody.max_tokens,
+        responseSummary: summarizeGroqResponse(data),
+        usage: { reasoningTokens: normalizedUsage.reasoningTokens }
+      });
+      if (attempt < RESUME_PROFILE_MODEL_ATTEMPTS) continue;
+      const error = new Error(formatGroqEmptyResponseError({
+        task,
+        status: response.status,
+        finishReason,
+        attempt,
+        maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS,
+        maxTokens: requestBody.max_tokens,
+        usage: data?.usage
+      }));
+      error.code = 'HHJA_GROQ_PROFILE_INVALID_RESPONSE';
+      throw error;
+    }
+    await appendAgentLog('resume_profile_request_complete', {
+      task,
+      responseLength: content.length,
+      responseHash: hashText(content),
+      usage: normalizeUsage(data?.usage),
+      attempt
+    });
+    return content;
   }
-  const content = String(data?.choices?.[0]?.message?.content || '').trim();
-  if (!content || data?.choices?.[0]?.finish_reason === 'length') {
-    throw new Error('Groq вернул пустой или обрезанный профиль резюме');
-  }
-  await appendAgentLog('resume_profile_request_complete', {
-    task,
-    responseLength: content.length,
-    responseHash: hashText(content),
-    usage: normalizeUsage(data?.usage)
-  });
-  return content;
+  throw new Error('Groq вернул пустой или обрезанный профиль резюме');
 }
 
 async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() } = {}) {
@@ -1335,7 +1382,12 @@ function normalizeUsage(usage = {}) {
     promptTokens: Number.isFinite(Number(usage.prompt_tokens)) ? Number(usage.prompt_tokens) : null,
     completionTokens: Number.isFinite(Number(usage.completion_tokens)) ? Number(usage.completion_tokens) : null,
     totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null,
-    cachedTokens: Number.isFinite(Number(cachedTokens)) ? Number(cachedTokens) : 0
+    cachedTokens: Number.isFinite(Number(cachedTokens)) ? Number(cachedTokens) : 0,
+    reasoningTokens: Number.isFinite(Number(usage?.completion_tokens_details?.reasoning_tokens))
+      ? Number(usage.completion_tokens_details.reasoning_tokens)
+      : Number.isFinite(Number(usage?.reasoning_tokens))
+        ? Number(usage.reasoning_tokens)
+        : 0
   };
 }
 
@@ -2323,7 +2375,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: `Unknown message type: ${message?.type || 'empty'}` });
     }
   })().catch((error) => {
-    sendResponse({ ok: false, error: localizeError(error) });
+    sendResponse({
+      ok: false,
+      error: localizeError(error),
+      errorCode: error?.code || 'HHJA_UNKNOWN_ERROR'
+    });
   });
 
   return true;

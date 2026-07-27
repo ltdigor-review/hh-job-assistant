@@ -49,7 +49,7 @@
     },
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
-    autoApplyStopBeforeSubmit: false,
+    autoApplyStopBeforeSubmit: null,
     runResults: []
   };
 })();

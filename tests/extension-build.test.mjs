@@ -370,7 +370,7 @@ test('background initializes defaults and registers required listeners', async (
   assert.deepEqual(localData.workFormatPreference, []);
   assert.equal(localData.autoApplyStopRequested, false);
   assert.equal(localData.autoApplyStopRequestedAt, '');
-  assert.equal(localData.autoApplyStopBeforeSubmit, false);
+  assert.equal(localData.autoApplyStopBeforeSubmit, null);
   assert.ok(calls.some(([name]) => name === 'runtime.onMessage'));
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
@@ -808,7 +808,8 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     promptTokens: 1234,
     completionTokens: 63,
     totalTokens: 1297,
-    cachedTokens: 400
+    cachedTokens: 400,
+    reasoningTokens: 0
   });
   assert.doesNotMatch(JSON.stringify(groqResponseLog.details), /gsk_test|rawResponse|responsePreview/);
   assert.equal(groqTestResponseLog.details.content, undefined);
@@ -1302,6 +1303,171 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.equal(emptyErrorLogs.at(-1).details.responseBody, undefined);
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].finishReason, 'length');
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].contentLength, 0);
+});
+
+test('Resume profile generation retries once for empty/length response before success', async () => {
+  let listener = null;
+  const calls = [];
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Подробное резюме Tech Lead с подтвержденным опытом разработки и управления.',
+    resumeCandidateFacts: resumeCandidateFacts('Подробное резюме Tech Lead с подтвержденным опытом разработки и управления.'),
+    resumeProfileText: 'Старый профиль с неверной информацией.',
+    expectedSalary: '',
+    coverPrompt: 'cover prompt',
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
+  };
+
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    if (calls.length === 1) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            choices: [{
+              message: { content: '' },
+              finish_reason: 'length'
+            }],
+            usage: { reasoning_tokens: 12 }
+          };
+        }
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                profile: 'Tech Lead с подтвержденным опытом разработки, управления командой и внедрения процессов.',
+                weaknesses: []
+              })
+            },
+            finish_reason: 'stop'
+          }]
+        };
+      }
+    };
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(callback) { listener = callback; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('resume-profile-retry-log');
+  const send = () => new Promise((resolve) => {
+    const stayedAsync = listener({ type: 'BUILD_RESUME_PROFILE' }, {}, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  const response = await send();
+  assert.equal(response.ok, true);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].max_tokens, 2400);
+  assert.equal(calls[1].max_tokens, 4000);
+  assert.equal(calls[0].reasoning_effort, 'low');
+  assert.equal(calls[1].reasoning_effort, 'low');
+  assert.equal(calls[0].response_format.type, 'json_schema');
+  assert.equal(calls[0].response_format.json_schema.strict, true);
+  assert.equal(calls[1].response_format.type, 'json_schema');
+  assert.equal(calls[1].response_format.json_schema.strict, true);
+  assert.match(localData.resumeProfileText, /Tech Lead с подтвержденным опытом/);
+  assert.equal(localData.resumeProfileWeaknesses, '');
+  const resumeErrorLogs = debugEntries(localData).filter((entry) => entry.event === 'resume_profile_request_error');
+  assert.equal(resumeErrorLogs.length, 1);
+  assert.equal(resumeErrorLogs[0].details.attempt, 1);
+  assert.equal(resumeErrorLogs[0].details.maxAttempts, 2);
+  assert.equal(resumeErrorLogs[0].details.finishReason, 'length');
+  assert.equal(resumeErrorLogs[0].details.responseSummary.choices[0].contentLength, 0);
+  assert.equal(resumeErrorLogs[0].details.usage.reasoningTokens, 12);
+});
+
+test('Resume profile generation is not retried on HTTP errors', async () => {
+  let listener = null;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Технический профиль кандидата.',
+    resumeCandidateFacts: resumeCandidateFacts('Технический профиль кандидата.'),
+    resumeProfileText: 'Последний рабочий профиль кандидата с подтвержденными фактами.',
+    resumeProfileWeaknesses: '• Старый аудит',
+    resumeProfileSourceHash: 'old-hash',
+    resumeProfileBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileCheckedAt: '2026-01-01T00:00:00.000Z'
+  };
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return {
+      ok: false,
+      status: 500,
+      async text() {
+        return 'internal error';
+      }
+    };
+  };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(callback) { listener = callback; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const response = await new Promise((resolve) => listener({ type: 'BUILD_RESUME_PROFILE' }, {}, resolve));
+  assert.equal(response.ok, false);
+  assert.equal(requestCount, 1);
+  assert.equal(localData.resumeProfileText, 'Последний рабочий профиль кандидата с подтвержденными фактами.');
+  assert.equal(localData.resumeProfileWeaknesses, '• Старый аудит');
 });
 
 test('background reloads extension on explicit reload message', async () => {
@@ -1870,9 +2036,85 @@ test('resume profile invalid build preserves last good profile', async () => {
   assert.equal(localData.resumeProfileSourceHash, 'old-hash');
 });
 
+test('resume profile double truncation keeps all last-good profile metadata and returns typed error', async () => {
+  let listener = null;
+  let requests = 0;
+  const localData = {
+    groqApiKey: 'gsk_test',
+    groqModel: 'test-model',
+    resumeText: 'Подробное резюме кандидата с подтвержденным опытом разработки и руководства командой.',
+    resumeCandidateFacts: resumeCandidateFacts('Подробное резюме кандидата с подтвержденным опытом разработки и руководства командой.'),
+    resumeProfileText: 'Последний рабочий профиль кандидата с подтвержденными фактами.',
+    resumeProfileWeaknesses: '• Старый аудит',
+    resumeProfileSourceHash: 'old-hash',
+    resumeProfileBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileCheckedAt: '2026-01-01T00:00:00.000Z',
+    agentDebugLog: [],
+    agentDebugLogsEnabled: true
+  };
+  globalThis.fetch = async () => {
+    requests += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+          usage: { completion_tokens: 100 }
+        };
+      }
+    };
+  };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return {};
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {},
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await startDebugRun('resume-profile-double-truncation-log');
+  const response = await new Promise((resolve) => listener({ type: 'BUILD_RESUME_PROFILE' }, {}, resolve));
+  assert.equal(response.ok, false);
+  assert.equal(response.errorCode, 'HHJA_GROQ_PROFILE_INVALID_RESPONSE');
+  assert.match(response.error, /Groq вернул пустой ответ/);
+  assert.match(response.error, /попытки 2\/2/);
+  assert.equal(requests, 2);
+  assert.equal(localData.resumeProfileText, 'Последний рабочий профиль кандидата с подтвержденными фактами.');
+  assert.equal(localData.resumeProfileWeaknesses, '• Старый аудит');
+  assert.equal(localData.resumeProfileSourceHash, 'old-hash');
+  assert.equal(localData.resumeProfileBuiltAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(localData.resumeProfileCheckedAt, '2026-01-01T00:00:00.000Z');
+  const truncationErrors = debugEntries(localData).filter((entry) => entry.event === 'resume_profile_request_error');
+  assert.equal(truncationErrors.length, 2);
+  assert.equal(truncationErrors[0].details.attempt, 1);
+  assert.equal(truncationErrors[1].details.attempt, 2);
+  assert.equal(truncationErrors[1].details.maxTokens, 4000);
+});
+
 test('resume profile auto refresh is single-flight and never runs inside each application', async () => {
   let listener = null;
   let profileBuildCalls = 0;
+  let profileAttempts = 0;
   let coverCalls = 0;
   const localData = {
     groqApiKey: 'gsk_test',
@@ -1895,11 +2137,31 @@ test('resume profile auto refresh is single-flight and never runs inside each ap
     const body = JSON.parse(options.body);
     if (body.messages[0].content.includes('Преобразуй текст резюме')) {
       profileBuildCalls += 1;
+      profileAttempts += 1;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      return { ok: true, async json() { return { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
-        profile: 'Tech Lead: руководил командой 15 FTE, проводил найм, интервью и онбординг инженеров.',
-        weaknesses: []
-      }) } }] }; } };
+      if (profileAttempts === 1) {
+        return {
+          ok: true,
+          async json() {
+            return {
+              choices: [{ finish_reason: 'length', message: { content: '' } }],
+              usage: { reasoning_tokens: 99 }
+            };
+          }
+        };
+      }
+      return {
+        ok: true,
+        async json() {
+          return {
+            choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+              profile: 'Tech Lead: руководил командой 15 FTE, проводил найм, интервью и онбординг инженеров.',
+              weaknesses: []
+            }) } }],
+            usage: {}
+          };
+        }
+      };
     }
     coverCalls += 1;
     return { ok: true, async json() { return { choices: [{ finish_reason: 'stop', message: { content: 'Откликаюсь на вакансию.' } }] }; } };
@@ -1925,16 +2187,17 @@ test('resume profile auto refresh is single-flight and never runs inside each ap
   assert.equal(refreshResponses.every((item) => item.ok), true);
   const responses = await Promise.all([send(), send()]);
   assert.equal(responses.every((item) => item.ok), true);
-  assert.equal(profileBuildCalls, 1);
+  assert.equal(profileBuildCalls, 2);
+  assert.equal(profileAttempts, 2);
   assert.equal(coverCalls, 2);
   assert.match(localData.resumeProfileText, /15 FTE/);
 
   localData.resumeProfileCheckedAt = '2026-01-01T00:00:00.000Z';
   const next = await send();
   assert.equal(next.ok, true);
-  assert.equal(profileBuildCalls, 1);
+  assert.equal(profileBuildCalls, 2);
   assert.equal(coverCalls, 3);
-  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].requests, 1);
+  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].requests, 2);
   assert.equal(localData.aiQuotaUsage.models['llama-3.1-8b-instant'].requests, 3);
 });
 
@@ -2034,7 +2297,7 @@ test('resume profile auto refresh does not require HH to display exact age', asy
   assert.match(localData.resumeProfileText, /Java\/Kotlin Tech Lead/);
   assert.equal(localData.resumeCandidateFacts, null);
   assert.equal(localData.expectedSalary, '600000');
-  assert.equal(profileRequest.max_tokens, 3200);
+  assert.equal(profileRequest.max_tokens, 2400);
   assert.match(profileRequest.messages[0].content, /не длиннее 6000 символов/);
 
   const audited = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
@@ -2931,7 +3194,7 @@ test('options preserve masked Groq key unless user edits the key field', async (
     runState: {},
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
-    autoApplyStopBeforeSubmit: false,
+    autoApplyStopBeforeSubmit: null,
     runResults: []
   };
   globalThis.HHJA_LOCALIZE_ERROR = (error, fallback) => fallback || String(error);

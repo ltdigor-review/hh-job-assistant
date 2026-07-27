@@ -52,6 +52,7 @@ const POST_SUBMIT_SETTLE_MS = 5000;
 const SUBMIT_CONFIRM_TIMEOUT_MS = 15000;
 const RUNTIME_MESSAGE_TIMEOUT_MS = 45000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
+const AUTO_APPLY_STOP_BEFORE_SUBMIT_TTL_MS = 15 * 60 * 1000;
 const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
 const AUTO_START_TOKEN_EXPIRES_AT_KEY = 'autoApplyAutoStartTokenExpiresAt';
 const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
@@ -274,6 +275,100 @@ function localizeError(error, fallback) {
 }
 
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
+
+function getStopBeforeSubmitExpiresAtMs(value = '') {
+  const expiresAtMs = Date.parse(String(value || ''));
+  return Number.isFinite(expiresAtMs) ? expiresAtMs : NaN;
+}
+
+function normalizeAutoApplyStopBeforeSubmit(value) {
+  if (typeof value !== 'object' || value === null) return null;
+  if (value.armed !== true) return null;
+  if (value.runId !== undefined && typeof value.runId !== 'string') return null;
+  const runId = String(value.runId || '').trim();
+  const expiresAtMs = getStopBeforeSubmitExpiresAtMs(value.expiresAt);
+  if (!Number.isFinite(expiresAtMs)) return null;
+  return {
+    armed: true,
+    runId,
+    armedAt: String(value.armedAt || ''),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    source: String(value.source || 'url')
+  };
+}
+
+function buildStopBeforeSubmitState(runId = '') {
+  const now = new Date();
+  return {
+    armed: true,
+    runId: String(runId || ''),
+    armedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + AUTO_APPLY_STOP_BEFORE_SUBMIT_TTL_MS).toISOString(),
+    source: 'url_param'
+  };
+}
+
+async function readAutoApplyStopBeforeSubmit() {
+  const { autoApplyStopBeforeSubmit } = await storageGet(['autoApplyStopBeforeSubmit'], { optional: true });
+  if (autoApplyStopBeforeSubmit === true || autoApplyStopBeforeSubmit === false) {
+    await storageSet({ autoApplyStopBeforeSubmit: null }, { optional: true });
+    if (autoApplyStopBeforeSubmit === true) {
+      await appendAgentLog('stop_before_submit_guard_discarded', { reason: 'legacy_unscoped' });
+    }
+    return null;
+  }
+  const state = normalizeAutoApplyStopBeforeSubmit(autoApplyStopBeforeSubmit);
+  if (!state) {
+    if (autoApplyStopBeforeSubmit != null) {
+      await storageSet({ autoApplyStopBeforeSubmit: null }, { optional: true });
+      await appendAgentLog('stop_before_submit_guard_discarded', { reason: 'invalid_state' });
+    }
+    return null;
+  }
+  const expiresAtMs = getStopBeforeSubmitExpiresAtMs(state.expiresAt);
+  if (!state.runId && (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now())) {
+    await storageSet({ autoApplyStopBeforeSubmit: null }, { optional: true });
+    await appendAgentLog('stop_before_submit_guard_discarded', { reason: 'pending_expired' });
+    return null;
+  }
+  return state;
+}
+
+async function clearStopBeforeSubmitForRun(runId, reason = 'run_terminal') {
+  const current = await readAutoApplyStopBeforeSubmit();
+  if (!current) return false;
+  const normalizedRunId = String(runId || '');
+  if (!normalizedRunId || current.runId !== normalizedRunId) return false;
+  await storageSet({ autoApplyStopBeforeSubmit: null }, { optional: true });
+  await appendAgentLog('stop_before_submit_guard_cleared', {
+    runId: normalizedRunId,
+    reason
+  });
+  return true;
+}
+
+async function claimStopBeforeSubmitForRun(runId) {
+  if (!runId) return false;
+  const current = await readAutoApplyStopBeforeSubmit();
+  if (!current) return false;
+  if (current.runId) {
+    if (current.runId === String(runId)) return true;
+    await storageSet({ autoApplyStopBeforeSubmit: null }, { optional: true });
+    await appendAgentLog('stop_before_submit_guard_discarded', {
+      runId: String(runId),
+      reason: 'stale_run'
+    });
+    return false;
+  }
+  await storageSet({
+    autoApplyStopBeforeSubmit: {
+      ...current,
+      runId: String(runId)
+    }
+  }, { optional: true });
+  await appendAgentLog('stop_before_submit_guard_claimed', { runId: String(runId) });
+  return true;
+}
 
 function markExtensionContextInvalidated() {
   extensionContextInvalidated = true;
@@ -1473,10 +1568,14 @@ async function sendRuntimeMessage(message, options = {}) {
 async function setRunState(patch) {
   await syncStopRequestedFromStorage();
   const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
+  const stopBeforeSubmitTerminalStates = new Set(['complete', 'dry_run_complete', 'stopped', 'error']);
   const nextPatch = { ...(patch || {}) };
   if (stopRequested && stopReason === 'user_stop' && nextPatch.state && nextPatch.state !== 'stopped' && nextPatch.state !== 'error') {
     nextPatch.state = 'stopped';
     nextPatch.currentAction = 'Остановлено';
+  }
+  if (stopBeforeSubmitTerminalStates.has(nextPatch.state)) {
+    await clearStopBeforeSubmitForRun(activeRunId, `terminal_${nextPatch.state}`);
   }
   if (terminalStates.has(nextPatch.state) && !Object.prototype.hasOwnProperty.call(nextPatch, 'currentAction')) {
     nextPatch.currentAction = nextPatch.state === 'complete' ? 'Отклики завершены' : '';
@@ -1646,9 +1745,15 @@ async function completeHhDailyResponseLimit(item, counters, reason = '') {
 
 async function stopBeforeSubmitIfRequested(counters) {
   if (await stopIfRequested(counters)) return true;
-  const { autoApplyStopBeforeSubmit = false } = await storageGet(['autoApplyStopBeforeSubmit'], { optional: true });
-  if (autoApplyStopBeforeSubmit !== true) return false;
-  await storageSet({ autoApplyStopBeforeSubmit: false }, { optional: true });
+  const armedState = await readAutoApplyStopBeforeSubmit();
+  if (!armedState) return false;
+  const runId = String(activeRunId || '');
+  if (!runId) return false;
+  if (armedState.runId && armedState.runId !== runId) return false;
+  if (!armedState.runId) {
+    await storageSet({ autoApplyStopBeforeSubmit: { ...armedState, runId } }, { optional: true });
+  }
+  await clearStopBeforeSubmitForRun(runId, 'before_submit');
   await setStopRequested('stop_before_submit');
   await appendAgentLog('stop_before_submit', { url: location.href });
   await markStopped(counters);
@@ -3129,6 +3234,8 @@ async function continueQueuedAutoApply() {
   if (isResumePage()) {
     return false;
   }
+  activeRunId = autoApplyQueue.runId || activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  await claimStopBeforeSubmitForRun(activeRunId);
   if (stopRequested) {
     await markStopped(autoApplyQueue.counters || {});
     return true;
@@ -3535,9 +3642,11 @@ async function continueSearchAutoApply() {
   if (!autoApplySearchQueue?.active) {
     return false;
   }
+  activeRunId = autoApplySearchQueue.runId || activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   if (['complete', 'dry_run_complete', 'stopped', 'idle', 'error'].includes(runState?.state)) {
     await saveSearchQueue({ active: false });
+    await clearStopBeforeSubmitForRun(activeRunId, 'stale_search_queue');
     await appendAgentLog('stale_search_queue_cleared', {
       state: runState?.state || '',
       url: location.href
@@ -3551,7 +3660,7 @@ async function continueSearchAutoApply() {
   requireAuthenticatedHhPage();
 
   queuedSearchStarted = true;
-  activeRunId = autoApplySearchQueue.runId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  await claimStopBeforeSubmitForRun(activeRunId);
   await clearStopRequestedFlag();
 
   try {
@@ -3617,6 +3726,9 @@ async function startRun(mode, limitOverride = null, options = {}) {
     runId: activeRunId,
     url: location.href
   });
+  if (mode === 'live') {
+    await claimStopBeforeSubmitForRun(activeRunId);
+  }
   await storageSet({
     runResults: [],
     autoApplyQueue: { active: false },
@@ -3856,7 +3968,12 @@ async function maybeEnableStopBeforeSubmitFromUrlParam() {
     return false;
   }
 
-  await storageSet({ autoApplyStopBeforeSubmit: true }, { optional: true });
+  const nextState = buildStopBeforeSubmitState(activeRunId || '');
+  await storageSet({ autoApplyStopBeforeSubmit: nextState }, { optional: true });
+  await appendAgentLog('stop_before_submit_guard_armed', {
+    runId: nextState.runId,
+    expiresAt: nextState.expiresAt
+  });
   await appendAgentLog('url_trigger_stop_before_submit', { url: location.href });
   return true;
 }

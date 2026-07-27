@@ -1648,12 +1648,19 @@ test('stop before submit preserves generated answers and prevents application su
 
 test('stop-before-submit flag preserves generated cover letter and prevents submit', async () => {
   const letter = 'Работал со Spring Boot и микросервисами. Откликаюсь.';
+  const now = new Date();
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nСопроводительное письмо',
     hasTextarea: true,
     startOnResponseForm: true,
     initialLocalStore: {
-      autoApplyStopBeforeSubmit: true,
+      autoApplyStopBeforeSubmit: {
+        armed: true,
+        runId: '',
+        armedAt: new Date(now.getTime() - 250).toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+        source: 'test'
+      },
       agentDebugLog: [],
       agentDebugLogsEnabled: true
     },
@@ -1664,10 +1671,113 @@ test('stop-before-submit flag preserves generated cover letter and prevents subm
   assert.equal(result.submitClicks, 0);
   assert.equal(result.textareaValue, letter);
   assert.equal(result.appended.some((item) => /^applied/.test(item.status)), false);
-  assert.equal(result.localStore.autoApplyStopBeforeSubmit, false);
+  assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
   assert.equal(result.localStore.autoApplyStopRequested, true);
   assert.equal(result.states.at(-1).state, 'stopped');
   assert.equal(result.localStore.agentDebugLog.at(-1).event, 'stop_before_submit');
+});
+
+test('legacy stop-before-submit flag does not stop live application flow', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    initialLocalStore: {
+      autoApplyStopBeforeSubmit: true,
+      agentDebugLog: [],
+      agentDebugLogsEnabled: true
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
+  assert.equal(result.states.at(-1).state, 'complete');
+});
+
+test('complete run clears an armed run-scoped stop-before-submit marker', async () => {
+  const now = new Date();
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    expectedSalary: '600 000 ₽ на руки',
+    cardTitle: 'Руководитель разработки бэкенда Java',
+    cardText: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться',
+    initialLocalStore: {
+      autoApplyStopBeforeSubmit: {
+        armed: true,
+        runId: '',
+        armedAt: new Date(now.getTime() - 1000).toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+        source: 'test'
+      },
+      agentDebugLog: [],
+      agentDebugLogsEnabled: true
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
+  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
+  assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
+  assert.equal(result.states.at(-1).state, 'complete');
+  const guardEvents = result.localStore.agentDebugLog.map((entry) => entry.event);
+  assert.equal(guardEvents.filter((event) => event === 'stop_before_submit_guard_claimed').length, 1);
+  assert.ok(guardEvents.indexOf('stop_before_submit_guard_claimed') < guardEvents.indexOf('stop_before_submit_guard_cleared'));
+  const clearedLog = result.localStore.agentDebugLog.find((entry) => entry.event === 'stop_before_submit_guard_cleared');
+  assert.equal(clearedLog.details.reason, 'terminal_complete');
+});
+
+test('stale run-scoped stop-before-submit marker is discarded by a new live run', async () => {
+  const now = new Date();
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 200,
+    expectedSalary: '600 000 ₽ на руки',
+    cardTitle: 'Руководитель разработки бэкенда Java',
+    cardText: 'Руководитель разработки бэкенда Java\nдо 320 000 ₽ за месяц\nМожно удалённо\nОткликнуться',
+    initialLocalStore: {
+      autoApplyStopBeforeSubmit: {
+        armed: true,
+        runId: 'other-run',
+        armedAt: new Date(now.getTime() - 1000).toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+        source: 'test'
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.appended.at(-1).status, 'skipped_not_resume_match');
+  assert.equal(result.appended.at(-1).error, 'salary_below_resume_floor');
+  assert.equal(result.localStore.autoApplyStopBeforeSubmit, null);
+  assert.equal(result.states.at(-1).state, 'complete');
+});
+
+test('dry run leaves a pending live stop-before-submit guard unclaimed', async () => {
+  const now = new Date();
+  const pendingGuard = {
+    armed: true,
+    runId: '',
+    armedAt: new Date(now.getTime() - 1000).toISOString(),
+    expiresAt: new Date(now.getTime() + 60 * 1000).toISOString(),
+    source: 'test'
+  };
+  const result = await runContentAutoApply({
+    messageType: 'START_DRY_RUN',
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    initialLocalStore: {
+      autoApplyStopBeforeSubmit: pendingGuard
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.deepEqual(result.localStore.autoApplyStopBeforeSubmit, pendingGuard);
+  assert.equal(result.states.at(-1).state, 'dry_run_complete');
 });
 
 test('auto apply strips markdown from generated question answers before submit', async () => {
@@ -4730,7 +4840,13 @@ test('content script enables stop-before-submit from hh url parameter', async ()
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.ok(listener, 'content script should register a listener');
-    assert.equal(localStore.autoApplyStopBeforeSubmit, true);
+    assert.equal(localStore.autoApplyStopBeforeSubmit.armed, true);
+    assert.equal(localStore.autoApplyStopBeforeSubmit.runId, '');
+    assert.equal(localStore.autoApplyStopBeforeSubmit.source, 'url_param');
+    assert.equal(typeof localStore.autoApplyStopBeforeSubmit.armedAt, 'string');
+    assert.equal(typeof localStore.autoApplyStopBeforeSubmit.expiresAt, 'string');
+    assert.ok(new Date(localStore.autoApplyStopBeforeSubmit.expiresAt).getTime() > new Date(localStore.autoApplyStopBeforeSubmit.armedAt).getTime());
+    assert.equal(logs.some((entry) => entry.event === 'stop_before_submit_guard_armed'), true);
     assert.equal(logs.at(-1).event, 'url_trigger_stop_before_submit');
     assert.deepEqual(historyUrls, ['/']);
   } finally {
