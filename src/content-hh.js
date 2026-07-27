@@ -87,6 +87,7 @@ let queuedResumeStarted = false;
 let queuedSearchStarted = false;
 let extensionContextInvalidated = false;
 let actionOverlay = null;
+let startRunPromise = null;
 
 class StopRequestedError extends Error {
   constructor() {
@@ -3653,6 +3654,99 @@ async function startRun(mode, limitOverride = null, options = {}) {
   return handleAutoApply(limit, initialCounters, [], { maxProcessed });
 }
 
+async function startRunSingleFlight(mode, limitOverride = null, options = {}) {
+  if (startRunPromise) {
+    await appendAgentLog('start_run_duplicate_ignored', {
+      mode,
+      activeRunId,
+      reason: 'same_page_start_in_progress'
+    });
+    return { ok: true, alreadyRunning: true, activeRunId };
+  }
+
+  const pending = (async () => {
+    const queueStatus = await getAutoApplyQueueStatus();
+    if (queueStatus.hasResponseQueue || queueStatus.hasSearchQueue) {
+      await appendAgentLog('start_run_duplicate_ignored', {
+        mode,
+        activeRunId,
+        reason: 'saved_queue_active'
+      });
+      return { ok: true, alreadyRunning: true, activeRunId };
+    }
+    return startRun(mode, limitOverride, options);
+  })();
+  startRunPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (startRunPromise === pending) {
+      startRunPromise = null;
+    }
+  }
+}
+
+async function continueRunSingleFlight() {
+  if (startRunPromise) {
+    await appendAgentLog('continue_run_duplicate_ignored', {
+      activeRunId,
+      reason: 'same_page_run_in_progress'
+    });
+    return { ok: true, alreadyRunning: true, activeRunId };
+  }
+
+  const pending = continueSavedAutoApply();
+  startRunPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (startRunPromise === pending) {
+      startRunPromise = null;
+    }
+  }
+}
+
+function isTrustedAutoApplyShortcut(event) {
+  return (
+    event?.isTrusted === true &&
+    event?.repeat !== true &&
+    event?.altKey === true &&
+    event?.shiftKey === true &&
+    event?.ctrlKey !== true &&
+    event?.metaKey !== true &&
+    cleanText(event?.key).toLowerCase() === 'a'
+  );
+}
+
+async function handleTrustedAutoApplyShortcut(event) {
+  if (!isTrustedAutoApplyShortcut(event)) {
+    return { handled: false };
+  }
+  event.preventDefault?.();
+  event.stopPropagation?.();
+
+  if (!isHhSearchPageUrl(location.href) || isUnsafePage() || !hasAuthenticatedHhSignal()) {
+    await appendAgentLog('trusted_shortcut_rejected', {
+      reason: !isHhSearchPageUrl(location.href)
+        ? 'not_search_page'
+        : isUnsafePage()
+          ? 'unsafe_page'
+          : 'authentication_required'
+    });
+    return { handled: true, started: false };
+  }
+
+  await appendAgentLog('trusted_shortcut_start', { mode: 'live' });
+  const queueStatus = await getAutoApplyQueueStatus();
+  if (queueStatus.canContinueAutoApply) {
+    await appendAgentLog('trusted_shortcut_continue', { mode: 'live' });
+    const result = await continueRunSingleFlight();
+    return { handled: true, continued: result?.alreadyRunning !== true, ...result };
+  }
+  const result = await startRunSingleFlight('live');
+  return { handled: true, started: result?.alreadyRunning !== true, ...result };
+}
+
 function consumeAutoStartParam() {
   try {
     const url = new URL(location.href);
@@ -3801,7 +3895,7 @@ async function maybeStartFromUrlParam() {
       await storageSet({ groqModel });
     }
     await appendAgentLog('url_trigger_start', { mode, limit, maxProcessed, groqModel, url: location.href });
-    await startRun(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
+    await startRunSingleFlight(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
@@ -3830,13 +3924,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'START_DRY_RUN':
-        sendResponse(await startRun('dry', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
+        sendResponse(await startRunSingleFlight('dry', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
         break;
       case 'START_AUTO_APPLY':
-        sendResponse(await startRun('live', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
+        sendResponse(await startRunSingleFlight('live', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
         break;
       case 'CONTINUE_AUTO_APPLY':
-        sendResponse(await continueSavedAutoApply());
+        sendResponse(await continueRunSingleFlight());
         break;
       case 'STOP_RUN':
         await setStopRequested('user_stop');
@@ -3869,13 +3963,15 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
       throw new Error('Live auto-start DOM event is disabled without an extension-issued token.');
     }
     await appendAgentLog('page_trigger_start_auto_apply', { mode, url: location.href });
-    await startRun(mode);
+    await startRunSingleFlight(mode);
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
     await setRunState({ state: 'error', lastError: messageText });
   }
 });
+
+globalThis.window?.addEventListener?.('keydown', handleTrustedAutoApplyShortcut, true);
 
 async function initializeContentScript() {
   const reloadedFromUrl = await maybeReloadExtensionFromUrlParam();

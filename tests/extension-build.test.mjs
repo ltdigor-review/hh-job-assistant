@@ -1938,6 +1938,114 @@ test('resume profile auto refresh is single-flight and never runs inside each ap
   assert.equal(localData.aiQuotaUsage.models['llama-3.1-8b-instant'].requests, 3);
 });
 
+test('resume profile auto refresh does not require HH to display exact age', async () => {
+  let listener = null;
+  let profileRequest = null;
+  const resumeText = [
+    'Tech Lead',
+    '600 000 ₽ на руки',
+    'Java 21, Kotlin, Spring Boot, PostgreSQL, Kafka',
+    'Руководил двумя командами численностью 15 инженеров.',
+    'Телеграм: t.me/example_candidate',
+    'Формат работы: Удалённо, Гибрид'
+  ].join('\n');
+  const localData = {
+    groqApiKey: 'gsk_test',
+    resumeUrl: 'https://hh.ru/resume/abc123',
+    resumeParsedText: '',
+    resumeParsedAt: '',
+    resumeParsedUrl: '',
+    resumeCandidateFacts: null,
+    resumeProfileText: '',
+    resumeProfileSourceHash: '',
+    resumeProfileCheckedAt: '',
+    resumeProfileAutoRefreshEnabled: true,
+    resumeCacheTtlHours: 1,
+    expectedSalary: '500000',
+    telegramUsername: '',
+    employmentPreference: ['labor_contract'],
+    workFormatPreference: ['remote', 'hybrid'],
+    dailyLimit: 200,
+    agentDebugLogsEnabled: true,
+    agentDebugRetentionCount: 20
+  };
+
+  globalThis.fetch = async (_url, options) => {
+    profileRequest = JSON.parse(options.body);
+    return {
+      ok: true,
+      async json() {
+        return {
+          choices: [{
+            finish_reason: 'stop',
+            message: {
+              content: JSON.stringify({
+                profile: 'Java/Kotlin Tech Lead: руководил двумя командами из 15 инженеров и развивал высоконагруженные backend-сервисы.',
+                weaknesses: []
+              })
+            }
+          }]
+        };
+      }
+    };
+  };
+  globalThis.location = { pathname: '/resume/abc123' };
+  globalThis.document = {
+    title: 'Tech Lead resume',
+    body: new FakeElement({ text: resumeText }),
+    querySelector(selector) {
+      if (selector === 'main') return new FakeElement({ text: resumeText });
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    }
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {
+      async create({ url }) { return { id: 73, url, status: 'complete' }; },
+      async get() { return { id: 73, status: 'complete' }; },
+      async remove() {},
+      onUpdated: { addListener() {}, removeListener() {} }
+    },
+    scripting: {
+      async executeScript({ func }) { return [{ result: await func() }]; }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  const send = (message) => new Promise((resolve) => {
+    assert.equal(listener(message, {}, resolve), true);
+  });
+
+  const refreshed = await send({ type: 'ENSURE_RESUME_PROFILE' });
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.profileAvailable, true);
+  assert.match(localData.resumeProfileText, /Java\/Kotlin Tech Lead/);
+  assert.equal(localData.resumeCandidateFacts, null);
+  assert.equal(localData.expectedSalary, '600000');
+  assert.equal(profileRequest.max_tokens, 3200);
+  assert.match(profileRequest.messages[0].content, /не длиннее 6000 символов/);
+
+  const audited = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(audited.ok, true);
+  assert.equal(audited.audit.checks.resumeProfileAvailable, true);
+  assert.equal(audited.audit.checks.resumeProfileFresh, true);
+  assert.equal(audited.audit.checks.contactConfigured, true);
+  assert.equal(audited.audit.checks.expectedSalaryMatchesResume, true);
+  assert.equal(audited.audit.ready, true);
+});
+
 test('Groq prompt caps large payload components', async () => {
   let listener = null;
   let requestBody = null;
@@ -2707,6 +2815,20 @@ test('content script can clear stale auto-apply queues from URL guard', async ()
   assert.match(content, /url_trigger_stop_run/);
   assert.match(content, /stale_search_queue_cleared/);
   assert.match(content, /\['complete', 'dry_run_complete', 'stopped', 'idle', 'error'\]\.includes\(runState\?\.state\)/);
+});
+
+test('trusted page shortcut shares a single-flight live start guard', async () => {
+  const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
+
+  assert.match(content, /event\?\.isTrusted === true/);
+  assert.match(content, /event\?\.altKey === true/);
+  assert.match(content, /event\?\.shiftKey === true/);
+  assert.match(content, /addEventListener\?\.\('keydown', handleTrustedAutoApplyShortcut, true\)/);
+  assert.match(content, /startRunSingleFlight\('live'\)/);
+  assert.match(content, /queueStatus\.canContinueAutoApply/);
+  assert.match(content, /continueRunSingleFlight\(\)/);
+  assert.match(content, /trusted_shortcut_continue/);
+  assert.match(content, /start_run_duplicate_ignored/);
 });
 
 test('options preserve masked Groq key unless user edits the key field', async () => {

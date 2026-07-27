@@ -64,6 +64,7 @@ async function runContentAutoApply({
   cardTitle = 'Java Developer',
   cardText = 'Java Developer\nООО Test\nОткликнуться',
   sendMessageAfterImport = true,
+  trustedShortcutEvents = [],
   authenticated = true,
   stopWhenState = ''
 }) {
@@ -79,6 +80,7 @@ async function runContentAutoApply({
   let bodyOnlyFollowupOpen = false;
   let bodyNode = null;
   let hiddenDialogReads = 0;
+  const windowEventListeners = new Map();
   const localStore = { ...TEST_READY_CONFIG,
     groqApiKey: 'gsk_test',
     resumeUrl: 'https://hh.ru/resume/test-resume',
@@ -349,6 +351,9 @@ async function runContentAutoApply({
     __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
       navigateUrl = url;
     },
+    addEventListener(type, handler) {
+      windowEventListeners.set(type, handler);
+    },
     getComputedStyle() {
       return { visibility: 'visible', display: 'block' };
     }
@@ -507,6 +512,14 @@ async function runContentAutoApply({
   await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${crypto.randomUUID()}`);
   assert.ok(listener, 'content script should register a listener');
 
+  const shortcutResults = [];
+  if (trustedShortcutEvents.length > 0) {
+    const shortcutHandler = windowEventListeners.get('keydown');
+    assert.ok(shortcutHandler, 'content script should register the trusted shortcut listener');
+    const pendingShortcutResults = trustedShortcutEvents.map((event) => shortcutHandler(event));
+    shortcutResults.push(...await Promise.all(pendingShortcutResults));
+  }
+
   let response = null;
   if (sendMessageAfterImport) {
     response = await new Promise((resolve) => {
@@ -519,6 +532,7 @@ async function runContentAutoApply({
 
   return {
     response,
+    shortcutResults,
     appended,
     states,
     groqRequests,
@@ -540,6 +554,43 @@ async function runContentAutoApply({
     dialogOpen: Boolean(dialog)
   };
 }
+
+test('trusted Alt+Shift+A fallback ignores synthetic input and starts only one run', async () => {
+  const eventBase = {
+    key: 'a',
+    altKey: true,
+    shiftKey: true,
+    ctrlKey: false,
+    metaKey: false,
+    repeat: false,
+    preventDefault() {},
+    stopPropagation() {}
+  };
+  const result = await runContentAutoApply({
+    sendMessageAfterImport: false,
+    trustedShortcutEvents: [
+      { ...eventBase, isTrusted: false },
+      { ...eventBase, isTrusted: true },
+      { ...eventBase, isTrusted: true }
+    ],
+    initialLocalStore: {
+      agentDebugLogsEnabled: true,
+      autoApplyStopBeforeSubmit: true
+    }
+  });
+
+  assert.equal(result.shortcutResults[0].handled, false);
+  assert.equal(result.shortcutResults[1].handled, true);
+  assert.equal(result.shortcutResults[2].alreadyRunning, true);
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'start_run').length,
+    1
+  );
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'start_run_duplicate_ignored').length,
+    1
+  );
+});
 
 test('start and continue reject incomplete configuration before runtime mutations', async () => {
   for (const messageType of ['START_AUTO_APPLY', 'START_DRY_RUN', 'CONTINUE_AUTO_APPLY']) {

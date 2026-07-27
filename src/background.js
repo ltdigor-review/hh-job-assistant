@@ -29,7 +29,7 @@ const RESUME_GROQ_BRIEF_VERSION = 'resume-brief-v1';
 const RESUME_GROQ_BRIEF_MAX_CHARS = 1800;
 const RESUME_PROFILE_MAX_CHARS = 6000;
 const RESUME_PROFILE_WEAKNESSES_MAX_CHARS = 3000;
-const RESUME_PROFILE_MODEL_MAX_TOKENS = 1800;
+const RESUME_PROFILE_MODEL_MAX_TOKENS = 3200;
 const VACANCY_GROQ_MAX_CHARS = 2200;
 const EXTRA_GROQ_MAX_CHARS = 2200;
 const COVER_PROMPT_GROQ_MAX_CHARS = 1000;
@@ -94,6 +94,7 @@ const RESUME_PROFILE_BUILD_INSTRUCTION = [
   'Используй только явно указанные факты. Не додумывай обязанности, результаты, метрики, инструменты или управленческие практики.',
   'Сохрани роли, периоды, домены, технологии, достижения и полный управленческий опыт: размер команд, найм, интервью, онбординг, наставничество, performance review и развитие сотрудников — только если они есть в исходном тексте.',
   'Отдельно перечисли слабые места резюме: важные заявления без конкретики или ожидаемые для заявленных ролей факты, которые в резюме не подтверждены.',
+  'Профиль должен быть не длиннее 6000 символов, список слабых мест — не длиннее 6 коротких пунктов.',
   'Верни только JSON: {"profile":"...","weaknesses":["..."]}. Без markdown и пояснений.'
 ].join(' ');
 const RESUME_PROFILE_EDIT_INSTRUCTION = [
@@ -1182,7 +1183,8 @@ async function ensureResumeProfileAutoRefresh() {
 
   resumeProfileRefreshPromise = (async () => {
     try {
-      const source = await getResumeContext({ forceRefresh: true, requireFacts: true });
+      const source = await getResumeContext({ forceRefresh: true });
+      await alignExpectedSalaryWithResume(source);
       const sourceHash = hashText(source);
       const checkedAt = nowIso();
       if (current.resumeProfileText && current.resumeProfileSourceHash === sourceHash) {
@@ -1219,6 +1221,27 @@ function extractResumeSalaryAmount(text) {
     normalizeComparableMoney(line)
   ));
   return normalizeComparableMoney(salaryLine || '');
+}
+
+async function alignExpectedSalaryWithResume(resumeText) {
+  const resumeSalary = extractResumeSalaryAmount(resumeText);
+  if (!resumeSalary) return { changed: false, salaryAvailable: false };
+  const { expectedSalary = '' } = await storageGet(['expectedSalary']);
+  if (normalizeComparableMoney(expectedSalary) === resumeSalary) {
+    return { changed: false, salaryAvailable: true };
+  }
+  await storageSet({ expectedSalary: String(resumeSalary) });
+  await appendAgentLog('resume_settings_auto_aligned', {
+    expectedSalaryChanged: true,
+    resumeSalaryHash: hashText(String(resumeSalary))
+  });
+  return { changed: true, salaryAvailable: true };
+}
+
+function hasConfiguredResumeContact(text) {
+  return /(?:https?:\/\/)?t\.me\/[a-z0-9_]+|@[a-z0-9_]{4,}|(?:https?:\/\/)?wa\.me\/\S+|mailto:\S+|tel:\+?\d+|(?:телефон|контакт|email|почта)\s*[:—-]\s*\S+/i.test(
+    String(text || '')
+  );
 }
 
 async function buildAutomationSettingsAudit() {
@@ -1265,7 +1288,10 @@ async function buildAutomationSettingsAudit() {
     ),
     expectedSalaryConfigured: Boolean(configuredSalary),
     expectedSalaryMatchesResume: resumeSalary ? configuredSalary === resumeSalary : null,
-    contactConfigured: Boolean(String(current.telegramUsername || '').trim()),
+    contactConfigured: Boolean(
+      String(current.telegramUsername || '').trim() ||
+      hasConfiguredResumeContact(resumeText)
+    ),
     laborContractEnabled: employmentPreference.includes('labor_contract'),
     workFormatsMatchResume: requiredWorkFormats.every((value) => workFormatPreference.includes(value)),
     dailyLimit200: Number(current.dailyLimit) === 200,
