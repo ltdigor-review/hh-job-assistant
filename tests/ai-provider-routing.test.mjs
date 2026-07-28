@@ -157,7 +157,7 @@ test('Qwen routes structured AI requests with thinking and json_object mode', as
   assert.doesNotMatch(JSON.stringify(debugEntries(localData)), /sk-qwen-test/);
 });
 
-test('selected fallback provider retries one eligible Qwen failure through Groq', async () => {
+test('[BS:COVERS:HHJA-BR-000008] selected fallback provider retries one eligible Qwen failure through Groq', async () => {
   const requests = [];
   const localData = {
     aiProvider: 'qwen',
@@ -281,7 +281,7 @@ test('fallback provider migration prefers authoritative generic storage', async 
   }, 'groq'), 'qwen');
 });
 
-test('explicit empty provider test key does not reuse the stored credential', async () => {
+test('[BS:COVERS:HHJA-BR-000007] explicit empty provider test key does not reuse the stored credential', async () => {
   const requests = [];
   const localData = {
     aiProvider: 'qwen',
@@ -306,7 +306,7 @@ test('explicit empty provider test key does not reuse the stored credential', as
   assert.equal(requests.length, 0);
 });
 
-test('explicit no-AI mode blocks every background AI command before network access', async () => {
+test('[BS:COVERS:HHJA-BR-000010] explicit no-AI mode blocks every background AI command before network access', async () => {
   const requests = [];
   const localData = {
     aiEnabled: false,

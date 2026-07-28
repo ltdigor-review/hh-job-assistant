@@ -563,7 +563,7 @@ async function runContentAutoApply({
   };
 }
 
-test('trusted Alt+Shift+A fallback ignores synthetic input and starts only one run', async () => {
+test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A fallback ignores synthetic input and starts only one run', async () => {
   const eventBase = {
     key: 'a',
     altKey: true,
@@ -600,7 +600,7 @@ test('trusted Alt+Shift+A fallback ignores synthetic input and starts only one r
   );
 });
 
-test('start and continue reject incomplete configuration before runtime mutations', async () => {
+test('[BS:COVERS:HHJA-BR-000017] start and continue reject incomplete configuration before runtime mutations', async () => {
   for (const messageType of ['START_AUTO_APPLY', 'START_DRY_RUN', 'CONTINUE_AUTO_APPLY']) {
     const result = await runContentAutoApply({
       messageType,
@@ -792,7 +792,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
   return { appended, states, navigations, submitClicks, localStore };
 }
 
-test('auto apply uses editable cover-letter template when AI is explicitly disabled', async () => {
+test('[BS:COVERS:HHJA-BR-000028] auto apply uses editable cover-letter template when AI is explicitly disabled', async () => {
   const fallbackCoverLetterTemplate = 'Здравствуйте. Откликаюсь без автоматической генерации.';
   const result = await runContentAutoApply({
     dialogText: 'Добавьте сопроводительное письмо\nОтправить',
@@ -818,7 +818,7 @@ test('auto apply uses editable cover-letter template when AI is explicitly disab
   assert.equal(result.textareaValue, fallbackCoverLetterTemplate);
 });
 
-for (const scenario of [
+const noAiQuestionScenarios = [
   {
     name: 'open text',
     options: {
@@ -859,39 +859,43 @@ for (const scenario of [
       ]
     }
   }
-]) {
-  test(`no-AI mode skips ${scenario.name} employer questions without fill, submit, or provider request`, async () => {
-    const result = await runContentAutoApply({
-      hasTextarea: false,
-      startOnResponseForm: true,
-      ...scenario.options,
-      initialLocalStore: {
-        aiEnabled: false,
-        aiProvider: 'qwen',
-        aiProviderCredentials: {
-          qwen: { apiKey: 'sk-saved' },
-          groq: { apiKey: 'gsk-saved' }
-        },
-        groqApiKey: 'gsk-saved',
-        fallbackCoverLetterTemplate: 'Шаблон без ИИ.'
-      }
+];
+
+test('[BS:COVERS:HHJA-BR-000028] no-AI mode skips every employer-question form without fill, submit, or provider request', async (t) => {
+  for (const scenario of noAiQuestionScenarios) {
+    await t.test(scenario.name, async () => {
+      const result = await runContentAutoApply({
+        hasTextarea: false,
+        startOnResponseForm: true,
+        ...scenario.options,
+        initialLocalStore: {
+          aiEnabled: false,
+          aiProvider: 'qwen',
+          aiProviderCredentials: {
+            qwen: { apiKey: 'sk-saved' },
+            groq: { apiKey: 'gsk-saved' }
+          },
+          groqApiKey: 'gsk-saved',
+          fallbackCoverLetterTemplate: 'Шаблон без ИИ.'
+        }
+      });
+
+      assert.equal(result.response.ok, true);
+      assert.equal(result.response.applied, 0);
+      assert.equal(result.response.skipped, 1);
+      assert.equal(result.submitClicks, 0);
+      assert.equal(result.appended.at(-1).status, 'skipped_ai_disabled_questions');
+      assert.equal(result.appended.at(-1).coverLetterUsed, false);
+      assert.equal(result.groqRequests.length, 0);
+      assert.equal(result.runtimeMessages.some((message) => message.type === 'ENSURE_RESUME_PROFILE'), false);
+      assert.equal(result.textareaValues.every((value) => value === ''), true);
+      assert.equal(result.coverTextareaValue, '');
+      assert.deepEqual(result.checkedLabels, []);
     });
+  }
+});
 
-    assert.equal(result.response.ok, true);
-    assert.equal(result.response.applied, 0);
-    assert.equal(result.response.skipped, 1);
-    assert.equal(result.submitClicks, 0);
-    assert.equal(result.appended.at(-1).status, 'skipped_ai_disabled_questions');
-    assert.equal(result.appended.at(-1).coverLetterUsed, false);
-    assert.equal(result.groqRequests.length, 0);
-    assert.equal(result.runtimeMessages.some((message) => message.type === 'ENSURE_RESUME_PROFILE'), false);
-    assert.equal(result.textareaValues.every((value) => value === ''), true);
-    assert.equal(result.coverTextareaValue, '');
-    assert.deepEqual(result.checkedLabels, []);
-  });
-}
-
-test('no-AI mode still submits a vacancy with no letter or employer questions', async () => {
+test('[BS:COVERS:HHJA-BR-000026] no-AI mode still submits a vacancy with no letter or employer questions', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: false,
@@ -911,7 +915,7 @@ test('no-AI mode still submits a vacancy with no letter or employer questions', 
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('enabled AI mode uses editable template after provider failure', async () => {
+test('[BS:COVERS:HHJA-BR-000027] enabled AI mode uses editable template after provider failure', async () => {
   const fallbackCoverLetterTemplate = 'Провайдер недоступен. Отправляю сохранённый шаблон.';
   const result = await runContentAutoApply({
     dialogText: 'Добавьте сопроводительное письмо\nОтправить',
@@ -1109,7 +1113,7 @@ test('auto apply shows action cursor while clicking response and submit buttons'
   assert.equal(result.submitButtonHighlighted, true);
 });
 
-test('dry run scans vacancies without clicking response buttons', async () => {
+test('[BS:COVERS:HHJA-BR-000018] dry run scans vacancies without clicking response buttons', async () => {
   const result = await runContentAutoApply({
     messageType: 'START_DRY_RUN',
     dialogText: 'Отклик на вакансию',
@@ -1318,7 +1322,7 @@ test('auto apply stops cleanly when hh shows daily response limit after response
   assert.equal(result.states.at(-1).lastError, '');
 });
 
-test('auto apply stops cleanly when hh shows daily response limit after submit', async () => {
+test('[BS:COVERS:HHJA-BR-000035] auto apply stops cleanly when hh shows daily response limit after submit', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: false,
@@ -1642,7 +1646,7 @@ test('auto apply fills required contenteditable cover letter before submit', asy
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('auto apply treats hh attach-cover-letter modal as cover letter, not questions', async () => {
+test('[BS:COVERS:HHJA-BR-000025] auto apply treats hh attach-cover-letter modal as cover letter, not questions', async () => {
   const result = await runContentAutoApply({
     dialogText: [
       'Сопроводительное письмо',
@@ -1805,7 +1809,7 @@ test('auto apply records already-applied cover form update without consuming new
   assert.equal(result.appended.at(-1).error, '');
 });
 
-test('stop before submit preserves generated answers and prevents application submit', async () => {
+test('[BS:COVERS:HHJA-BR-000023] stop before submit preserves generated answers and prevents application submit', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: true,
@@ -2001,7 +2005,7 @@ test('auto apply fills contenteditable employer question fields', async () => {
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply rejects model garbage without inventing a question answer', async () => {
+test('[BS:COVERS:HHJA-BR-000033] auto apply rejects model garbage without inventing a question answer', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nРасскажите про релевантный опыт',
     hasTextarea: true,
@@ -2149,7 +2153,7 @@ test('auto apply does not require contact for messenger experience question', as
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply fills salary and messenger fields deterministically without Groq', async () => {
+test('[BS:COVERS:HHJA-BR-000031] auto apply fills salary and messenger fields deterministically without Groq', async () => {
   const fullFormText = [
     'Ответьте на вопросы',
     'Был ли у Вас опыт реализации IT проектов в банках или в финтехе?',
@@ -2354,7 +2358,7 @@ test('auto apply rejects missing and unknown structured IDs', async () => {
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Unknown answer/);
 });
 
-test('auto apply fills mixed checkbox radio and open employer questions', async () => {
+test('[BS:COVERS:HHJA-BR-000029] auto apply fills mixed checkbox radio and open employer questions', async () => {
   const result = await runContentAutoApply({
     dialogText: [
       'Отклик на вакансию',
@@ -2462,7 +2466,7 @@ test('auto apply accepts an equivalent HH control rerender after selecting a rad
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
-test('auto apply re-snapshots a changed HH form and uses only exact current choices', async () => {
+test('[BS:COVERS:HHJA-BR-000032] auto apply re-snapshots a changed HH form and uses only exact current choices', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Готовы работать удаленно?\nДа\nНет\nОпишите релевантный опыт',
     hasTextarea: true,
@@ -3193,7 +3197,7 @@ test('auto apply keeps cover fallback but never invents employer text when provi
   assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
 });
 
-test('auto apply sends employer questions and mandatory cover letter in one structured request', async () => {
+test('[BS:COVERS:HHJA-BR-000030] auto apply sends employer questions and mandatory cover letter in one structured request', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Опишите опыт управления тестированием\nСопроводительное письмо обязательное для этой вакансии',
     hasTextarea: true,
@@ -3354,7 +3358,7 @@ test('auto apply records already confirmed response page without consuming new-s
   assert.equal(result.appended.at(-1).status, 'applied_already_confirmed');
 });
 
-test('auto apply resumes the Moscow-day new-submit ledger across runs', async () => {
+test('[BS:COVERS:HHJA-BR-000034] auto apply resumes the Moscow-day new-submit ledger across runs', async () => {
   const today = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Moscow',
     year: 'numeric',
@@ -3386,7 +3390,7 @@ test('auto apply resumes the Moscow-day new-submit ledger across runs', async ()
   assert.deepEqual(result.localStore.dailyApplicationLedger.submittedVacancyIds, ['999', '123']);
 });
 
-test('daily 200 run applies heterogeneous completable vacancies without resume-match filtering', async () => {
+test('[BS:COVERS:HHJA-BR-000020] daily 200 run applies heterogeneous completable vacancies without resume-match filtering', async () => {
   const scenarios = [
     {
       title: 'Senior AQA Lead Java',
@@ -3686,7 +3690,7 @@ test('auto apply search resume skips already processed vacancy ids', async () =>
   assert.ok(!states.some((state) => /Vacancy 111|Vacancy 222/.test(state.currentAction || '')));
 });
 
-test('auto apply continues queued response pages for 30 applications', async () => {
+test('[BS:COVERS:HHJA-BR-000021] auto apply continues queued response pages for 30 applications', async () => {
   const result = await runQueuedResponsePages({ count: 30 });
 
   assert.equal(result.submitClicks, 30);
@@ -4082,7 +4086,7 @@ test('auto apply does not recover queued response pages back to a response form 
   assert.equal(states.at(-1).state, 'complete');
 });
 
-test('auto apply finalizes pending response when hh returns to search page after submit', async () => {
+test('[BS:COVERS:HHJA-BR-000024] auto apply finalizes pending response when hh returns to search page after submit', async () => {
   const source = await readContentScriptSource();
   const appended = [];
   const states = [];
@@ -4892,7 +4896,7 @@ test('auto apply ignores queued detail flow on non-matching vacancy tab', async 
   assert.equal(states.length, 0);
 });
 
-test('stop run clears queues, reports stopped state, and appends debug log event', async () => {
+test('[BS:COVERS:HHJA-BR-000022] stop run clears queues, reports stopped state, and appends debug log event', async () => {
   const source = await readContentScriptSource();
   const states = [];
   const logs = [];

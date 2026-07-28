@@ -198,7 +198,7 @@ test('resume refresh continues when Chrome tab status stays loading after DOM is
   assert.deepEqual(updatedUrls, ['https://ekaterinburg.hh.ru/resume/abc123']);
 });
 
-test('resume refresh uses configured resume URL in the active hh tab and edits before raising', async () => {
+test('[BS:COVERS:HHJA-BR-000015] resume refresh uses configured resume URL in the active hh tab and edits before raising', async () => {
   const { response, localData, updatedUrls, editClicks, saveClicks, raiseClicks } = await runBackgroundResumeRefresh();
 
   assert.equal(response.ok, true);
@@ -221,7 +221,7 @@ test('resume refresh succeeds after save when raise is not available', async () 
   assert.equal(localData.runResults.at(-1).status, 'resume_refresh_saved');
 });
 
-test('resume refresh fails before navigation when active tab is not hh', async () => {
+test('[BS:COVERS:HHJA-BR-000016] resume refresh fails before navigation when active tab is not hh', async () => {
   const { response, updatedUrls, editClicks } = await runBackgroundResumeRefresh({ activeUrl: 'https://example.com/' });
 
   assert.equal(response.ok, false);

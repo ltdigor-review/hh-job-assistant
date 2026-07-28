@@ -1,11 +1,13 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.242",
+  "version": "0.1.243",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "test:summary": "bash scripts/test-summary.sh",
+    "spec:check": "node scripts/business-spec-contract.mjs --check",
+    "spec:lock": "node scripts/business-spec-contract.mjs --append-lock",
     "build": "npm test",
     "test:extension": "node scripts/chromium-extension-smoke.mjs",
     "test:hh:chromium": "node scripts/chromium-hh-live-smoke.mjs",

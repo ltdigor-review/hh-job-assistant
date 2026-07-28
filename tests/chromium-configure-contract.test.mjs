@@ -15,7 +15,7 @@ function loadPickConfig(environment = {}) {
   return context.pickConfig;
 }
 
-test('Chromium configuration preserves supported daily limits up to 200', () => {
+test('[BS:COVERS:HHJA-BR-000005] Chromium configuration preserves supported daily limits up to 200', () => {
   const pickConfig = loadPickConfig({ HHJA_DAILY_LIMIT: '150' });
   const result = pickConfig({});
 

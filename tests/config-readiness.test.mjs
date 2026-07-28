@@ -17,7 +17,7 @@ const valid = {
   resumeUrl: 'https://hh.ru/resume/abc123'
 };
 
-test('readiness requires all launch settings in stable order', () => {
+test('[BS:COVERS:HHJA-BR-000002] readiness requires all launch settings in stable order', () => {
   const result = readiness().evaluate({});
   assert.equal(result.ready, false);
   assert.deepEqual(Array.from(result.missing, (item) => item.code), [
@@ -30,7 +30,7 @@ test('readiness requires all launch settings in stable order', () => {
   ]);
 });
 
-test('readiness explicitly allows no-AI mode without keys but still requires a resume URL', () => {
+test('[BS:COVERS:HHJA-BR-000003] readiness explicitly allows no-AI mode without keys but still requires a resume URL', () => {
   const missingResume = readiness().evaluate({
     aiEnabled: false,
     aiProvider: 'qwen',
@@ -50,7 +50,7 @@ test('readiness explicitly allows no-AI mode without keys but still requires a r
   assert.deepEqual(Array.from(ready.missing), []);
 });
 
-test('readiness selects provider credentials and preserves legacy Groq keys', () => {
+test('[BS:COVERS:HHJA-BR-000001] readiness selects provider credentials and preserves legacy Groq keys', () => {
   const qwen = readiness().evaluate({
     aiProvider: 'qwen',
     aiProviderCredentials: { qwen: { apiKey: 'sk-test' } },
@@ -95,7 +95,7 @@ test('popup exposes not configured state and blocks start and continue', () => {
   assert.equal(view.buttons.refreshResumesDisabled, true);
 });
 
-test('popup reports intentional no-AI mode as ready and keeps launch actions available', () => {
+test('[BS:COVERS:HHJA-BR-000036] popup reports intentional no-AI mode as ready and keeps launch actions available', () => {
   const config = readiness().evaluate({
     aiEnabled: false,
     resumeUrl: valid.resumeUrl

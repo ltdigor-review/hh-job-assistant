@@ -199,7 +199,7 @@ function storageFixture({
   };
 }
 
-test('debug history is opt-in, retains N runs, and downloads the selected run', async () => {
+test('[BS:COVERS:HHJA-BR-000038] debug history is opt-in, retains N runs, and downloads the selected run', async () => {
   const storage = createStorage({
     agentDebugLogsEnabled: false,
     agentDebugRetentionCount: 2
@@ -249,7 +249,7 @@ test('debug history is opt-in, retains N runs, and downloads the selected run', 
   }
 });
 
-test('stored and exported debug history anonymizes personal text and secrets', async () => {
+test('[BS:COVERS:HHJA-BR-000039] stored and exported debug history anonymizes personal text and secrets', async () => {
   const storage = createStorage({
     agentDebugLogsEnabled: true,
     agentDebugRetentionCount: 5
@@ -471,7 +471,7 @@ test('inspect:logs fails closed for completed debug files with missing result id
   }
 });
 
-test('inspect:logs reads exact current evidence from a ClassicLevel snapshot and separates private audit', async () => {
+test('[BS:COVERS:HHJA-BR-000040] inspect:logs reads exact current evidence from a ClassicLevel snapshot and separates private audit', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'hhja-level-source-'));
   const output = join(dir, 'public.json');
   const privateOutput = join(dir, 'private.json');

@@ -45,7 +45,7 @@ function resumeCandidateFacts(text, age = 27, source = 'resume-personal-age') {
   };
 }
 
-test('manifest is valid MV3 and exposes popup UI', async () => {
+test('[BS:COVERS:HHJA-BR-000041] manifest is valid MV3 and exposes popup UI', async () => {
   const manifest = await readJson('manifest.json');
   const packageJson = await readJson('package.json');
 
@@ -311,7 +311,7 @@ test('background service worker avoids top-level await', async () => {
   assert.match(js, /ensureDefaults\(\)\.catch/);
 });
 
-test('background initializes defaults and registers required listeners', async () => {
+test('[BS:COVERS:HHJA-BR-000001] background initializes defaults and registers required listeners', async () => {
   const calls = [];
   const localData = { dailyLimit: 10, delayMinMs: 8000, delayMaxMs: 15000 };
 
@@ -445,7 +445,7 @@ test('background migrates old default employer question prompt', async () => {
   assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
 });
 
-test('background repairs blank prompts and preserves non-empty custom prompts during migration', async () => {
+test('[BS:COVERS:HHJA-BR-000001] background repairs blank prompts and preserves non-empty custom prompts during migration', async () => {
   const localData = {
     aiPromptsVersion: 0,
     coverPrompt: '  ',
@@ -931,7 +931,7 @@ test('default employer prompt allows adjacent experience but forbids invented fa
   assert.equal(response.answers[0].id, 'experience');
 });
 
-test('generation tasks use fixed model routing and stable resume profile context', async () => {
+test('[BS:COVERS:HHJA-BR-000006] generation tasks use fixed model routing and stable resume profile context', async () => {
   let listener = null;
   const requests = [];
   const profile = 'Фактический профиль кандидата: Tech Lead, команда 15 FTE, найм, интервью и онбординг.';
@@ -1063,7 +1063,7 @@ test('200 vacancies stay within request and daily token budgets with cached-toke
   assert.match(localData.runState.aiQuotaStatus, /cache \d+% · fallback \d+$/);
 });
 
-test('quota manager waits only for short TPM resets and resets counters on a new UTC day', async () => {
+test('[BS:COVERS:HHJA-BR-000009] quota manager waits only for short TPM resets and resets counters on a new UTC day', async () => {
   let listener = null;
   let fetchCalls = 0;
   const today = new Date().toISOString().slice(0, 10);
@@ -1838,7 +1838,7 @@ test('Groq resume cache TTL is configurable in hours', async () => {
   assert.doesNotMatch(userContent, /stale cached resume text/);
 });
 
-test('Groq prompt rebuilds stale resume brief and keeps original parsed resume unchanged', async () => {
+test('[BS:COVERS:HHJA-BR-000011] Groq prompt rebuilds stale resume brief and keeps original parsed resume unchanged', async () => {
   let listener = null;
   let requestBody = null;
   const sourceResume = [
@@ -1933,7 +1933,7 @@ test('Groq prompt rebuilds stale resume brief and keeps original parsed resume u
   assert.doesNotMatch(userContent, /Лишняя длинная секция .*Лишняя длинная секция/s);
 });
 
-test('resume profile build and edit store factual context without changing audit metadata', async () => {
+test('[BS:COVERS:HHJA-BR-000013] resume profile build and edit store factual context without changing audit metadata', async () => {
   let listener = null;
   const requests = [];
   const localData = {
@@ -2120,7 +2120,7 @@ test('resume profile double truncation keeps all last-good profile metadata and 
   assert.equal(truncationErrors[1].details.maxTokens, 4000);
 });
 
-test('resume profile auto refresh is single-flight and never runs inside each application', async () => {
+test('[BS:COVERS:HHJA-BR-000014] resume profile auto refresh is single-flight and never runs inside each application', async () => {
   let listener = null;
   let profileBuildCalls = 0;
   let profileAttempts = 0;
@@ -2210,7 +2210,7 @@ test('resume profile auto refresh is single-flight and never runs inside each ap
   assert.equal(localData.aiQuotaUsage.models['llama-3.1-8b-instant'].requests, 3);
 });
 
-test('resume profile auto refresh does not require HH to display exact age', async () => {
+test('[BS:COVERS:HHJA-BR-000012] resume profile auto refresh does not require HH to display exact age', async () => {
   let listener = null;
   let profileRequest = null;
   const resumeText = [
@@ -3160,7 +3160,7 @@ test('trusted page shortcut shares a single-flight live start guard', async () =
   assert.match(content, /start_run_duplicate_ignored/);
 });
 
-test('options preserve generic credential drafts and selected fallback provider', async () => {
+test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000037] options preserve generic credential drafts and selected fallback provider', async () => {
   const source = await readFile(new URL('src/options.js', root), 'utf8');
   const providersSource = await readFile(new URL('src/ai-providers.js', root), 'utf8');
   vm.runInThisContext(providersSource);
@@ -3396,9 +3396,17 @@ test('options preserve generic credential drafts and selected fallback provider'
     assert.equal(elements.downloadAgentDebugRun.disabled, true);
 
     elements.dailyLimit.value = '250';
+    elements.resumeCacheTtlHours.value = '999';
+    elements.delayMinMs.value = '900';
+    elements.delayMaxMs.value = '600';
+    elements.agentDebugRetentionCount.value = '99';
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.dailyLimit, 200);
+    assert.equal(storage.resumeCacheTtlHours, 168);
+    assert.equal(storage.delayMinMs, 900);
+    assert.equal(storage.delayMaxMs, 900);
+    assert.equal(storage.agentDebugRetentionCount, 20);
 
     elements.employmentPreference.inputs[1].checked = true;
     elements.workFormatPreference.inputs[0].checked = true;
