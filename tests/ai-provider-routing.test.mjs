@@ -306,6 +306,44 @@ test('explicit empty provider test key does not reuse the stored credential', as
   assert.equal(requests.length, 0);
 });
 
+test('explicit no-AI mode blocks every background AI command before network access', async () => {
+  const requests = [];
+  const localData = {
+    aiEnabled: false,
+    aiProvider: 'qwen',
+    aiProviderCredentials: {
+      qwen: { apiKey: 'sk-qwen-saved' },
+      groq: { apiKey: 'gsk-groq-saved' }
+    },
+    groqApiKey: 'gsk-groq-saved',
+    resumeText: 'Java developer',
+    resumeProfileText: 'Saved candidate profile',
+    fallbackCoverLetterTemplate: 'Saved local template'
+  };
+  const background = await loadBackground(localData, async (...args) => {
+    requests.push(args);
+    return jsonResponse(200, {});
+  });
+
+  for (const message of [
+    { type: 'GENERATE_COVER_LETTER', task: 'cover_letter', vacancyText: 'Java vacancy' },
+    { type: 'TEST_AI_PROVIDER', providerId: 'qwen' },
+    { type: 'BUILD_RESUME_PROFILE' },
+    { type: 'ENSURE_RESUME_PROFILE' },
+    { type: 'EDIT_RESUME_PROFILE', comment: 'Shorten it' }
+  ]) {
+    const result = await background.send(message);
+    assert.equal(result.ok, false, message.type);
+    assert.equal(result.errorCode, 'HHJA_AI_DISABLED', message.type);
+  }
+
+  assert.equal(requests.length, 0);
+  assert.equal(localData.aiEnabled, false);
+  assert.equal(localData.aiProviderCredentials.qwen.apiKey, 'sk-qwen-saved');
+  assert.equal(localData.aiProviderCredentials.groq.apiKey, 'gsk-groq-saved');
+  assert.equal(localData.aiProvider, 'qwen');
+});
+
 test('fallback stays off for unchecked, missing-key, and resume-validation failures', async () => {
   const uncheckedRequests = [];
   const uncheckedData = {

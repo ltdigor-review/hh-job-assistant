@@ -452,6 +452,16 @@
       </div>
 
       <h2>AI-провайдер</h2>
+      <label class="checkbox" for="aiEnabled">
+        <input id="aiEnabled" type="checkbox">
+        Использовать ИИ
+      </label>
+      <p class="hint">Если ИИ выключен, расширение вставляет шаблон в сопроводительное письмо. Вакансии с любыми вопросами работодателя пропускаются без заполнения и отправки.</p>
+
+      <label for="fallbackCoverLetterTemplate">Шаблон сопроводительного письма без ИИ</label>
+      <textarea id="fallbackCoverLetterTemplate" required></textarea>
+      <p class="hint">Этот текст также используется, если включённый AI-провайдер не ответил или вернул неподходящее письмо.</p>
+
       <label for="aiProvider">Основной провайдер</label>
       <select id="aiProvider"></select>
       <p id="aiProviderModel" class="hint"></p>
@@ -471,9 +481,11 @@
       <div id="aiProviderStatus" role="status"></div>
       <div id="configuredProviders" role="status"></div>
 
-      <label for="aiFallbackProvider">Резервный провайдер</label>
-      <select id="aiFallbackProvider"></select>
-      <p class="hint">Повторяет только подходящие неуспешные запросы. Нужен сохранённый ключ.</p>
+      <div id="aiFallbackSection" hidden>
+        <label for="aiFallbackProvider">Резервный провайдер</label>
+        <select id="aiFallbackProvider"></select>
+        <p class="hint">Повторяет только подходящие неуспешные запросы. Нужен сохранённый ключ.</p>
+      </div>
 
       <h2>Промпты</h2>
 

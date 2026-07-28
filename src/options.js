@@ -5,10 +5,13 @@ const EMPLOYMENT_PREFERENCE_VALUES = new Set(['individual_entrepreneur', 'labor_
 const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 
 const fields = {
+  aiEnabled: document.getElementById('aiEnabled'),
   aiProvider: document.getElementById('aiProvider'),
   credentialProvider: document.getElementById('credentialProvider'),
   aiProviderApiKey: document.getElementById('aiProviderApiKey'),
   aiFallbackProvider: document.getElementById('aiFallbackProvider'),
+  aiFallbackSection: document.getElementById('aiFallbackSection'),
+  fallbackCoverLetterTemplate: document.getElementById('fallbackCoverLetterTemplate'),
   resumeUrl: document.getElementById('resumeUrl'),
   resumeCacheTtlHours: document.getElementById('resumeCacheTtlHours'),
   resumeProfileText: document.getElementById('resumeProfileText'),
@@ -42,6 +45,7 @@ const resumeProfileButtons = [
   document.getElementById('buildResumeProfile'),
   document.getElementById('editResumeProfile')
 ];
+const testAiProviderButton = document.getElementById('testAiProvider');
 const credentialDrafts = new Map();
 let credentialEditorProviderId = '';
 let aiProviderTestGeneration = 0;
@@ -63,6 +67,10 @@ function setAiProviderStatus(text, isError = false) {
 
 function selectedProviderId() {
   return AI_PROVIDERS.normalizeProviderId(fields.aiProvider.value);
+}
+
+function isAiEnabled() {
+  return fields.aiEnabled.checked;
 }
 
 function providers() {
@@ -96,6 +104,23 @@ function renderFallbackProviders(preferredValue = fields.aiFallbackProvider.valu
   fields.aiFallbackProvider.value = options.some((option) => option.value === preferredValue)
     ? preferredValue
     : '';
+  fields.aiFallbackSection.hidden = !isAiEnabled() || options.length === 0;
+  fields.aiFallbackProvider.disabled = !isAiEnabled() || options.length === 0;
+}
+
+function renderAiModeControls() {
+  const enabled = isAiEnabled();
+  fields.aiProvider.disabled = !enabled;
+  testAiProviderButton.disabled = !enabled;
+  fields.resumeProfileEditComment.disabled = !enabled;
+  fields.resumeProfileAutoRefreshEnabled.disabled = !enabled;
+  resumeProfileButtons.forEach((button) => { button.disabled = !enabled; });
+  renderFallbackProviders();
+  if (!enabled) {
+    setResumeProfileStatus('ИИ выключен: автоматическое создание и обновление промпта с резюме недоступно.');
+  } else if (/^ИИ выключен:/.test(resumeProfileStatusNode.textContent || '')) {
+    setResumeProfileStatus('');
+  }
 }
 
 function renderProviderControls() {
@@ -345,6 +370,9 @@ async function loadOptions() {
   const credentials = AI_PROVIDERS.normalizeCredentials(values.aiProviderCredentials, values.groqApiKey);
 
   populateProviderSelectors();
+  fields.aiEnabled.checked = values.aiEnabled !== false;
+  fields.fallbackCoverLetterTemplate.value =
+    String(values.fallbackCoverLetterTemplate || '').trim() || DEFAULTS.fallbackCoverLetterTemplate;
   fields.aiProvider.value = AI_PROVIDERS.normalizeProviderId(values.aiProvider);
   credentialDrafts.clear();
   for (const provider of providers()) {
@@ -358,6 +386,7 @@ async function loadOptions() {
   renderProviderControls();
   renderFallbackProviders(AI_PROVIDERS.normalizeFallbackProvider(values, selectedProviderId()));
   renderCredentialEditor(selectedProviderId());
+  renderAiModeControls();
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
   fields.resumeProfileText.value = values.resumeProfileText || '';
@@ -403,6 +432,7 @@ async function saveOptions() {
   fields.resumeUrl.setCustomValidity('');
 
   for (const [field, label] of [
+    [fields.fallbackCoverLetterTemplate, 'шаблон сопроводительного письма без ИИ'],
     [fields.coverPrompt, 'промпт сопроводительного письма'],
     [fields.employerQuestionPrompt, 'промпт ответов работодателю']
   ]) {
@@ -415,6 +445,7 @@ async function saveOptions() {
   }
 
   const patch = {
+    aiEnabled: isAiEnabled(),
     aiProvider: selectedProviderId(),
     aiFallbackProvider: fields.aiFallbackProvider.value,
     aiFallbackEnabled: Boolean(fields.aiFallbackProvider.value),
@@ -427,6 +458,7 @@ async function saveOptions() {
     telegramUsername: fields.telegramUsername.value.trim(),
     employmentPreference: getMultiCheckboxValue(fields.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: getMultiCheckboxValue(fields.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
+    fallbackCoverLetterTemplate: fields.fallbackCoverLetterTemplate.value.trim(),
     coverPrompt: fields.coverPrompt.value.trim(),
     employerQuestionPrompt: fields.employerQuestionPrompt.value.trim(),
     aiPromptsVersion: 2,
@@ -479,6 +511,10 @@ async function saveOptions() {
 }
 
 async function testAiProvider() {
+  if (!isAiEnabled()) {
+    setAiProviderStatus('Включите ИИ, чтобы проверить провайдера.', true);
+    return;
+  }
   const generation = ++aiProviderTestGeneration;
   captureCredentialDraft();
   const providerId = AI_PROVIDERS.normalizeProviderId(fields.credentialProvider.value);
@@ -505,6 +541,9 @@ async function testAiProvider() {
 }
 
 async function runResumeProfileAction(type) {
+  if (!isAiEnabled()) {
+    throw new Error('Включите ИИ, чтобы работать с промптом резюме.');
+  }
   await saveOptions();
   if (type === 'BUILD_RESUME_PROFILE' && !fields.resumeUrl.value.trim()) {
     throw new Error('Укажите ссылку на резюме hh.ru перед заполнением промпта.');
@@ -527,7 +566,7 @@ async function runResumeProfileAction(type) {
     if (type === 'EDIT_RESUME_PROFILE') fields.resumeProfileEditComment.value = '';
     setResumeProfileStatus(type === 'BUILD_RESUME_PROFILE' ? 'Промпт заполнен.' : 'Промпт отредактирован.');
   } finally {
-    resumeProfileButtons.forEach((button) => { button.disabled = false; });
+    renderAiModeControls();
   }
 }
 
@@ -556,6 +595,12 @@ fields.credentialProvider.addEventListener('change', () => {
 fields.aiProvider.addEventListener('change', () => {
   aiProviderTestGeneration += 1;
   renderProviderControls();
+  setAiProviderStatus('');
+});
+
+fields.aiEnabled.addEventListener('change', () => {
+  aiProviderTestGeneration += 1;
+  renderAiModeControls();
   setAiProviderStatus('');
 });
 
@@ -594,7 +639,7 @@ document.getElementById('save').addEventListener('click', () => {
   saveOptions().catch((error) => setStatus(localizeError(error), true));
 });
 
-document.getElementById('testAiProvider').addEventListener('click', () => {
+testAiProviderButton.addEventListener('click', () => {
   testAiProvider();
 });
 

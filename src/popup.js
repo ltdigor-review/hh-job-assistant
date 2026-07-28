@@ -27,7 +27,7 @@ nodes.version.textContent = `v${chrome.runtime.getManifest().version}`;
 
 let lastRunState = { state: 'idle' };
 let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкладку' };
-let aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false };
+let aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false, enabled: true };
 let readiness = { ready: false, missing: [] };
 let copyToastTimeout = null;
 
@@ -102,6 +102,9 @@ function renderView() {
 }
 
 function resultMessage(item) {
+  if (item.status === 'skipped_ai_disabled_questions') {
+    return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует ответов на вопросы работодателя, ИИ выключен.`;
+  }
   if (item.status === 'skipped_missing_groq_key') {
     return `Пропущено: ${item.title || item.vacancyId || 'вакансия'} требует сопроводительное письмо, но ключ AI-провайдера не указан.`;
   }
@@ -245,12 +248,13 @@ async function refreshPopup() {
   // GET_STATUS waits for background default initialization. Read storage only
   // afterwards so a cold popup cannot observe an incomplete migration.
   const runtimeError = await readRuntimeState();
-  const settings = await chrome.storage.local.get(['aiProvider', 'aiProviderCredentials', 'groqApiKey', 'resumeUrl']);
+  const settings = await chrome.storage.local.get(['aiEnabled', 'aiProvider', 'aiProviderCredentials', 'groqApiKey', 'resumeUrl']);
   const provider = globalThis.HHJA_AI_PROVIDERS.normalizeProviderId(settings.aiProvider);
   aiProviderStatus = {
     provider,
     label: globalThis.HHJA_AI_PROVIDERS.getProvider(provider).label,
-    configured: Boolean(globalThis.HHJA_AI_PROVIDERS.getApiKey(settings, provider))
+    configured: Boolean(globalThis.HHJA_AI_PROVIDERS.getApiKey(settings, provider)),
+    enabled: settings.aiEnabled !== false
   };
   readiness = globalThis.HHJA_CONFIG_READINESS.evaluate(settings);
   lastTabState = runtimeError || await readTabState();

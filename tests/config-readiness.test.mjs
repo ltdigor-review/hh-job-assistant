@@ -30,6 +30,26 @@ test('readiness requires all launch settings in stable order', () => {
   ]);
 });
 
+test('readiness explicitly allows no-AI mode without keys but still requires a resume URL', () => {
+  const missingResume = readiness().evaluate({
+    aiEnabled: false,
+    aiProvider: 'qwen',
+    aiProviderCredentials: {}
+  });
+  assert.equal(missingResume.ready, false);
+  assert.equal(missingResume.aiEnabled, false);
+  assert.deepEqual(Array.from(missingResume.missing, (item) => item.code), ['resume_url']);
+
+  const ready = readiness().evaluate({
+    aiEnabled: false,
+    aiProvider: 'qwen',
+    aiProviderCredentials: {},
+    resumeUrl: valid.resumeUrl
+  });
+  assert.equal(ready.ready, true);
+  assert.deepEqual(Array.from(ready.missing), []);
+});
+
 test('readiness selects provider credentials and preserves legacy Groq keys', () => {
   const qwen = readiness().evaluate({
     aiProvider: 'qwen',
@@ -55,7 +75,11 @@ test('readiness rejects unsafe or non-resume URLs', () => {
 });
 
 test('readiness rejects a whitespace-only key but ignores internal prompts', () => {
-  assert.equal(readiness().evaluate({ ...valid, groqApiKey: '  ' }).ready, false);
+  assert.equal(readiness().evaluate({
+    ...valid,
+    aiProvider: 'qwen',
+    aiProviderCredentials: { qwen: { apiKey: '  ' } }
+  }).ready, false);
   assert.equal(readiness().evaluate({ ...valid, coverPrompt: '  ', employerQuestionPrompt: null, choiceRetryPrompt: '' }).ready, true);
 });
 
@@ -69,4 +93,22 @@ test('popup exposes not configured state and blocks start and continue', () => {
   assert.equal(view.buttons.autoApplyDisabled, true);
   assert.equal(view.buttons.continueDisabled, true);
   assert.equal(view.buttons.refreshResumesDisabled, true);
+});
+
+test('popup reports intentional no-AI mode as ready and keeps launch actions available', () => {
+  const config = readiness().evaluate({
+    aiEnabled: false,
+    resumeUrl: valid.resumeUrl
+  });
+  const view = derivePopupView({
+    readiness: config,
+    aiProviderStatus: { provider: 'qwen', label: 'Qwen', configured: false, enabled: false },
+    tabState: { kind: 'ready', canStartAutoApply: true, canContinueAutoApply: true }
+  });
+  assert.equal(view.status.tone, 'ok');
+  assert.equal(view.status.title, 'ГОТОВО, ИИ выключен');
+  assert.equal(view.status.detail, 'Письма — по шаблону · вакансии с вопросами пропускаются');
+  assert.equal(view.buttons.autoApplyDisabled, false);
+  assert.equal(view.buttons.continueDisabled, false);
+  assert.equal(view.buttons.refreshResumesDisabled, false);
 });

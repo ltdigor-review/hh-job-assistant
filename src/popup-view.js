@@ -122,11 +122,19 @@ function deriveStatus({ runState = {}, tabState = {}, aiProviderStatus = { provi
     };
   }
 
+  if (aiProviderStatus.enabled === false) {
+    return {
+      tone: 'ok',
+      title: 'ГОТОВО, ИИ выключен',
+      detail: 'Письма — по шаблону · вакансии с вопросами пропускаются'
+    };
+  }
+
   if (!aiProviderStatus.configured) {
     return {
       tone: 'warn',
-      title: 'ГОТОВО, без автоответов',
-      detail: 'Вакансии с письмами/вопросами будут пропущены'
+      title: 'НЕ НАСТРОЕНО',
+      detail: `Укажите ключ ${providerLabel} API или выключите ИИ в настройках`
     };
   }
 
@@ -165,7 +173,7 @@ function deriveContinueTitle({ activeRun, tabReady, canContinue }) {
 export function derivePopupView({
   runState = {},
   tabState = {},
-  aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false },
+  aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false, enabled: true },
   readiness = { ready: true, missing: [] }
 } = {}) {
   const activeRun = isAutoApplyInProgress(runState, tabState);

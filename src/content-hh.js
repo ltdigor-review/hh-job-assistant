@@ -1964,10 +1964,12 @@ async function getConfig() {
     'employmentPreference',
     'workFormatPreference',
     'expectedSalary',
+    'aiEnabled',
     'aiProvider',
     'aiProviderCredentials',
     'groqApiKey',
     'resumeUrl',
+    'fallbackCoverLetterTemplate',
     'coverPrompt',
     'employerQuestionPrompt'
   ]);
@@ -1978,10 +1980,13 @@ async function getConfig() {
     employmentPreference: normalizeMultiPreference(values.employmentPreference, EMPLOYMENT_PREFERENCE_VALUES),
     workFormatPreference: normalizeMultiPreference(values.workFormatPreference, WORK_FORMAT_PREFERENCE_VALUES),
     expectedSalary: String(values.expectedSalary || '').trim(),
+    aiEnabled: values.aiEnabled !== false,
     aiProvider: values.aiProvider,
     aiProviderCredentials: values.aiProviderCredentials,
     groqApiKey: values.groqApiKey,
     resumeUrl: values.resumeUrl,
+    fallbackCoverLetterTemplate:
+      cleanText(values.fallbackCoverLetterTemplate) || DEFAULTS.fallbackCoverLetterTemplate,
     coverPrompt: values.coverPrompt,
     employerQuestionPrompt: values.employerQuestionPrompt
   };
@@ -1998,7 +2003,11 @@ function normalizeMultiPreference(value, allowedValues) {
   return [...new Set(values.filter((item) => allowedValues.has(item)))];
 }
 
-async function generateCoverLetter(vacancyText) {
+async function generateCoverLetter(vacancyText, options = {}) {
+  const { aiEnabled = true, fallbackTemplate = '' } = options;
+  if (!aiEnabled) {
+    return getFallbackCoverLetter(vacancyText, fallbackTemplate);
+  }
   const response = await sendRuntimeMessage({
     type: 'GENERATE_COVER_LETTER',
     task: 'cover_letter',
@@ -2239,9 +2248,12 @@ async function recordLocalAiFallback(task, reason) {
   }, { timeoutMs: 5000 }).catch(() => {});
 }
 
-async function getFallbackCoverLetter(vacancyText = '') {
+async function getFallbackCoverLetter(vacancyText = '', templateOverride = '') {
   void vacancyText;
-  return 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.';
+  const directTemplate = cleanText(templateOverride);
+  if (directTemplate) return directTemplate;
+  const stored = await storageGet(['fallbackCoverLetterTemplate']);
+  return cleanText(stored.fallbackCoverLetterTemplate) || DEFAULTS.fallbackCoverLetterTemplate;
 }
 
 function getCoverLetterInvalidReason(value) {
@@ -2470,7 +2482,10 @@ async function handleDryRun(limit) {
   return { ok: true, found: vacancies.length };
 }
 
-async function applyToVacancy(item, counters) {
+async function applyToVacancy(item, counters, config = null) {
+  const applyConfig = config || await getConfig();
+  const aiEnabled = applyConfig.aiEnabled !== false;
+
   if (await stopIfRequested(counters)) return;
 
   const initialDailyLimitReason = detectHhDailyResponseLimit(document);
@@ -2665,6 +2680,11 @@ async function applyToVacancy(item, counters) {
       await setRunState({ state: 'applying', ...counters, lastError: message });
       closeDialog();
     };
+    if (!aiEnabled) {
+      const message = 'Пропущено: ИИ выключен, вакансии с вопросами работодателя не обрабатываются.';
+      await skipQuestionForm('skipped_ai_disabled_questions', message);
+      return;
+    }
     if (questionFields.length === 0 && questionControlGroups.length === 0 && !coverLetterTextarea) {
       const message = 'Пропущено: обнаружены вопросы работодателя, но заполняемые поля HH не найдены.';
       await skipQuestionForm('skipped_question_fields_not_found', message);
@@ -3010,13 +3030,16 @@ async function applyToVacancy(item, counters) {
     await setRunState({
       state: 'generating_cover_letter',
       ...counters,
-      currentAction: 'ИИ: готовлю сопроводительное письмо'
+      currentAction: aiEnabled ? 'ИИ: готовлю сопроводительное письмо' : 'Готовлю сопроводительное письмо по шаблону'
     });
     const vacancyText = getVacancyText(item.card) || getVacancyText(document);
     let letter;
     setBusyCursor(true);
     try {
-      letter = await generateCoverLetter(vacancyText);
+      letter = await generateCoverLetter(vacancyText, {
+        aiEnabled,
+        fallbackTemplate: applyConfig.fallbackCoverLetterTemplate
+      });
     } catch (error) {
       if (isStopRequestedError(error)) {
         await markStopped(counters);
@@ -3297,10 +3320,11 @@ async function continueQueuedAutoApply() {
     counters.processed += 1;
   }
   const item = isResponseFormPage() ? buildResponseFormItem(itemData) : buildQueuedVacancyDetailItem(itemData);
+  const queueConfig = queue.config || await getConfig();
   if (await stopIfRequested(counters)) return true;
 
   try {
-    const outcome = await applyToVacancy(item, counters);
+    const outcome = await applyToVacancy(item, counters, queueConfig);
     if (outcome?.terminal) {
       return true;
     }
@@ -3487,7 +3511,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         navigateTo(item.responseUrl);
         return { ok: true, ...counters, navigated: true, nextPageUrl: item.responseUrl };
       }
-      const outcome = await applyToVacancy(item, counters);
+      const outcome = await applyToVacancy(item, counters, config);
       if (outcome?.terminal) {
         return { ok: true, ...counters };
       }
@@ -3717,9 +3741,13 @@ async function startRun(mode, limitOverride = null, options = {}) {
   if (mode === 'dry') {
     return handleDryRun(limit);
   }
-  await sendRuntimeMessage({ type: 'ENSURE_RESUME_PROFILE' }, { timeoutMs: getRuntimeMessageTimeoutMs() }).catch(async (error) => {
-    await appendAgentLog('resume_profile_preflight_error', { error: localizeError(error) });
-  });
+  if (config.aiEnabled) {
+    await sendRuntimeMessage({ type: 'ENSURE_RESUME_PROFILE' }, { timeoutMs: getRuntimeMessageTimeoutMs() }).catch(async (error) => {
+      await appendAgentLog('resume_profile_preflight_error', { error: localizeError(error) });
+    });
+  } else {
+    await appendAgentLog('resume_profile_preflight_skipped', { reason: 'ai_disabled' });
+  }
   await sendRuntimeMessage(
     { type: 'GET_AUTOMATION_SETTINGS_AUDIT' },
     { timeoutMs: getRuntimeMessageTimeoutMs() }

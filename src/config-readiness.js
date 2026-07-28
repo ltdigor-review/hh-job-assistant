@@ -13,11 +13,12 @@
   }
 
   function evaluate(config = {}) {
+    const aiEnabled = config.aiEnabled !== false;
     const selectedProvider = providerId(config);
     const providerLabel = globalThis.HHJA_AI_PROVIDERS?.getProvider?.(selectedProvider)?.label ||
       `${selectedProvider.charAt(0).toUpperCase()}${selectedProvider.slice(1)}`;
     const required = [
-      ['ai_provider_api_key', `ключ ${providerLabel} API`, () => Boolean(providerApiKey(config))],
+      ...(aiEnabled ? [['ai_provider_api_key', `ключ ${providerLabel} API`, () => Boolean(providerApiKey(config))]] : []),
       ['resume_url', 'ссылка на резюме hh.ru', (value) => {
       try {
         const url = new URL(String(value || '').trim());
@@ -30,7 +31,7 @@
     const missing = required
       .filter(([code, , valid]) => !valid(code === 'resume_url' ? config.resumeUrl : undefined))
       .map(([code, label]) => ({ code, label }));
-    return { ready: missing.length === 0, missing, provider: selectedProvider };
+    return { ready: missing.length === 0, missing, provider: selectedProvider, aiEnabled };
   }
 
   function assertReady(config = {}) {

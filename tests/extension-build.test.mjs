@@ -260,6 +260,8 @@ test('extension defaults are defined once and shared by runtime surfaces', async
   assert.match(defaultsSource, /workFormatPreference:\s*\[\]/);
   assert.match(defaultsSource, /agentDebugLogsEnabled:\s*true/);
   assert.match(defaultsSource, /agentDebugRetentionCount:\s*20/);
+  assert.match(defaultsSource, /aiEnabled:\s*true/);
+  assert.match(defaultsSource, /fallbackCoverLetterTemplate:\s*'Откликаюсь на вакансию/);
   assert.doesNotMatch(defaultsSource, /experimentalFeaturesEnabled|chatUnreadOnly|chatReplyMode|chatLimit|chatReports/);
   assert.match(defaultsSource, /globalThis\.HHJA_DEFAULTS/);
 
@@ -354,6 +356,8 @@ test('background initializes defaults and registers required listeners', async (
   assert.equal(localData.resumeUrl, '');
   assert.equal(localData.resumeParsedUrl, '');
   assert.equal(localData.resumeCacheTtlHours, 1);
+  assert.equal(localData.aiEnabled, true);
+  assert.equal(localData.fallbackCoverLetterTemplate, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
   assert.equal(localData.dailyLimit, 200);
   assert.equal(localData.delayMinMs, 4000);
   assert.equal(localData.delayMaxMs, 8000);
@@ -2327,6 +2331,30 @@ test('resume profile auto refresh does not require HH to display exact age', asy
   assert.equal(fallbackAudit.audit.checks.fallbackProviderReady, false);
   assert.ok(fallbackAudit.audit.issues.includes('fallbackProviderReady'));
   assert.equal(fallbackAudit.audit.ready, false);
+
+  localData.aiEnabled = false;
+  localData.aiProviderCredentials = {};
+  localData.resumeProfileText = '';
+  localData.resumeProfileCheckedAt = '';
+  const noAiAudit = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(noAiAudit.ok, true);
+  assert.equal(noAiAudit.audit.aiEnabled, false);
+  assert.equal(noAiAudit.audit.checks.resumeProfileAvailable, true);
+  assert.equal(noAiAudit.audit.checks.resumeProfileFresh, true);
+  assert.equal(noAiAudit.audit.checks.resumeAutoRefreshEnabled, true);
+  assert.equal(noAiAudit.audit.checks.aiProviderKeyConfigured, true);
+  assert.equal(noAiAudit.audit.checks.fallbackProviderReady, true);
+  assert.equal(noAiAudit.audit.issues.includes('resumeProfileAvailable'), false);
+  assert.equal(noAiAudit.audit.issues.includes('resumeProfileFresh'), false);
+  assert.equal(noAiAudit.audit.issues.includes('resumeAutoRefreshEnabled'), false);
+  assert.equal(noAiAudit.audit.issues.includes('aiProviderKeyConfigured'), false);
+  assert.equal(noAiAudit.audit.issues.includes('fallbackProviderReady'), false);
+
+  localData.aiEnabled = true;
+  const missingEnabledAiAudit = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(missingEnabledAiAudit.audit.aiEnabled, true);
+  assert.equal(missingEnabledAiAudit.audit.checks.aiProviderKeyConfigured, false);
+  assert.ok(missingEnabledAiAudit.audit.issues.includes('aiProviderKeyConfigured'));
 });
 
 test('Groq prompt caps large payload components', async () => {
@@ -2910,16 +2938,25 @@ test('popup view model reports exact readiness and blocker text', async () => {
     { tone: 'ok', title: 'ГОТОВО', detail: 'hh.ru открыт · Groq подключен' }
   );
 
-  const withoutGroq = derivePopupView({
+  const withoutProviderKey = derivePopupView({
     runState: { state: 'idle' },
     tabState: { kind: 'ready', canStartAutoApply: true },
-    aiProviderStatus: { provider: 'qwen', configured: false }
+    aiProviderStatus: { provider: 'qwen', label: 'Qwen', configured: false, enabled: true }
   });
-  assert.equal(withoutGroq.status.tone, 'warn');
-  assert.equal(withoutGroq.status.title, 'ГОТОВО, без автоответов');
-  assert.equal(withoutGroq.status.detail, 'Вакансии с письмами/вопросами будут пропущены');
-  assert.equal(withoutGroq.buttons.autoApplyDisabled, false);
-  assert.equal(withoutGroq.buttons.refreshResumesDisabled, false);
+  assert.equal(withoutProviderKey.status.tone, 'warn');
+  assert.equal(withoutProviderKey.status.title, 'НЕ НАСТРОЕНО');
+  assert.equal(withoutProviderKey.status.detail, 'Укажите ключ Qwen API или выключите ИИ в настройках');
+
+  const withoutAi = derivePopupView({
+    runState: { state: 'idle' },
+    tabState: { kind: 'ready', canStartAutoApply: true },
+    aiProviderStatus: { provider: 'qwen', label: 'Qwen', configured: false, enabled: false }
+  });
+  assert.equal(withoutAi.status.tone, 'ok');
+  assert.equal(withoutAi.status.title, 'ГОТОВО, ИИ выключен');
+  assert.equal(withoutAi.status.detail, 'Письма — по шаблону · вакансии с вопросами пропускаются');
+  assert.equal(withoutAi.buttons.autoApplyDisabled, false);
+  assert.equal(withoutAi.buttons.refreshResumesDisabled, false);
 
   const wrongHhPage = derivePopupView({
     runState: { state: 'idle' },
@@ -3129,6 +3166,7 @@ test('options preserve generic credential drafts and selected fallback provider'
   vm.runInThisContext(providersSource);
   const handlers = new Map();
   const storage = {
+    aiEnabled: true,
     aiProvider: 'qwen',
     aiFallbackProvider: 'groq',
     aiFallbackToGroq: true,
@@ -3138,6 +3176,7 @@ test('options preserve generic credential drafts and selected fallback provider'
     },
     groqApiKey: 'gsk_saved',
     groqModel: 'llama-3.3-70b-versatile',
+    fallbackCoverLetterTemplate: 'Мой локальный шаблон.',
     resumeUrl: '',
     resumeCacheTtlHours: 1,
     resumeProfileText: '',
@@ -3199,7 +3238,7 @@ test('options preserve generic credential drafts and selected fallback provider'
     return element;
   }
 
-  const ids = ['aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
+  const ids = ['aiEnabled', 'aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiFallbackSection', 'fallbackCoverLetterTemplate', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
   let delayedProviderTestResolver = null;
@@ -3209,11 +3248,13 @@ test('options preserve generic credential drafts and selected fallback provider'
   const createdLinks = [];
 
   globalThis.HHJA_DEFAULTS = {
+    aiEnabled: true,
     aiProvider: 'qwen',
     aiFallbackProvider: '',
     aiFallbackToGroq: false,
     aiProviderCredentials: {},
     groqModel: 'llama-3.3-70b-versatile',
+    fallbackCoverLetterTemplate: 'default local template',
     resumeText: '',
     resumeUrl: '',
     resumeParsedText: '',
@@ -3322,6 +3363,8 @@ test('options preserve generic credential drafts and selected fallback provider'
 
     assert.equal(elements.coverPrompt.value, 'default prompt');
     assert.equal(elements.employerQuestionPrompt.value, 'default employer prompt');
+    assert.equal(elements.aiEnabled.checked, true);
+    assert.equal(elements.fallbackCoverLetterTemplate.value, 'Мой локальный шаблон.');
     assert.equal(elements.credentialProvider.value, 'qwen');
     assert.equal(elements.aiProviderApiKey.value, '********');
     assert.equal(elements.aiFallbackProvider.value, 'groq');
@@ -3329,6 +3372,7 @@ test('options preserve generic credential drafts and selected fallback provider'
     assert.match(elements.configuredProviders.textContent, /Groq — настроен/);
     assert.doesNotMatch(elements.configuredProviders.textContent, /sk_qwen_saved|gsk_saved/);
     assert.deepEqual(elements.aiFallbackProvider.children.map((option) => option.value), ['', 'groq']);
+    assert.equal(elements.aiFallbackSection.hidden, false);
 
     elements.credentialProvider.value = 'groq';
     handlers.get('credentialProvider:change')();
@@ -3428,6 +3472,31 @@ test('options preserve generic credential drafts and selected fallback provider'
     assert.equal(storage.aiFallbackProvider, 'groq');
     assert.equal(storage.aiFallbackToGroq, true);
 
+    elements.aiEnabled.checked = false;
+    handlers.get('aiEnabled:change')();
+    assert.equal(elements.aiProvider.disabled, true);
+    assert.equal(elements.testAiProvider.disabled, true);
+    assert.equal(elements.aiFallbackSection.hidden, true);
+    assert.equal(elements.credentialProvider.disabled, false);
+    assert.equal(elements.saveProviderCredential.disabled, false);
+    assert.equal(elements.deleteProviderCredential.disabled, false);
+    assert.equal(elements.buildResumeProfile.disabled, true);
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.aiEnabled, false);
+    assert.equal(storage.aiProvider, 'qwen');
+    assert.equal(storage.aiFallbackProvider, 'groq');
+    assert.equal(storage.aiProviderCredentials.qwen.apiKey, 'sk_qwen_new');
+    assert.equal(storage.aiProviderCredentials.groq.apiKey, 'gsk_test_before_save');
+
+    elements.aiEnabled.checked = true;
+    handlers.get('aiEnabled:change')();
+    await handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.aiEnabled, true);
+    assert.equal(elements.aiFallbackProvider.value, 'groq');
+    assert.equal(elements.aiFallbackSection.hidden, false);
+
     elements.credentialProvider.value = 'groq';
     handlers.get('credentialProvider:change')();
     delayNextProviderTest = true;
@@ -3515,6 +3584,11 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(html, /выключение настройки очищает всю историю/);
   assert.match(html, /<h2>Промпты<\/h2>/);
   assert.ok(html.indexOf('<h2>AI-провайдер</h2>') < html.indexOf('<h2>Промпты</h2>'));
+  assert.match(html, /id="aiEnabled"/);
+  assert.match(html, /Использовать ИИ/);
+  assert.match(html, /Вакансии с любыми вопросами работодателя пропускаются/);
+  assert.match(html, /id="fallbackCoverLetterTemplate" required/);
+  assert.match(html, /id="aiFallbackSection" hidden/);
   assert.match(html, /id="coverPrompt"/);
   assert.match(html, /<label for="telegramUsername">Ник в Telegram для ответов<\/label>\s*<input id="telegramUsername" type="text" placeholder="@username">/);
   assert.match(js, /telegramUsername: document\.getElementById\('telegramUsername'\)/);
@@ -3546,6 +3620,9 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(js, /credentialDrafts/);
   assert.match(js, /fields\.aiProviderApiKey\.dataset\.masked === 'true'/);
   assert.match(js, /aiFallbackProvider/);
+  assert.match(js, /aiEnabled: isAiEnabled\(\)/);
+  assert.match(js, /fallbackCoverLetterTemplate: fields\.fallbackCoverLetterTemplate\.value\.trim\(\)/);
+  assert.match(js, /fields\.aiFallbackSection\.hidden = !isAiEnabled\(\) \|\| options\.length === 0/);
   assert.match(js, /Math\.max\(0\.1/);
   assert.match(js, /agentDebugLogsEnabled/);
   assert.match(js, /fields\.agentDebugLogsEnabled\.checked = values\.agentDebugLogsEnabled === true/);
@@ -3576,6 +3653,8 @@ test('options expose registry-driven credentials and fallback provider controls'
   const content = await readFile(new URL('src/content-hh.js', root), 'utf8');
 
   assert.match(html, /<select id="aiProvider">/);
+  assert.match(html, /id="aiEnabled"/);
+  assert.match(html, /id="fallbackCoverLetterTemplate"/);
   assert.match(html, /<select id="credentialProvider">/);
   assert.match(html, /id="aiProviderApiKey"/);
   assert.match(html, /id="saveProviderCredential"/);
@@ -3588,6 +3667,7 @@ test('options expose registry-driven credentials and fallback provider controls'
   assert.match(js, /credentialDrafts/);
   assert.match(js, /aiProviderCredentials/);
   assert.match(js, /aiFallbackProvider/);
+  assert.match(js, /renderAiModeControls/);
   assert.doesNotMatch(js, /providerKeyFields|qwenApiKey|fields\.groqApiKey/);
   assert.match(js, /provider\.settingsModelSummary/);
   assert.match(providers, /getTaskCapability/);

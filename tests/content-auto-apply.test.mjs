@@ -73,6 +73,7 @@ async function runContentAutoApply({
   const appended = [];
   const states = [];
   const groqRequests = [];
+  const runtimeMessages = [];
   let submitClicks = 0;
   let followupClicks = 0;
   let navigateUrl = '';
@@ -452,6 +453,7 @@ async function runContentAutoApply({
         }
       },
       sendMessage(message, callback) {
+        runtimeMessages.push(message);
         const settle = (response) => {
           if (typeof callback === 'function') {
             Promise.resolve(response).then((value) => callback(value));
@@ -541,6 +543,7 @@ async function runContentAutoApply({
     appended,
     states,
     groqRequests,
+    runtimeMessages,
     submitClicks,
     followupClicks,
     textareaValue: textarea.value,
@@ -601,7 +604,11 @@ test('start and continue reject incomplete configuration before runtime mutation
   for (const messageType of ['START_AUTO_APPLY', 'START_DRY_RUN', 'CONTINUE_AUTO_APPLY']) {
     const result = await runContentAutoApply({
       messageType,
-      initialLocalStore: { groqApiKey: '' }
+      initialLocalStore: {
+        resumeUrl: '',
+        aiProviderCredentials: {},
+        groqApiKey: ''
+      }
     });
     assert.equal(result.response.ok, false);
     assert.match(result.response.error, /Приложение не настроено/);
@@ -785,17 +792,141 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
   return { appended, states, navigations, submitClicks, localStore };
 }
 
-test('auto apply uses safe cover-letter fallback when Groq key is missing', async () => {
+test('auto apply uses editable cover-letter template when AI is explicitly disabled', async () => {
+  const fallbackCoverLetterTemplate = 'Здравствуйте. Откликаюсь без автоматической генерации.';
   const result = await runContentAutoApply({
     dialogText: 'Добавьте сопроводительное письмо\nОтправить',
-    hasTextarea: true
+    hasTextarea: true,
+    initialLocalStore: {
+      aiEnabled: false,
+      aiProvider: 'qwen',
+      aiProviderCredentials: {
+        qwen: { apiKey: 'sk-saved' },
+        groq: { apiKey: 'gsk-saved' }
+      },
+      groqApiKey: 'gsk-saved',
+      fallbackCoverLetterTemplate
+    }
   });
 
   assert.equal(result.response.ok, true);
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.runtimeMessages.some((message) => message.type === 'ENSURE_RESUME_PROFILE'), false);
   assert.equal(result.appended.at(-1).status, 'applied');
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
+  assert.equal(result.textareaValue, fallbackCoverLetterTemplate);
+});
+
+for (const scenario of [
+  {
+    name: 'open text',
+    options: {
+      dialogText: 'Опишите опыт работы с Java',
+      hasQuestionField: true,
+      questionFieldLabel: 'Опишите опыт работы с Java'
+    }
+  },
+  {
+    name: 'deterministic salary',
+    options: {
+      dialogText: 'Укажите зарплатные ожидания',
+      hasQuestionField: true,
+      questionFieldLabel: 'Укажите зарплатные ожидания',
+      expectedSalary: '250 000 руб. на руки'
+    }
+  },
+  {
+    name: 'choice',
+    options: {
+      dialogText: 'Выберите формат работы',
+      questionControls: [
+        { type: 'radio', name: 'work_format', label: 'Удаленка', value: 'remote' },
+        { type: 'radio', name: 'work_format', label: 'Офис', value: 'office' }
+      ]
+    }
+  },
+  {
+    name: 'mixed question and cover-letter',
+    options: {
+      dialogText: 'Опишите опыт работы с Java\nСопроводительное письмо обязательное',
+      hasQuestionField: true,
+      questionFieldLabel: 'Опишите опыт работы с Java',
+      hasCoverLetterField: true,
+      questionControls: [
+        { type: 'checkbox', name: 'stack', label: 'Java', value: 'java' },
+        { type: 'checkbox', name: 'stack', label: 'Kotlin', value: 'kotlin' }
+      ]
+    }
+  }
+]) {
+  test(`no-AI mode skips ${scenario.name} employer questions without fill, submit, or provider request`, async () => {
+    const result = await runContentAutoApply({
+      hasTextarea: false,
+      startOnResponseForm: true,
+      ...scenario.options,
+      initialLocalStore: {
+        aiEnabled: false,
+        aiProvider: 'qwen',
+        aiProviderCredentials: {
+          qwen: { apiKey: 'sk-saved' },
+          groq: { apiKey: 'gsk-saved' }
+        },
+        groqApiKey: 'gsk-saved',
+        fallbackCoverLetterTemplate: 'Шаблон без ИИ.'
+      }
+    });
+
+    assert.equal(result.response.ok, true);
+    assert.equal(result.response.applied, 0);
+    assert.equal(result.response.skipped, 1);
+    assert.equal(result.submitClicks, 0);
+    assert.equal(result.appended.at(-1).status, 'skipped_ai_disabled_questions');
+    assert.equal(result.appended.at(-1).coverLetterUsed, false);
+    assert.equal(result.groqRequests.length, 0);
+    assert.equal(result.runtimeMessages.some((message) => message.type === 'ENSURE_RESUME_PROFILE'), false);
+    assert.equal(result.textareaValues.every((value) => value === ''), true);
+    assert.equal(result.coverTextareaValue, '');
+    assert.deepEqual(result.checkedLabels, []);
+  });
+}
+
+test('no-AI mode still submits a vacancy with no letter or employer questions', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    initialLocalStore: {
+      aiEnabled: false,
+      aiProviderCredentials: {},
+      fallbackCoverLetterTemplate: 'Шаблон без ИИ.'
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'applied');
+});
+
+test('enabled AI mode uses editable template after provider failure', async () => {
+  const fallbackCoverLetterTemplate = 'Провайдер недоступен. Отправляю сохранённый шаблон.';
+  const result = await runContentAutoApply({
+    dialogText: 'Добавьте сопроводительное письмо\nОтправить',
+    hasTextarea: true,
+    initialLocalStore: {
+      aiEnabled: true,
+      fallbackCoverLetterTemplate
+    },
+    groqResponse: { ok: false, error: 'provider unavailable' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.textareaValue, fallbackCoverLetterTemplate);
 });
 
 test('auto apply stop during cover-letter generation prevents fill and submit', async () => {

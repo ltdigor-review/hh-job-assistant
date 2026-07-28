@@ -579,6 +579,13 @@ async function storageRemove(keys) {
   }
 }
 
+async function assertAiEnabled() {
+  const { aiEnabled = DEFAULTS.aiEnabled } = await storageGet(['aiEnabled']);
+  if (aiEnabled === false) {
+    throw aiProviderError('ИИ выключен в настройках', 'HHJA_AI_DISABLED', false);
+  }
+}
+
 async function appendAgentLog(event, details = {}) {
   await globalThis.HHJobAssistantLog?.append?.('background', event, details);
 }
@@ -597,7 +604,7 @@ async function ensureDefaults() {
     ...logStateKeys
   ]);
   const patch = {};
-  const promptKeys = new Set(['coverPrompt', 'employerQuestionPrompt']);
+  const promptKeys = new Set(['fallbackCoverLetterTemplate', 'coverPrompt', 'employerQuestionPrompt']);
 
   const credentials = AI_PROVIDERS.normalizeCredentials(current.aiProviderCredentials, current.groqApiKey);
   if (current.aiProvider === undefined) {
@@ -1159,6 +1166,7 @@ function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) 
 
 async function callResumeProfileModel({ sourceText = '', currentProfile = '', editComment = '', mode = 'build' }) {
   const {
+    aiEnabled = DEFAULTS.aiEnabled,
     aiProvider,
     aiProviderCredentials = {},
     aiFallbackProvider,
@@ -1166,6 +1174,7 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
     aiFallbackToGroq = false,
     groqApiKey
   } = await storageGet([
+    'aiEnabled',
     'aiProvider',
     'aiProviderCredentials',
     'aiFallbackProvider',
@@ -1173,6 +1182,9 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
     'aiFallbackToGroq',
     'groqApiKey',
   ]);
+  if (aiEnabled === false) {
+    throw aiProviderError('ИИ выключен в настройках', 'HHJA_AI_DISABLED', false);
+  }
   const settings = {
     aiProvider,
     aiProviderCredentials,
@@ -1291,11 +1303,13 @@ async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() }
 }
 
 async function buildResumeProfile() {
+  await assertAiEnabled();
   const source = await getResumeContext({ forceRefresh: true, requireFacts: true });
   return buildResumeProfileFromSource(source);
 }
 
 async function editResumeProfile(editComment) {
+  await assertAiEnabled();
   const { resumeProfileText = '' } = await storageGet(['resumeProfileText']);
   if (!String(resumeProfileText).trim()) throw new Error('Сначала заполните промпт с резюме');
   if (!String(editComment).trim()) throw new Error('Напишите, что нужно изменить в промпте');
@@ -1310,6 +1324,7 @@ async function editResumeProfile(editComment) {
 }
 
 async function ensureResumeProfileAutoRefresh() {
+  await assertAiEnabled();
   const current = await storageGet([
     'resumeProfileText',
     'resumeProfileSourceHash',
@@ -1392,6 +1407,7 @@ async function buildAutomationSettingsAudit() {
   const current = await storageGet([
     'agentDebugLogsEnabled',
     'agentDebugRetentionCount',
+    'aiEnabled',
     'aiFallbackProvider',
     'aiFallbackEnabled',
     'aiFallbackToGroq',
@@ -1411,6 +1427,7 @@ async function buildAutomationSettingsAudit() {
     'telegramUsername',
     'workFormatPreference'
   ]);
+  const aiEnabled = current.aiEnabled !== false;
   const resumeUrl = normalizeResumeUrl(current.resumeUrl);
   const resumeText = String(current.resumeParsedText || '');
   const resumeSalary = extractResumeSalaryAmount(resumeText);
@@ -1433,8 +1450,8 @@ async function buildAutomationSettingsAudit() {
   const checks = {
     resumeUrlConfigured: Boolean(resumeUrl),
     resumeUrlCurrent: Boolean(resumeUrl && normalizeResumeUrl(current.resumeParsedUrl) === resumeUrl),
-    resumeProfileAvailable: Boolean(String(current.resumeProfileText || '').trim()),
-    resumeProfileFresh: Boolean(
+    resumeProfileAvailable: !aiEnabled || Boolean(String(current.resumeProfileText || '').trim()),
+    resumeProfileFresh: !aiEnabled || Boolean(
       current.resumeProfileCheckedAt &&
       Date.now() - Date.parse(current.resumeProfileCheckedAt) <= 24 * 60 * 60 * 1000
     ),
@@ -1449,15 +1466,16 @@ async function buildAutomationSettingsAudit() {
     dailyLimit200: Number(current.dailyLimit) === 200,
     debugLogsEnabled: current.agentDebugLogsEnabled === true,
     debugRetention20: Number(current.agentDebugRetentionCount) >= 20,
-    resumeAutoRefreshEnabled: current.resumeProfileAutoRefreshEnabled === true,
-    aiProviderKeyConfigured: Boolean(selectedProviderKey),
-    fallbackProviderReady: !fallbackProvider || Boolean(AI_PROVIDERS.getApiKey(current, fallbackProvider))
+    resumeAutoRefreshEnabled: !aiEnabled || current.resumeProfileAutoRefreshEnabled === true,
+    aiProviderKeyConfigured: !aiEnabled || Boolean(selectedProviderKey),
+    fallbackProviderReady: !aiEnabled || !fallbackProvider || Boolean(AI_PROVIDERS.getApiKey(current, fallbackProvider))
   };
   const issues = Object.entries(checks)
     .filter(([, passed]) => passed === false)
     .map(([name]) => name);
   const audit = {
     checkedAt: nowIso(),
+    aiEnabled,
     checks,
     issues,
     ready: issues.length === 0
@@ -1780,6 +1798,7 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
 
 async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false }, options = {}) {
   const {
+    aiEnabled = DEFAULTS.aiEnabled,
     aiProvider,
     aiProviderCredentials = {},
     aiFallbackProvider,
@@ -1792,7 +1811,10 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
     telegramUsername = DEFAULTS.telegramUsername,
     coverPrompt = DEFAULTS.coverPrompt,
     employerQuestionPrompt = DEFAULTS.employerQuestionPrompt,
-  } = await storageGet(['aiProvider', 'aiProviderCredentials', 'aiFallbackProvider', 'aiFallbackEnabled', 'aiFallbackToGroq', 'groqApiKey', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt']);
+  } = await storageGet(['aiEnabled', 'aiProvider', 'aiProviderCredentials', 'aiFallbackProvider', 'aiFallbackEnabled', 'aiFallbackToGroq', 'groqApiKey', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt']);
+  if (aiEnabled === false) {
+    throw aiProviderError('ИИ выключен в настройках', 'HHJA_AI_DISABLED', false);
+  }
   const settings = {
     aiProvider,
     aiProviderCredentials,
@@ -2527,6 +2549,7 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
 
 async function startAutoApplyFromActiveTab() {
   globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet([
+    'aiEnabled',
     'aiProvider',
     'aiProviderCredentials',
     'groqApiKey',
