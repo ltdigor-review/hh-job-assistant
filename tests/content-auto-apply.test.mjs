@@ -66,6 +66,7 @@ async function runContentAutoApply({
   cardText = 'Java Developer\nООО Test\nОткликнуться',
   sendMessageAfterImport = true,
   trustedShortcutEvents = [],
+  beforeTrustedShortcutEvents = null,
   authenticated = true,
   stopWhenState = ''
 }) {
@@ -523,6 +524,8 @@ async function runContentAutoApply({
   if (trustedShortcutEvents.length > 0) {
     const shortcutHandler = windowEventListeners.get('keydown');
     assert.ok(shortcutHandler, 'content script should register the trusted shortcut listener');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await beforeTrustedShortcutEvents?.(localStore);
     const pendingShortcutResults = trustedShortcutEvents.map((event) => shortcutHandler(event));
     shortcutResults.push(...await Promise.all(pendingShortcutResults));
   }
@@ -597,6 +600,59 @@ test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A fallback ignores synthetic 
   assert.equal(
     result.localStore.agentDebugLog.filter((entry) => entry.event === 'start_run_duplicate_ignored').length,
     1
+  );
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'trusted_shortcut_start').length,
+    1
+  );
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'trusted_shortcut_continue').length,
+    0
+  );
+});
+
+test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A resumes saved queue without start event', async () => {
+  const result = await runContentAutoApply({
+    sendMessageAfterImport: false,
+    trustedShortcutEvents: Array.from({ length: 2 }, () => ({
+      key: 'a',
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      repeat: false,
+      isTrusted: true,
+      preventDefault() {},
+      stopPropagation() {}
+    })),
+    initialLocalStore: {
+      agentDebugLogsEnabled: true
+    },
+    beforeTrustedShortcutEvents(localStore) {
+      localStore.autoApplyQueue = {
+        active: true,
+        runId: 'saved-run',
+        items: [],
+        index: 0,
+        counters: {}
+      };
+    }
+  });
+
+  assert.equal(result.shortcutResults[0].handled, true);
+  assert.equal(result.shortcutResults[0].continued, true);
+  assert.equal(result.shortcutResults[1].alreadyRunning, true);
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'trusted_shortcut_continue').length,
+    1
+  );
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'trusted_shortcut_start').length,
+    0
+  );
+  assert.equal(
+    result.localStore.agentDebugLog.filter((entry) => entry.event === 'start_run').length,
+    0
   );
 });
 

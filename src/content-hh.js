@@ -3839,14 +3839,22 @@ async function handleTrustedAutoApplyShortcut(event) {
     return { handled: true, started: false };
   }
 
-  await appendAgentLog('trusted_shortcut_start', { mode: 'live' });
   const queueStatus = await getAutoApplyQueueStatus();
   if (queueStatus.canContinueAutoApply) {
-    await appendAgentLog('trusted_shortcut_continue', { mode: 'live' });
-    const result = await continueRunSingleFlight();
+    const hadRunInProgress = startRunPromise != null;
+    const resultPromise = continueRunSingleFlight();
+    if (!hadRunInProgress) {
+      await appendAgentLog('trusted_shortcut_continue', { mode: 'live' });
+    }
+    const result = await resultPromise;
     return { handled: true, continued: result?.alreadyRunning !== true, ...result };
   }
-  const result = await startRunSingleFlight('live');
+  const hadRunInProgress = startRunPromise != null;
+  const resultPromise = startRunSingleFlight('live');
+  if (!hadRunInProgress) {
+    await appendAgentLog('trusted_shortcut_start', { mode: 'live' });
+  }
+  const result = await resultPromise;
   return { handled: true, started: result?.alreadyRunning !== true, ...result };
 }
 
