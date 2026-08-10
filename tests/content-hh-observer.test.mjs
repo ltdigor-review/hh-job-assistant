@@ -95,6 +95,52 @@ test('HH question captures are synchronous, fresh, and split facts from refs', a
   assert.equal('field' in second.facts.textQuestions[0], false);
 });
 
+test('HH question IDs stay legacy-stable when visible answer text shifts after a rerender', async () => {
+  const observer = loadObserver(await readDomOwnerSource());
+  const makeField = (name) => ({
+    tagName: 'TEXTAREA',
+    textContent: '',
+    value: '',
+    required: true,
+    parentElement: { textContent: 'Писать тут' },
+    getAttribute(attribute) {
+      return ({ name, type: 'text' })[attribute] || '';
+    },
+    closest: () => null
+  });
+  let fields = [makeField('task_1_text'), makeField('task_2_text')];
+  const rootNode = {
+    textContent: 'Укажите город проживания\nПисать тут\nУкажите желаемый доход\nПисать тут',
+    querySelectorAll(selector) {
+      if (selector === '[data-qa="task-body"]') return [];
+      if (selector.includes('textarea,input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')) return fields;
+      if (selector.includes('input[type="checkbox"],input[type="radio"]')) return [];
+      return [];
+    }
+  };
+
+  const before = observer.captureQuestionForm(rootNode);
+  const stableQuestionHash = (value) => {
+    let hash = 0x811c9dc5;
+    for (const character of String(value || '')) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  };
+  const legacyMarker = 'task_1_text\n\n\n\nПисать тут';
+  assert.equal(before.facts.textQuestions[0].id, `text-1-${stableQuestionHash(`${legacyMarker}\n${legacyMarker}`)}`);
+  fields = [makeField('task_1_text'), makeField('task_2_text')];
+  rootNode.textContent = 'Москва\nУкажите желаемый доход\n600000';
+  const after = observer.captureQuestionForm(rootNode);
+
+  assert.deepEqual(
+    after.facts.textQuestions.map(({ id }) => id),
+    before.facts.textQuestions.map(({ id }) => id)
+  );
+  assert.equal(after.facts.signature, before.facts.signature);
+});
+
 test('HH observer has no waits, mutations, events, Chrome APIs, or network calls', async () => {
   const source = await readDomOwnerSource();
   assert.doesNotMatch(source, /\b(?:MutationObserver|setTimeout|setInterval|fetch)\b|\.click\s*\(|setNativeValue|dispatchEvent|addEventListener|chrome\.(?:runtime|storage)/);

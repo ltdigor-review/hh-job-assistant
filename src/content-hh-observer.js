@@ -754,7 +754,11 @@
   }
 
   function findDetailResponseButton(root = document) {
-    return findEnabledClickableByText(root, [/откликнуться/i]) || findClickableByText(root, [/откликнуться/i]);
+    const structural = queryAll([
+      '[data-qa="vacancy-response-link-top"]',
+      '[data-qa="vacancy-response-link-bottom"]'
+    ], root).find((node) => !isDisabled(node));
+    return structural || findEnabledClickableByText(root, [/откликнуться/i]) || findClickableByText(root, [/откликнуться/i]);
   }
 
   function findCloseButton(root = getDialogRoot()) {
@@ -861,11 +865,11 @@
     const groups = suppliedGroups || findQuestionControlGroups(root);
     const visibleQuestionLabels = extractVisibleQuestionLabels(getRootText(root), { textOnly: true });
     const textQuestions = fields.map((field, index) => {
-      const question = cleanText(
-        getMeaningfulQuestionText(field) || visibleQuestionLabels[index] || getFieldMarker(field) || 'question text not found'
-      );
-      const contextQuestion = question;
-      const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${getFieldMarker(field)}`)}`;
+      const marker = getFieldMarker(field);
+      const meaningfulQuestion = getMeaningfulQuestionText(field);
+      const question = cleanText(meaningfulQuestion || marker || 'question text not found');
+      const contextQuestion = cleanText(meaningfulQuestion || visibleQuestionLabels[index] || marker || 'question text not found');
+      const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${marker}`)}`;
       return {
         id,
         legacyIndex: index + 1,

@@ -4961,6 +4961,41 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
       });
     }
   });
+  const replacementResponseButton = new FakeElement({
+    text: 'Откликнуться',
+    click() {
+      responseClicks += 1;
+      dialog = new FakeElement({
+        text: 'Отклик на вакансию\nОткликнуться',
+        selectorMap: {
+          '[data-qa="vacancy-response-submit-popup"]': [submitButton],
+          '[data-qa="vacancy-response-letter-submit"]': [submitButton],
+          '[data-qa*="submit"]': [submitButton],
+          button: [submitButton]
+        }
+      });
+    }
+  });
+  let currentResponseButton = responseButton;
+  const recommendationResponseButton = new FakeElement({ text: 'Откликнуться' });
+  const recommendationTitleLink = new FakeElement({
+    text: 'Recommendation vacancy',
+    href: 'https://hh.ru/vacancy/999999999'
+  });
+  const recommendationCard = new FakeElement({
+    text: 'Recommendation vacancy Откликнуться',
+    selectorMap: {
+      '[data-qa="serp-item__title"]': [recommendationTitleLink],
+      'a[href*="/vacancy/"]': [recommendationTitleLink],
+      '[data-qa="vacancy-serp__vacancy_response"]': [recommendationResponseButton],
+      '[data-qa="vacancy-response-link-top"]': [],
+      '[data-qa="vacancy-response-link-bottom"]': [],
+      'a[href*="vacancy_response"]': [],
+      button: [recommendationResponseButton]
+    }
+  });
+  recommendationResponseButton.parentElement = recommendationCard;
+  recommendationTitleLink.parentElement = recommendationCard;
 
   globalThis.location = {
     href: 'https://hh.ru/vacancy/133919189',
@@ -5002,7 +5037,10 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
       if (selector === '[data-qa="vacancy-section"]') return [];
       if (selector === '[data-qa="vacancy-view-description"]') return [];
       if (selector === 'main') return [];
-      if (selector === 'button') return [responseButton];
+      if (selector === '[data-qa*="vacancy-serp"]') return [recommendationCard];
+      if (selector === '[data-qa="vacancy-response-link-top"]') return [currentResponseButton];
+      if (selector === '[data-qa="vacancy-response-link-bottom"]') return [];
+      if (selector === 'button') return [currentResponseButton, recommendationResponseButton];
       if (selector === '[role="dialog"]') return dialog ? [dialog] : [];
       if (selector === '[data-qa*="modal"]') return [];
       if (selector === '.bloko-modal') return [];
@@ -5029,6 +5067,10 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
       sendMessage(message) {
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
+          if (message.patch.state === 'waiting_for_dialog') {
+            responseButton.isConnected = false;
+            currentResponseButton = replacementResponseButton;
+          }
         }
         if (message.type === 'APPEND_RUN_RESULT') {
           appended.push(message.item);
@@ -5055,6 +5097,7 @@ test('auto apply continues queued flow on hh vacancy detail page instead of comp
   }
 
   assert.equal(responseClicks, 1);
+  assert.equal(recommendationResponseButton.attrs['data-hh-job-assistant-auto-apply-highlight'], undefined);
   assert.equal(submitClicks, 1);
   assert.equal(appended.at(-1).status, 'applied');
   assert.equal(localStore.autoApplyQueue.active, false);

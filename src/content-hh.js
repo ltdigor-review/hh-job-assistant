@@ -136,6 +136,15 @@ function scanVacancies() {
 
 function findCurrentVacancyResponseButton(item) {
   const expectedKey = getVacancyDedupeKey(item);
+  const pageSnapshot = capturePage();
+  if (
+    pageSnapshot.facts.pageKind === 'vacancy' &&
+    expectedKey &&
+    pageSnapshot.facts.currentVacancyId === expectedKey &&
+    pageSnapshot.refs.detailResponseButton
+  ) {
+    return pageSnapshot.refs.detailResponseButton;
+  }
   const current = scanVacancies().find((candidate) => {
     const candidateKey = getVacancyDedupeKey(candidate);
     return expectedKey ? candidateKey === expectedKey : candidate.index === item?.index;
