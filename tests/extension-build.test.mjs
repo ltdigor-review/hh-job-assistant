@@ -78,6 +78,7 @@ test('[BS:COVERS:HHJA-BR-000041] manifest is valid MV3 and exposes popup UI', as
       'src/config-readiness.js',
     'src/content-text.js',
     'src/content-dom.js',
+    'src/content-hh-observer.js',
     'src/content-hh.js'
   ]);
 });
@@ -90,6 +91,7 @@ test('extension user-facing text is localized for Russian-speaking users', async
     'src/popup.js',
     'src/options.js',
     'src/content-text.js',
+    'src/content-hh-observer.js',
     'src/content-hh.js',
     'src/background.js'
   ];
@@ -196,6 +198,7 @@ test('javascript files parse', async () => {
     'src/agent-log.js',
     'src/content-text.js',
     'src/content-dom.js',
+    'src/content-hh-observer.js',
     'src/background.js',
     'src/content-hh.js',
     'src/error-text.js',

@@ -153,6 +153,7 @@ async function readContentScriptSource() {
     '../src/defaults.js',
     '../src/content-text.js',
     '../src/content-dom.js',
+    '../src/content-hh-observer.js',
     '../src/content-hh.js'
   ];
   const parts = await Promise.all(files.map((file) => readFile(new URL(file, import.meta.url), 'utf8')));
