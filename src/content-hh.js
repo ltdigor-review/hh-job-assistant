@@ -1178,6 +1178,10 @@ function refreshQuestionSnapshot(snapshot) {
   const currentGroups = findQuestionControlGroups(snapshot.root);
   if (currentFields.length !== snapshot.textQuestions.length || currentGroups.length !== snapshot.choiceQuestions.length) return false;
   const currentSnapshot = createQuestionSnapshot(snapshot.root);
+  if (
+    currentSnapshot.textQuestions.length !== snapshot.textQuestions.length ||
+    currentSnapshot.choiceQuestions.length !== snapshot.choiceQuestions.length
+  ) return false;
   const sameTextStructure = currentSnapshot.textQuestions.every((descriptor, index) => (
     descriptor.id === snapshot.textQuestions[index].id ||
     (descriptor.contentEditable && snapshot.textQuestions[index].contentEditable)

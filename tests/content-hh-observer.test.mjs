@@ -54,6 +54,10 @@ test('HH observer exposes only the frozen versioned capture API', async () => {
   ]);
   assert.equal(observer.schemaVersion, 1);
   assert.equal(Object.isFrozen(observer), true);
+  assert.equal(observer.readControlState(null).connected, false);
+
+  const responseRoot = { textContent: 'Вы откликнулись', querySelectorAll: () => [] };
+  assert.equal(observer.captureResponse({ root: responseRoot, item: { vacancyId: '123' } }).facts.alreadyApplied, true);
 });
 
 test('HH question captures are synchronous, fresh, and split facts from refs', async () => {

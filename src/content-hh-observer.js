@@ -81,6 +81,10 @@
     return String(url || '').match(/\/vacancy\/(\d+)/)?.[1] || new URL(String(url || location.href), location.href).searchParams.get('vacancyId') || '';
   }
 
+  function getVacancyDedupeKey(item) {
+    return cleanText(item?.vacancyId) || getVacancyId(item?.url || '') || getVacancyId(item?.responseUrl || '');
+  }
+
   function isUnsafePage() {
     const body = textOf(document.body);
     return (
@@ -860,9 +864,7 @@
       const question = cleanText(
         getMeaningfulQuestionText(field) || visibleQuestionLabels[index] || getFieldMarker(field) || 'question text not found'
       );
-      const contextQuestion = cleanText(
-        getMeaningfulQuestionText(field) || visibleQuestionLabels[index] || getFieldMarker(field) || 'question text not found'
-      );
+      const contextQuestion = question;
       const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${getFieldMarker(field)}`)}`;
       return {
         id,
@@ -917,7 +919,7 @@
       value: getFieldValue(ref),
       checked: Boolean(ref?.checked),
       disabled: isDisabled(ref),
-      connected: ref?.isConnected !== false,
+      connected: Boolean(ref) && ref.isConnected !== false,
       href: getElementHref(ref),
       name: ref?.getAttribute?.('name') || ref?.name || '',
       type: ref?.getAttribute?.('type') || ref?.type || '',
