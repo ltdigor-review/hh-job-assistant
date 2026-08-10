@@ -43,7 +43,7 @@ function loadObserver(source) {
 test('HH observer exposes only the frozen versioned capture API', async () => {
   const observer = loadObserver(await readDomOwnerSource());
 
-  assert.deepEqual(Object.keys(observer), [
+  assert.deepEqual(Reflect.ownKeys(observer), [
     'schemaVersion',
     'capturePage',
     'captureSearch',
