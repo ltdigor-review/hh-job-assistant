@@ -386,7 +386,16 @@
     const placeholder = field.getAttribute('placeholder') || '';
     const ariaLabel = field.getAttribute('aria-label') || '';
     const label = typeof field.closest === 'function' ? field.closest('label') : null;
-    const nearText = textOf(label || field.parentElement || field);
+    let nearText = textOf(label || field.parentElement || field);
+    const currentValue = cleanText(field.value || (field.isContentEditable ? field.textContent : ''));
+    const isNativeTaskTextarea = (
+      /^task_\d+_text$/i.test(name) &&
+      field.parentElement?.getAttribute?.('data-qa') === 'textarea-native-wrapper'
+    );
+    if (isNativeTaskTextarea && currentValue && nearText.includes(currentValue)) {
+      const labelledBy = field.getAttribute('aria-labelledby') || '';
+      nearText = textOf(document.getElementById?.(labelledBy)) || 'Писать тут';
+    }
     return `${name}\n${dataQa}\n${placeholder}\n${ariaLabel}\n${nearText}`;
   }
 
@@ -419,6 +428,7 @@
   }
 
   function getMeaningfulQuestionText(field) {
+    const currentValue = cleanText(field.value || (field.isContentEditable ? field.textContent : ''));
     const technicalMarkers = [
       field.getAttribute('name') || '',
       field.getAttribute('data-qa') || '',
@@ -434,10 +444,13 @@
     ];
 
     const cleaned = candidates
-      .map((candidate) => {
+      .map((candidate, index) => {
         let text = cleanText(candidate);
         for (const marker of technicalMarkers) {
           text = cleanText(text.replaceAll(marker, ' '));
+        }
+        if (index >= 3 && currentValue) {
+          text = cleanText(text.replaceAll(currentValue, ' '));
         }
         return text
           .split('\n')

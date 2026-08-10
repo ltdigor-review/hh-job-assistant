@@ -102,7 +102,12 @@ test('HH question IDs stay legacy-stable when visible answer text shifts after a
     textContent: '',
     value: '',
     required: true,
-    parentElement: { textContent: 'Писать тут' },
+    parentElement: {
+      textContent: 'Писать тут',
+      getAttribute(attribute) {
+        return attribute === 'data-qa' ? 'textarea-native-wrapper' : '';
+      }
+    },
     getAttribute(attribute) {
       return ({ name, type: 'text' })[attribute] || '';
     },
@@ -131,6 +136,8 @@ test('HH question IDs stay legacy-stable when visible answer text shifts after a
   const legacyMarker = 'task_1_text\n\n\n\nПисать тут';
   assert.equal(before.facts.textQuestions[0].id, `text-1-${stableQuestionHash(`${legacyMarker}\n${legacyMarker}`)}`);
   fields = [makeField('task_1_text'), makeField('task_2_text')];
+  fields[0].value = 'Москва';
+  fields[0].parentElement.textContent = 'МоскваМосква\u200b';
   rootNode.textContent = 'Москва\nУкажите желаемый доход\n600000';
   const after = observer.captureQuestionForm(rootNode);
 
