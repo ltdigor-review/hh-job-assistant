@@ -5,11 +5,13 @@
 - Always use English for visible reasoning summaries and final answers unless the user explicitly asks for another language in the current turn.
 - Use terse `caveman` style by default while preserving exact commands, code, errors, and safety warnings.
 - Do not use `superpowers` skills for this repository unless the current user turn explicitly asks for them.
+- For non-trivial extension UI or Settings changes, use `build-web-apps:frontend-testing-debugging` for rendered interaction and responsive validation; skip it for backend-only or trivial edits.
 - Use relative paths for repository files.
 - Work directly on the repository primary branch (`master` or `main`) by default; do not create a feature branch unless the user explicitly asks for one.
 - Multiple agents may work in the same branch at the same time and conflict with each other; this is normal.
 - `spark`/subagent delegation is pre-authorized for this repository. When a narrow, low-risk, well-scoped task is useful for `spark`, start it without asking the user for delegation permission. Ask only when the delegated action itself needs approval under higher-priority system/developer/tool policy or could cause meaningful side effects.
 - Increment the project version for code or behavior changes before final verification. Use the repository version sync tooling when available.
+- Before release, compare the current branch and working tree with `origin/master`. If the Settings UI or any visible dependency changed, bump and sync the version; render the exact current Settings UI in a temporary localhost harness (never `chrome://` or `chrome-extension://`); capture and visually inspect desktop Qwen with fallback enabled, desktop Groq with the fallback control hidden, and mobile screenshots; run mocked provider tests plus real Qwen, Groq, and fallback E2E with synthetic data and secrets kept local; save screenshots under ignored `outputs/settings-release/<version>/` and show them in the final reply. Block release on any failure. Do not create a release script for this gate.
 - After making code or behavior changes, if the relevant/full test suite passes and no blocker remains, commit and push the changes to the repository primary branch by default.
 - This repository is public. Never commit credentials, API keys, cookies, tokens, local browser profiles, or other secrets. Keep secrets in local environment/profile storage only.
 - Production/prod-like hh.ru browser checks must use an authorized hh.ru profile. Prefer `.hhja-chromium-profile`; if a fresh profile is opened, wait for the user to sign in before treating the check as valid.

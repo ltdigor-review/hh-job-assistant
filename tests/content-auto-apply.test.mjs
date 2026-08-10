@@ -59,6 +59,7 @@ async function runContentAutoApply({
   groqResponse = { ok: false, error: 'Groq API key is not configured' },
   runtimeMessageTimeoutMs = 0,
   runtimeSendErrors = {},
+  runtimeResponses = {},
   runtimeCallbackOnly = false,
   message = null,
   initialLocalStore = null,
@@ -465,6 +466,10 @@ async function runContentAutoApply({
         if (runtimeSendErrors[message.type]) {
           throw new Error(runtimeSendErrors[message.type]);
         }
+        if (Object.hasOwn(runtimeResponses, message.type)) {
+          const response = runtimeResponses[message.type];
+          return settle(typeof response === 'function' ? response(message) : response);
+        }
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
           if (message.patch.state === stopWhenState && listener) {
@@ -489,6 +494,9 @@ async function runContentAutoApply({
             return undefined;
           }
           return settle(groqResponse);
+        }
+        if (message.type === 'GET_AUTOMATION_SETTINGS_AUDIT') {
+          return settle({ ok: true, audit: { ready: true, issues: [] } });
         }
         return settle({ ok: true });
       }
@@ -566,6 +574,217 @@ async function runContentAutoApply({
   };
 }
 
+async function runStatusPanel({ authenticated = true, snapshot } = {}) {
+  const source = await readContentScriptSource();
+  const elementsById = new Map();
+  const runtimeMessages = [];
+  const historyCalls = [];
+  let storageGetCalls = 0;
+  let storageSetCalls = 0;
+
+  class StatusElement {
+    constructor(tagName) {
+      this.tagName = tagName;
+      this.attrs = {};
+      this.children = [];
+      this.style = {};
+      this.textContent = '';
+      this.innerText = '';
+      this.listeners = new Map();
+      this.parentElement = null;
+    }
+
+    setAttribute(name, value) {
+      this.attrs[name] = String(value);
+      if (name === 'id') elementsById.set(String(value), this);
+    }
+
+    getAttribute(name) {
+      return this.attrs[name] ?? null;
+    }
+
+    append(...children) {
+      for (const child of children) {
+        child.parentElement = this;
+        this.children.push(child);
+      }
+    }
+
+    replaceChildren(...children) {
+      this.children = [];
+      this.append(...children);
+    }
+
+    addEventListener(type, handler) {
+      this.listeners.set(type, handler);
+    }
+
+    dispatchEvent() {}
+  }
+
+  const body = new StatusElement('body');
+  body.innerText = 'HH page';
+  globalThis.location = {
+    href: 'https://hh.ru/search/vacancy?text=java&hhjaStatus=1',
+    pathname: '/search/vacancy'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_AUTHENTICATED__: authenticated,
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    history: {
+      replaceState(...args) {
+        historyCalls.push(args);
+      }
+    },
+    addEventListener() {},
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ = authenticated;
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.Event = class Event {
+    constructor(type) {
+      this.type = type;
+    }
+  };
+  globalThis.KeyboardEvent = class KeyboardEvent extends globalThis.Event {};
+  globalThis.document = {
+    body,
+    createElement(tagName) {
+      return new StatusElement(tagName);
+    },
+    getElementById(id) {
+      return elementsById.get(id) || null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {}
+  };
+  globalThis.chrome = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener() {} },
+      sendMessage(message, callback) {
+        runtimeMessages.push(message);
+        const response = ['GET_SAFE_STATUS_SNAPSHOT', 'RUN_SAFE_STATUS_PREFLIGHT'].includes(message.type)
+          ? { ok: true, snapshot }
+          : { ok: true };
+        queueMicrotask(() => callback?.(response));
+        return Promise.resolve(response);
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          storageGetCalls += 1;
+          return {};
+        },
+        async set() {
+          storageSetCalls += 1;
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const panel = elementsById.get('hh-job-assistant-status-panel') || null;
+  const refresh = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-refresh') || null;
+  const flattenText = (node) => [node.textContent, ...node.children.flatMap(flattenText)].filter(Boolean).join('\n');
+  return {
+    panel,
+    refresh,
+    panelText: panel ? flattenText(panel) : '',
+    runtimeMessages,
+    historyCalls,
+    storageGetCalls,
+    storageSetCalls
+  };
+}
+
+test('hhjaStatus panel reads only the sanitized snapshot and consumes its URL parameter', async () => {
+  const result = await runStatusPanel({
+    snapshot: {
+      manifestVersion: '9.8.7',
+      dailyLedger: {
+        date: '2026-08-07',
+        newSubmitted: 4,
+        alreadyApplied: 2,
+        hhDailyLimitReached: false,
+        updatedAt: '2026-08-07T10:00:00.000Z',
+        vacancyId: 'must-not-render'
+      },
+      automationAudit: {
+        ready: true,
+        checkedAt: '2026-08-07T10:01:00.000Z',
+        issues: [],
+        resumeUrl: 'https://hh.ru/resume/private'
+      },
+      stopBeforeSubmit: { state: 'armed', runId: 'must-not-render' },
+      runState: {
+        state: 'dry_run_complete',
+        found: 8,
+        processed: 8,
+        applied: 0,
+        alreadyApplied: 2,
+        skipped: 8,
+        errors: 0,
+        updatedAt: '2026-08-07T10:02:00.000Z',
+        url: 'https://hh.ru/vacancy/private',
+        lastError: 'must-not-render'
+      },
+      startDigest: {
+        starts: 1,
+        continues: 0,
+        shortcutStarts: 0,
+        shortcutContinues: 0,
+        duplicates: 0,
+        conflicts: 0,
+        lastEvent: 'start',
+        updatedAt: '2026-08-07T10:03:00.000Z',
+        rawLog: 'must-not-render'
+      },
+      agentPrivateQuestionAudit: 'must-not-render'
+    }
+  });
+
+  assert.ok(result.panel);
+  assert.equal(result.panel.attrs['data-qa'], 'hhja-status-panel');
+  assert.equal(result.panel.attrs.role, 'status');
+  assert.equal(result.panel.attrs['aria-live'], 'polite');
+  assert.ok(result.refresh);
+  assert.deepEqual(result.runtimeMessages.map((message) => message.type), ['RUN_SAFE_STATUS_PREFLIGHT']);
+  assert.equal(result.storageGetCalls, 0);
+  assert.equal(result.storageSetCalls, 0);
+  assert.equal(result.historyCalls.length, 1);
+  assert.equal(result.historyCalls[0][2], '/search/vacancy?text=java');
+  assert.match(result.panelText, /9\.8\.7/);
+  assert.match(result.panelText, /dry_run_complete/);
+  assert.match(result.panelText, /запусков 1/);
+  assert.doesNotMatch(result.panelText, /must-not-render|vacancy\/private|resume\/private|agentPrivateQuestionAudit/);
+  assert.equal(result.runtimeMessages.some((message) => /^(?:START_|CONTINUE_|STOP_|RELOAD_)/.test(message.type)), false);
+  result.refresh.listeners.get('click')();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(result.runtimeMessages.map((message) => message.type), [
+    'RUN_SAFE_STATUS_PREFLIGHT',
+    'RUN_SAFE_STATUS_PREFLIGHT'
+  ]);
+});
+
+test('hhjaStatus panel stays absent outside an authenticated safe HH context', async () => {
+  const result = await runStatusPanel({ authenticated: false, snapshot: {} });
+
+  assert.equal(result.panel, null);
+  assert.equal(result.runtimeMessages.some((message) => message.type === 'RUN_SAFE_STATUS_PREFLIGHT'), false);
+  assert.equal(result.historyCalls.length, 0);
+  assert.equal(result.storageSetCalls, 0);
+});
+
 test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A fallback ignores synthetic input and starts only one run', async () => {
   const eventBase = {
     key: 'a',
@@ -609,6 +828,23 @@ test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A fallback ignores synthetic 
     result.localStore.agentDebugLog.filter((entry) => entry.event === 'trusted_shortcut_continue').length,
     0
   );
+  assert.deepEqual(result.localStore.automationStartDigest && {
+    starts: result.localStore.automationStartDigest.starts,
+    continues: result.localStore.automationStartDigest.continues,
+    shortcutStarts: result.localStore.automationStartDigest.shortcutStarts,
+    shortcutContinues: result.localStore.automationStartDigest.shortcutContinues,
+    duplicates: result.localStore.automationStartDigest.duplicates,
+    conflicts: result.localStore.automationStartDigest.conflicts,
+    lastEvent: result.localStore.automationStartDigest.lastEvent
+  }, {
+    starts: 1,
+    continues: 0,
+    shortcutStarts: 1,
+    shortcutContinues: 0,
+    duplicates: 1,
+    conflicts: 0,
+    lastEvent: 'duplicate_start'
+  });
 });
 
 test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A resumes saved queue without start event', async () => {
@@ -673,6 +909,24 @@ test('[BS:COVERS:HHJA-BR-000017] start and continue reject incomplete configurat
     assert.equal(result.submitClicks, 0);
     assert.equal(result.navigateUrl, '');
   }
+});
+
+test('[BS:COVERS:HHJA-BR-000017] live start fails closed when the refreshed settings audit is not ready', async () => {
+  const result = await runContentAutoApply({
+    runtimeResponses: {
+      GET_AUTOMATION_SETTINGS_AUDIT: {
+        ok: true,
+        audit: { ready: false, issues: ['resumeProfileFresh'] }
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, false);
+  assert.match(result.response.error, /Автоматические отклики заблокированы/);
+  assert.deepEqual(result.appended, []);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.runtimeMessages.some((message) => message.type === 'GET_AUTOMATION_SETTINGS_AUDIT'), true);
 });
 
 async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 руб. на руки' } = {}) {

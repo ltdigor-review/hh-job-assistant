@@ -61,6 +61,11 @@ const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
 const AUTO_START_TOKEN_EXPIRES_AT_KEY = 'autoApplyAutoStartTokenExpiresAt';
 const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
 const PRIVATE_QUESTION_AUDIT_KEY = 'agentPrivateQuestionAudit';
+const AUTOMATION_START_DIGEST_KEY = 'automationStartDigest';
+const HHJA_STATUS_PARAM = 'hhjaStatus';
+const HHJA_STATUS_PANEL_ID = 'hh-job-assistant-status-panel';
+const HHJA_STATUS_CONTENT_ID = 'hh-job-assistant-status-content';
+const STATUS_PANEL_MESSAGE_TIMEOUT_MS = 5000;
 const PRIVATE_QUESTION_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PRIVATE_QUESTION_AUDIT_MAX_ENTRIES = 200;
 const MAX_QUESTION_FORM_RESNAPSHOTS = 3;
@@ -94,6 +99,8 @@ let queuedSearchStarted = false;
 let extensionContextInvalidated = false;
 let actionOverlay = null;
 let startRunPromise = null;
+let activeRunEntryKind = '';
+let automationStartDigestWrite = Promise.resolve();
 
 class StopRequestedError extends Error {
   constructor() {
@@ -375,6 +382,81 @@ async function storageSet(value, options = {}) {
   return withExtensionContext(() => chrome.storage.local.set(value), options);
 }
 
+function safeDigestCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) return 0;
+  return Math.min(Math.floor(count), 1000000);
+}
+
+function normalizeAutomationStartDigest(value) {
+  const lastEvent = String(value?.lastEvent || 'none');
+  return {
+    starts: safeDigestCount(value?.starts),
+    continues: safeDigestCount(value?.continues),
+    shortcutStarts: safeDigestCount(value?.shortcutStarts),
+    shortcutContinues: safeDigestCount(value?.shortcutContinues),
+    duplicates: safeDigestCount(value?.duplicates),
+    conflicts: safeDigestCount(value?.conflicts),
+    lastEvent: [
+      'none',
+      'start',
+      'continue',
+      'duplicate_start',
+      'duplicate_continue',
+      'conflict_start',
+      'conflict_continue'
+    ].includes(lastEvent) ? lastEvent : 'none',
+    updatedAt: String(value?.updatedAt || '')
+  };
+}
+
+function enqueueAutomationStartDigestWrite(operation) {
+  const pending = automationStartDigestWrite.then(operation, operation);
+  automationStartDigestWrite = pending.catch(() => {});
+  return pending;
+}
+
+async function beginAutomationStartDigest(kind, source = 'runtime') {
+  const isContinue = kind === 'continue';
+  const shortcut = source === 'shortcut';
+  const digest = {
+    starts: isContinue ? 0 : 1,
+    continues: isContinue ? 1 : 0,
+    shortcutStarts: !isContinue && shortcut ? 1 : 0,
+    shortcutContinues: isContinue && shortcut ? 1 : 0,
+    duplicates: 0,
+    conflicts: 0,
+    lastEvent: isContinue ? 'continue' : 'start',
+    updatedAt: new Date().toISOString()
+  };
+  return enqueueAutomationStartDigestWrite(async () => {
+    await storageSet({ [AUTOMATION_START_DIGEST_KEY]: digest }, { optional: true });
+    return digest;
+  });
+}
+
+async function recordAutomationStartDigestCollision(kind, source = 'runtime', conflict = false) {
+  return enqueueAutomationStartDigestWrite(async () => {
+    const stored = await storageGet([AUTOMATION_START_DIGEST_KEY], { optional: true });
+    const current = normalizeAutomationStartDigest(stored?.[AUTOMATION_START_DIGEST_KEY]);
+    const event = `${conflict ? 'conflict' : 'duplicate'}_${kind === 'continue' ? 'continue' : 'start'}`;
+    const next = {
+      ...current,
+      duplicates: current.duplicates + 1,
+      conflicts: current.conflicts + (conflict ? 1 : 0),
+      lastEvent: event,
+      updatedAt: new Date().toISOString()
+    };
+    if (source === 'shortcut' && kind === 'continue') {
+      next.shortcutContinues = Math.max(next.shortcutContinues, 1);
+    } else if (source === 'shortcut') {
+      next.shortcutStarts = Math.max(next.shortcutStarts, 1);
+    }
+    await storageSet({ [AUTOMATION_START_DIGEST_KEY]: next }, { optional: true });
+    return next;
+  });
+}
+
 function isStopRequestedError(error) {
   return error instanceof StopRequestedError || /HHJA_STOP_REQUESTED/.test(error instanceof Error ? error.message : String(error));
 }
@@ -564,6 +646,275 @@ function isUnsafeHhUrl(value) {
     return /\/account\/login|\/account\/signup/.test(url.pathname);
   } catch {
     return false;
+  }
+}
+
+function isAuthenticSafeHhPageUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      !isUnsafeHhUrl(url.href);
+  } catch {
+    return false;
+  }
+}
+
+function hasStatusPanelParam() {
+  try {
+    return new URL(location.href).searchParams.get(HHJA_STATUS_PARAM) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function consumeStatusPanelParamAfterRender() {
+  try {
+    const url = new URL(location.href);
+    if (url.searchParams.get(HHJA_STATUS_PARAM) !== '1') return false;
+    url.searchParams.delete(HHJA_STATUS_PARAM);
+    window.history?.replaceState?.(null, '', `${url.pathname}${url.search}${url.hash}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSafeStatusPanelContext() {
+  return isAuthenticSafeHhPageUrl(location.href) && !isUnsafePage() && hasAuthenticatedHhSignal();
+}
+
+function safeStatusNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Math.min(Math.floor(number), 1000000);
+}
+
+function safeStatusDate(value) {
+  const text = String(value || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) || /^\d{1,2}[./-]\d{1,2}[./-]\d{4}$/.test(text)
+    ? text
+    : '—';
+}
+
+function safeStatusTimestamp(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '—';
+}
+
+function normalizeSafeStatusSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const dailyLedger = snapshot.dailyLedger && typeof snapshot.dailyLedger === 'object'
+    ? snapshot.dailyLedger
+    : {};
+  const automationAudit = snapshot.automationAudit && typeof snapshot.automationAudit === 'object'
+    ? snapshot.automationAudit
+    : {};
+  const runState = snapshot.runState && typeof snapshot.runState === 'object'
+    ? snapshot.runState
+    : {};
+  const startDigest = snapshot.startDigest && typeof snapshot.startDigest === 'object'
+    ? snapshot.startDigest
+    : {};
+  const safeRunStates = new Set([
+    'idle',
+    'scanning',
+    'applying',
+    'waiting_for_dialog',
+    'generating_cover_letter',
+    'filling_cover_letter',
+    'submitting',
+    'refreshing_resumes',
+    'complete',
+    'dry_run_complete',
+    'stopped',
+    'paused',
+    'error',
+    'unknown'
+  ]);
+  const safeStopStates = new Set(['absent', 'armed', 'current', 'other', 'expired']);
+  const safeDigestEvents = new Set([
+    'none',
+    'start',
+    'continue',
+    'duplicate_start',
+    'duplicate_continue',
+    'conflict_start',
+    'conflict_continue'
+  ]);
+  const safeIssueCodes = new Set([
+    'resumeUrlConfigured',
+    'resumeUrlCurrent',
+    'resumeProfileAvailable',
+    'resumeProfileFresh',
+    'expectedSalaryConfigured',
+    'expectedSalaryMatchesResume',
+    'contactConfigured',
+    'laborContractEnabled',
+    'workFormatsMatchResume',
+    'dailyLimit200',
+    'debugLogsEnabled',
+    'debugRetention20',
+    'resumeAutoRefreshEnabled',
+    'aiProviderKeyConfigured',
+    'fallbackProviderReady',
+    'audit_unavailable',
+    'audit_invalid',
+    'audit_not_ready'
+  ]);
+  const manifestVersion = String(snapshot.manifestVersion || '');
+  return {
+    manifestVersion: /^\d+(?:\.\d+){0,3}$/.test(manifestVersion) ? manifestVersion : '—',
+    dailyLedger: {
+      date: safeStatusDate(dailyLedger.date),
+      newSubmitted: safeStatusNumber(dailyLedger.newSubmitted),
+      alreadyApplied: safeStatusNumber(dailyLedger.alreadyApplied),
+      hhDailyLimitReached: dailyLedger.hhDailyLimitReached === true,
+      updatedAt: safeStatusTimestamp(dailyLedger.updatedAt)
+    },
+    automationAudit: {
+      ready: automationAudit.ready === true,
+      checkedAt: safeStatusTimestamp(automationAudit.checkedAt),
+      issues: Array.isArray(automationAudit.issues)
+        ? [...new Set(automationAudit.issues.filter((issue) => safeIssueCodes.has(issue)))]
+        : []
+    },
+    stopBeforeSubmit: {
+      state: safeStopStates.has(snapshot.stopBeforeSubmit?.state)
+        ? snapshot.stopBeforeSubmit.state
+        : 'absent'
+    },
+    runState: {
+      state: safeRunStates.has(runState.state) ? runState.state : 'unknown',
+      found: safeStatusNumber(runState.found),
+      processed: safeStatusNumber(runState.processed),
+      applied: safeStatusNumber(runState.applied),
+      alreadyApplied: safeStatusNumber(runState.alreadyApplied),
+      skipped: safeStatusNumber(runState.skipped),
+      errors: safeStatusNumber(runState.errors),
+      updatedAt: safeStatusTimestamp(runState.updatedAt)
+    },
+    startDigest: {
+      starts: safeStatusNumber(startDigest.starts),
+      continues: safeStatusNumber(startDigest.continues),
+      shortcutStarts: safeStatusNumber(startDigest.shortcutStarts),
+      shortcutContinues: safeStatusNumber(startDigest.shortcutContinues),
+      duplicates: safeStatusNumber(startDigest.duplicates),
+      conflicts: safeStatusNumber(startDigest.conflicts),
+      lastEvent: safeDigestEvents.has(startDigest.lastEvent) ? startDigest.lastEvent : 'none',
+      updatedAt: safeStatusTimestamp(startDigest.updatedAt)
+    }
+  };
+}
+
+function appendStatusPanelLine(container, text) {
+  const line = document.createElement('p');
+  line.setAttribute('data-qa', 'hhja-status-line');
+  line.textContent = text;
+  container.append(line);
+}
+
+function getOrCreateStatusPanel() {
+  if (!document?.body) return null;
+  const existing = document.getElementById?.(HHJA_STATUS_PANEL_ID);
+  if (existing) return existing;
+
+  const panel = document.createElement('aside');
+  panel.setAttribute('id', HHJA_STATUS_PANEL_ID);
+  panel.setAttribute('data-qa', 'hhja-status-panel');
+  panel.setAttribute('role', 'status');
+  panel.setAttribute('aria-live', 'polite');
+  panel.setAttribute('aria-labelledby', 'hhja-status-heading');
+  panel.style.cssText = [
+    'position:fixed',
+    'right:16px',
+    'bottom:16px',
+    'z-index:2147483647',
+    'max-width:min(420px,calc(100vw - 32px))',
+    'padding:14px',
+    'border:1px solid #8aa4bf',
+    'border-radius:10px',
+    'background:#fff',
+    'color:#111827',
+    'box-shadow:0 8px 28px rgba(15,23,42,.25)',
+    'font:13px/1.4 Arial,sans-serif'
+  ].join(';');
+
+  const heading = document.createElement('h2');
+  heading.setAttribute('id', 'hhja-status-heading');
+  heading.textContent = 'HH Job Assistant: безопасный статус';
+  heading.style.cssText = 'margin:0 0 8px;font-size:15px';
+  const content = document.createElement('div');
+  content.setAttribute('id', HHJA_STATUS_CONTENT_ID);
+  content.setAttribute('data-qa', 'hhja-status-content');
+  const refresh = document.createElement('button');
+  refresh.setAttribute('type', 'button');
+  refresh.setAttribute('data-qa', 'hhja-status-refresh');
+  refresh.textContent = 'Обновить';
+  refresh.style.cssText = 'margin-top:8px';
+  refresh.addEventListener('click', () => {
+    refreshStatusPanel().catch(() => {});
+  });
+  panel.append(heading, content, refresh);
+  document.body.append(panel);
+  return panel;
+}
+
+function renderSafeStatusPanel(snapshot) {
+  const panel = getOrCreateStatusPanel();
+  const content = document.getElementById?.(HHJA_STATUS_CONTENT_ID);
+  if (!panel || !content) return false;
+  content.replaceChildren?.();
+
+  if (!snapshot) {
+    appendStatusPanelLine(content, 'Статус: недоступен. Автоматизация не запускалась.');
+    return true;
+  }
+
+  const ledger = snapshot.dailyLedger;
+  const audit = snapshot.automationAudit;
+  const run = snapshot.runState;
+  const digest = snapshot.startDigest;
+  appendStatusPanelLine(content, `Версия расширения: ${snapshot.manifestVersion}`);
+  appendStatusPanelLine(content, `День МСК ${ledger.date}: новых ${ledger.newSubmitted}; уже откликались ${ledger.alreadyApplied}; лимит HH ${ledger.hhDailyLimitReached ? 'достигнут' : 'не достигнут'}; обновлено ${ledger.updatedAt}`);
+  appendStatusPanelLine(content, `Проверка настроек: ${audit.ready ? 'готово' : 'не готово'}; проверено ${audit.checkedAt}; коды ${audit.issues.length ? audit.issues.join(', ') : 'нет'}`);
+  appendStatusPanelLine(content, `Стоп перед отправкой: ${snapshot.stopBeforeSubmit.state}`);
+  appendStatusPanelLine(content, `Запуск: ${run.state}; найдено ${run.found}; обработано ${run.processed}; отправлено ${run.applied}; уже откликались ${run.alreadyApplied}; пропущено ${run.skipped}; ошибок ${run.errors}; обновлено ${run.updatedAt}`);
+  appendStatusPanelLine(content, `Дайджест входа: запусков ${digest.starts}; продолжений ${digest.continues}; запусков shortcut ${digest.shortcutStarts}; продолжений shortcut ${digest.shortcutContinues}; дублей ${digest.duplicates}; конфликтов ${digest.conflicts}; последнее ${digest.lastEvent}; обновлено ${digest.updatedAt}`);
+  return true;
+}
+
+async function refreshStatusPanel({ runPreflight = true } = {}) {
+  if (!isSafeStatusPanelContext()) {
+    renderSafeStatusPanel(null);
+    return false;
+  }
+  try {
+    const response = await sendRuntimeMessage(
+      { type: runPreflight ? 'RUN_SAFE_STATUS_PREFLIGHT' : 'GET_SAFE_STATUS_SNAPSHOT' },
+      {
+        timeoutMs: runPreflight ? getRuntimeMessageTimeoutMs() : STATUS_PANEL_MESSAGE_TIMEOUT_MS,
+        timeoutMessage: 'Status unavailable.'
+      }
+    );
+    return renderSafeStatusPanel(response?.ok === true ? normalizeSafeStatusSnapshot(response.snapshot) : null);
+  } catch {
+    renderSafeStatusPanel(null);
+    return false;
+  }
+}
+
+async function maybeShowStatusPanelFromUrlParam() {
+  if (!hasStatusPanelParam()) return false;
+  try {
+    if (!isSafeStatusPanelContext()) return false;
+    if (!renderSafeStatusPanel(null)) return true;
+    await refreshStatusPanel({ runPreflight: true });
+    consumeStatusPanelParamAfterRender();
+    return true;
+  } catch {
+    // A status-only URL must never fall through into automation on a render failure.
+    return true;
   }
 }
 
@@ -3688,6 +4039,39 @@ async function continueSavedAutoApply() {
   throw new Error('Откройте вкладку hh.ru с сохраненной очередью откликов.');
 }
 
+function throwAutomationAuditNotReady(response) {
+  const audit = response?.audit;
+  const issues = Array.isArray(audit?.issues)
+    ? audit.issues.filter((issue) => typeof issue === 'string' && issue.trim())
+    : [];
+  const error = new Error(
+    audit && audit.ready === false
+      ? `Автоматические отклики заблокированы: проверка настроек не пройдена${issues.length ? ` (${issues.join(', ')})` : ''}.`
+      : 'Автоматические отклики заблокированы: проверка настроек недоступна.'
+  );
+  error.code = 'HHJA_CONFIG_NOT_READY';
+  error.readiness = { missing: issues.map((code) => ({ code, label: code })) };
+  throw error;
+}
+
+async function ensureLiveAutomationSettings(config) {
+  if (config.aiEnabled) {
+    const profile = await sendRuntimeMessage(
+      { type: 'ENSURE_RESUME_PROFILE' },
+      { timeoutMs: getRuntimeMessageTimeoutMs() }
+    );
+    if (profile?.ok !== true) throwAutomationAuditNotReady(null);
+  }
+  const response = await sendRuntimeMessage(
+    { type: 'GET_AUTOMATION_SETTINGS_AUDIT' },
+    { timeoutMs: getRuntimeMessageTimeoutMs() }
+  );
+  if (response?.ok !== true || !response?.audit || response.audit.ready !== true) {
+    throwAutomationAuditNotReady(response);
+  }
+  return response.audit;
+}
+
 async function startRun(mode, limitOverride = null, options = {}) {
   const config = await getConfig();
   globalThis.HHJA_CONFIG_READINESS.assertReady(config);
@@ -3741,24 +4125,14 @@ async function startRun(mode, limitOverride = null, options = {}) {
   if (mode === 'dry') {
     return handleDryRun(limit);
   }
-  if (config.aiEnabled) {
-    await sendRuntimeMessage({ type: 'ENSURE_RESUME_PROFILE' }, { timeoutMs: getRuntimeMessageTimeoutMs() }).catch(async (error) => {
-      await appendAgentLog('resume_profile_preflight_error', { error: localizeError(error) });
-    });
-  } else {
-    await appendAgentLog('resume_profile_preflight_skipped', { reason: 'ai_disabled' });
-  }
-  await sendRuntimeMessage(
-    { type: 'GET_AUTOMATION_SETTINGS_AUDIT' },
-    { timeoutMs: getRuntimeMessageTimeoutMs() }
-  ).catch(async (error) => {
-    await appendAgentLog('automation_settings_audit_error', { error: localizeError(error) });
-  });
+  await ensureLiveAutomationSettings(config);
   return handleAutoApply(limit, initialCounters, [], { maxProcessed });
 }
 
 async function startRunSingleFlight(mode, limitOverride = null, options = {}) {
+  const source = options.entrySource || 'runtime';
   if (startRunPromise) {
+    await recordAutomationStartDigestCollision('start', source, activeRunEntryKind === 'continue');
     await appendAgentLog('start_run_duplicate_ignored', {
       mode,
       activeRunId,
@@ -3768,8 +4142,10 @@ async function startRunSingleFlight(mode, limitOverride = null, options = {}) {
   }
 
   const pending = (async () => {
+    await beginAutomationStartDigest('start', source);
     const queueStatus = await getAutoApplyQueueStatus();
     if (queueStatus.hasResponseQueue || queueStatus.hasSearchQueue) {
+      await recordAutomationStartDigestCollision('start', source, true);
       await appendAgentLog('start_run_duplicate_ignored', {
         mode,
         activeRunId,
@@ -3780,17 +4156,21 @@ async function startRunSingleFlight(mode, limitOverride = null, options = {}) {
     return startRun(mode, limitOverride, options);
   })();
   startRunPromise = pending;
+  activeRunEntryKind = 'start';
   try {
     return await pending;
   } finally {
     if (startRunPromise === pending) {
       startRunPromise = null;
+      activeRunEntryKind = '';
     }
   }
 }
 
-async function continueRunSingleFlight() {
+async function continueRunSingleFlight(options = {}) {
+  const source = options.entrySource || 'runtime';
   if (startRunPromise) {
+    await recordAutomationStartDigestCollision('continue', source, activeRunEntryKind === 'start');
     await appendAgentLog('continue_run_duplicate_ignored', {
       activeRunId,
       reason: 'same_page_run_in_progress'
@@ -3798,13 +4178,18 @@ async function continueRunSingleFlight() {
     return { ok: true, alreadyRunning: true, activeRunId };
   }
 
-  const pending = continueSavedAutoApply();
+  const pending = (async () => {
+    await beginAutomationStartDigest('continue', source);
+    return continueSavedAutoApply();
+  })();
   startRunPromise = pending;
+  activeRunEntryKind = 'continue';
   try {
     return await pending;
   } finally {
     if (startRunPromise === pending) {
       startRunPromise = null;
+      activeRunEntryKind = '';
     }
   }
 }
@@ -3842,7 +4227,7 @@ async function handleTrustedAutoApplyShortcut(event) {
   const queueStatus = await getAutoApplyQueueStatus();
   if (queueStatus.canContinueAutoApply) {
     const hadRunInProgress = startRunPromise != null;
-    const resultPromise = continueRunSingleFlight();
+    const resultPromise = continueRunSingleFlight({ entrySource: 'shortcut' });
     if (!hadRunInProgress) {
       await appendAgentLog('trusted_shortcut_continue', { mode: 'live' });
     }
@@ -3850,7 +4235,7 @@ async function handleTrustedAutoApplyShortcut(event) {
     return { handled: true, continued: result?.alreadyRunning !== true, ...result };
   }
   const hadRunInProgress = startRunPromise != null;
-  const resultPromise = startRunSingleFlight('live');
+  const resultPromise = startRunSingleFlight('live', null, { entrySource: 'shortcut' });
   if (!hadRunInProgress) {
     await appendAgentLog('trusted_shortcut_start', { mode: 'live' });
   }
@@ -4011,7 +4396,10 @@ async function maybeStartFromUrlParam() {
       await storageSet({ groqModel });
     }
     await appendAgentLog('url_trigger_start', { mode, limit, maxProcessed, groqModel, url: location.href });
-    await startRunSingleFlight(mode === 'dry' ? 'dry' : 'live', limit, { maxProcessed });
+    await startRunSingleFlight(mode === 'dry' ? 'dry' : 'live', limit, {
+      maxProcessed,
+      entrySource: 'url'
+    });
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
@@ -4040,13 +4428,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'START_DRY_RUN':
-        sendResponse(await startRunSingleFlight('dry', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
+        sendResponse(await startRunSingleFlight('dry', message.limitOverride ?? null, {
+          maxProcessed: message.maxProcessed,
+          entrySource: 'runtime'
+        }));
         break;
       case 'START_AUTO_APPLY':
-        sendResponse(await startRunSingleFlight('live', message.limitOverride ?? null, { maxProcessed: message.maxProcessed }));
+        sendResponse(await startRunSingleFlight('live', message.limitOverride ?? null, {
+          maxProcessed: message.maxProcessed,
+          entrySource: 'runtime'
+        }));
         break;
       case 'CONTINUE_AUTO_APPLY':
-        sendResponse(await continueRunSingleFlight());
+        sendResponse(await continueRunSingleFlight({ entrySource: 'runtime' }));
         break;
       case 'STOP_RUN':
         await setStopRequested('user_stop');
@@ -4079,7 +4473,7 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
       throw new Error('Live auto-start DOM event is disabled without an extension-issued token.');
     }
     await appendAgentLog('page_trigger_start_auto_apply', { mode, url: location.href });
-    await startRunSingleFlight(mode);
+    await startRunSingleFlight(mode, null, { entrySource: 'page' });
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
@@ -4090,6 +4484,10 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
 globalThis.window?.addEventListener?.('keydown', handleTrustedAutoApplyShortcut, true);
 
 async function initializeContentScript() {
+  const showedStatusPanel = await maybeShowStatusPanelFromUrlParam();
+  if (showedStatusPanel) {
+    return;
+  }
   const reloadedFromUrl = await maybeReloadExtensionFromUrlParam();
   if (reloadedFromUrl) {
     return;

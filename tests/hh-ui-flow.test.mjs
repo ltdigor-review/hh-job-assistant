@@ -240,7 +240,9 @@ function buildInjection(contentScriptSource) {
           },
           sendMessage(message, callback) {
             messages.push(message);
-            const response = { ok: true };
+            const response = message.type === 'GET_AUTOMATION_SETTINGS_AUDIT'
+              ? { ok: true, audit: { ready: true, issues: [] } }
+              : { ok: true };
             if (typeof callback === 'function') {
               queueMicrotask(() => callback(response));
             }

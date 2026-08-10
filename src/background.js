@@ -81,6 +81,59 @@ const RESPONSE_FORM_PROCESSING_STATES = new Set([
   'filling_cover_letter',
   'submitting'
 ]);
+const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
+const AUTOMATION_START_DIGEST_KEY = 'automationStartDigest';
+const SAFE_STATUS_RUN_STATES = new Set([
+  'idle',
+  'scanning',
+  'applying',
+  'waiting_for_dialog',
+  'generating_cover_letter',
+  'filling_cover_letter',
+  'submitting',
+  'refreshing_resumes',
+  'complete',
+  'dry_run_complete',
+  'stopped',
+  'paused',
+  'error'
+]);
+const SAFE_AUTOMATION_AUDIT_ISSUES = new Set([
+  'resumeUrlConfigured',
+  'resumeUrlCurrent',
+  'resumeProfileAvailable',
+  'resumeProfileFresh',
+  'expectedSalaryConfigured',
+  'expectedSalaryMatchesResume',
+  'contactConfigured',
+  'laborContractEnabled',
+  'workFormatsMatchResume',
+  'dailyLimit200',
+  'debugLogsEnabled',
+  'debugRetention20',
+  'resumeAutoRefreshEnabled',
+  'aiProviderKeyConfigured',
+  'fallbackProviderReady',
+  'audit_unavailable',
+  'audit_invalid',
+  'audit_not_ready'
+]);
+const SAFE_START_DIGEST_EVENTS = new Set([
+  'none',
+  'start',
+  'continue',
+  'duplicate_start',
+  'duplicate_continue',
+  'conflict_start',
+  'conflict_continue'
+]);
+const AUTOMATION_STATE_DEFAULT_KEYS = new Set([
+  'runState',
+  'runResults',
+  'autoApplyStopRequested',
+  'autoApplyStopRequestedAt',
+  'autoApplyStopBeforeSubmit'
+]);
 let resumeProfileRefreshPromise = null;
 let groqHttpQueue = Promise.resolve();
 
@@ -579,6 +632,176 @@ async function storageRemove(keys) {
   }
 }
 
+function getMoscowStatusDate(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+}
+
+function safeStatusCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) return 0;
+  return Math.min(Math.floor(count), 1000000);
+}
+
+function safeStatusTimestamp(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
+}
+
+function safeStatusRunState(value) {
+  const state = String(value?.state || '');
+  return SAFE_STATUS_RUN_STATES.has(state) ? state : 'unknown';
+}
+
+function buildSafeDailyLedger(value, now = new Date()) {
+  const date = getMoscowStatusDate(now);
+  if (!value || typeof value !== 'object' || value.date !== date) {
+    return {
+      date,
+      newSubmitted: 0,
+      alreadyApplied: 0,
+      hhDailyLimitReached: false,
+      updatedAt: ''
+    };
+  }
+
+  const submittedIds = Array.isArray(value.submittedVacancyIds) ? value.submittedVacancyIds : [];
+  const alreadyAppliedIds = Array.isArray(value.alreadyAppliedVacancyIds) ? value.alreadyAppliedVacancyIds : [];
+  const submittedCount = Math.min(submittedIds.length, 1000000);
+  const alreadyAppliedCount = Math.min(alreadyAppliedIds.length, 1000000);
+  return {
+    date,
+    newSubmitted: Math.min(safeStatusCount(value.legacySubmitted) + submittedCount, 1000000),
+    alreadyApplied: alreadyAppliedCount,
+    hhDailyLimitReached: value.hhDailyLimitReached === true,
+    updatedAt: safeStatusTimestamp(value.updatedAt)
+  };
+}
+
+function buildSafeAutomationAudit(value) {
+  if (!value || typeof value !== 'object') {
+    return { ready: false, checkedAt: '', issues: ['audit_unavailable'] };
+  }
+
+  const checkedAt = safeStatusTimestamp(value.checkedAt);
+  const rawIssues = Array.isArray(value.issues) ? value.issues : [];
+  const safeIssues = rawIssues.filter((issue) => SAFE_AUTOMATION_AUDIT_ISSUES.has(issue));
+  const hasUnsafeIssue = rawIssues.some((issue) => !SAFE_AUTOMATION_AUDIT_ISSUES.has(issue));
+  if (hasUnsafeIssue) safeIssues.push('audit_invalid');
+
+  const ready = value.ready === true && checkedAt !== '' && rawIssues.length === 0;
+  if (!ready && safeIssues.length === 0) {
+    safeIssues.push(checkedAt ? 'audit_not_ready' : 'audit_unavailable');
+  }
+  return {
+    ready,
+    checkedAt,
+    issues: [...new Set(safeIssues)]
+  };
+}
+
+function buildSafeStopBeforeSubmitState(value, runState) {
+  if (!value || typeof value !== 'object' || value.armed !== true) {
+    return { state: 'absent' };
+  }
+  const expiresAt = Date.parse(String(value.expiresAt || ''));
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return { state: 'expired' };
+  }
+  const runId = typeof value.runId === 'string' ? value.runId.trim() : '';
+  if (!runId) return { state: 'armed' };
+  return {
+    state: new Set([
+      'scanning',
+      'applying',
+      'waiting_for_dialog',
+      'generating_cover_letter',
+      'filling_cover_letter',
+      'submitting',
+      'refreshing_resumes'
+    ]).has(safeStatusRunState(runState)) ? 'current' : 'other'
+  };
+}
+
+function buildSafeRunState(value) {
+  return {
+    state: safeStatusRunState(value),
+    found: safeStatusCount(value?.found),
+    processed: safeStatusCount(value?.processed),
+    applied: safeStatusCount(value?.applied),
+    alreadyApplied: safeStatusCount(value?.alreadyApplied),
+    skipped: safeStatusCount(value?.skipped),
+    errors: safeStatusCount(value?.errors),
+    updatedAt: safeStatusTimestamp(value?.updatedAt)
+  };
+}
+
+function buildSafeStartDigest(value) {
+  const lastEvent = String(value?.lastEvent || 'none');
+  return {
+    starts: safeStatusCount(value?.starts),
+    continues: safeStatusCount(value?.continues),
+    shortcutStarts: safeStatusCount(value?.shortcutStarts),
+    shortcutContinues: safeStatusCount(value?.shortcutContinues),
+    duplicates: safeStatusCount(value?.duplicates),
+    conflicts: safeStatusCount(value?.conflicts),
+    lastEvent: SAFE_START_DIGEST_EVENTS.has(lastEvent) ? lastEvent : 'none',
+    updatedAt: safeStatusTimestamp(value?.updatedAt)
+  };
+}
+
+function getSafeManifestVersion() {
+  try {
+    const version = String(chrome.runtime?.getManifest?.().version || '');
+    return /^\d+(?:\.\d+){0,3}$/.test(version) ? version : '';
+  } catch {
+    return '';
+  }
+}
+
+async function buildSafeStatusSnapshot() {
+  const state = await storageGet([
+    DAILY_APPLICATION_LEDGER_KEY,
+    'automationSettingsAudit',
+    'autoApplyStopBeforeSubmit',
+    'runState',
+    AUTOMATION_START_DIGEST_KEY
+  ]);
+  return {
+    manifestVersion: getSafeManifestVersion(),
+    dailyLedger: buildSafeDailyLedger(state[DAILY_APPLICATION_LEDGER_KEY]),
+    automationAudit: buildSafeAutomationAudit(state.automationSettingsAudit),
+    stopBeforeSubmit: buildSafeStopBeforeSubmitState(
+      state.autoApplyStopBeforeSubmit,
+      state.runState
+    ),
+    runState: buildSafeRunState(state.runState),
+    startDigest: buildSafeStartDigest(state[AUTOMATION_START_DIGEST_KEY])
+  };
+}
+
+async function runSafeStatusPreflight() {
+  await ensureDefaults({ preserveAutomationState: true });
+  const { aiEnabled = DEFAULTS.aiEnabled } = await storageGet(['aiEnabled']);
+  const profileRefreshAttempted = aiEnabled !== false;
+  if (profileRefreshAttempted) {
+    // Same profile refresh used by live start, without quota/run-state fallback writes.
+    await ensureResumeProfileAutoRefresh({ suppressAiFallback: true }).catch(() => null);
+  }
+  await buildAutomationSettingsAudit();
+  return {
+    snapshot: await buildSafeStatusSnapshot(),
+    preflight: {
+      profileRefreshAttempted,
+      auditRefreshed: true
+    }
+  };
+}
+
 async function assertAiEnabled() {
   const { aiEnabled = DEFAULTS.aiEnabled } = await storageGet(['aiEnabled']);
   if (aiEnabled === false) {
@@ -590,7 +813,7 @@ async function appendAgentLog(event, details = {}) {
   await globalThis.HHJobAssistantLog?.append?.('background', event, details);
 }
 
-async function ensureDefaults() {
+async function ensureDefaults({ preserveAutomationState = false } = {}) {
   const logApi = globalThis.HHJobAssistantLog;
   const logStateKeys = [
     logApi?.INDEX_KEY,
@@ -633,6 +856,7 @@ async function ensureDefaults() {
 
   for (const [key, value] of Object.entries(DEFAULTS)) {
     if (
+      !(preserveAutomationState && AUTOMATION_STATE_DEFAULT_KEYS.has(key)) &&
       key !== 'aiProvider' &&
       key !== 'aiFallbackProvider' &&
       key !== 'aiProviderCredentials' &&
@@ -1323,7 +1547,7 @@ async function editResumeProfile(editComment) {
   return patch;
 }
 
-async function ensureResumeProfileAutoRefresh() {
+async function ensureResumeProfileAutoRefresh({ suppressAiFallback = false } = {}) {
   await assertAiEnabled();
   const current = await storageGet([
     'resumeProfileText',
@@ -1355,7 +1579,9 @@ async function ensureResumeProfileAutoRefresh() {
       await appendAgentLog('resume_profile_auto_refresh', { changed: true, sourceHash, checkedAt });
       return { ...current, ...updated };
     } catch (error) {
-      await recordAiQuotaFallback('resume_profile_build', error?.code || 'resume_profile_refresh_error');
+      if (!suppressAiFallback) {
+        await recordAiQuotaFallback('resume_profile_build', error?.code || 'resume_profile_refresh_error');
+      }
       await appendAgentLog('resume_profile_auto_refresh_error', { error: localizeError(error) });
       return current;
     } finally {
@@ -2371,6 +2597,17 @@ function isAutoApplyStartUrl(value) {
   }
 }
 
+function isSafeHhStatusUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      !/\/account\/(?:login|signup)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function isHhResponseFormUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -2612,6 +2849,30 @@ chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
+    if (message?.type === 'GET_SAFE_STATUS_SNAPSHOT') {
+      try {
+        sendResponse({ ok: true, snapshot: await buildSafeStatusSnapshot() });
+      } catch {
+        // Status must fail closed without exposing runtime or storage details.
+        sendResponse({ ok: false });
+      }
+      return;
+    }
+
+    if (message?.type === 'RUN_SAFE_STATUS_PREFLIGHT') {
+      if (!isSafeHhStatusUrl(sender?.tab?.url)) {
+        sendResponse({ ok: false });
+        return;
+      }
+      try {
+        sendResponse({ ok: true, ...(await runSafeStatusPreflight()) });
+      } catch {
+        // Safe status preflight never returns raw profile, provider, or runtime errors.
+        sendResponse({ ok: false });
+      }
+      return;
+    }
+
     await ensureDefaults();
 
     switch (message?.type) {

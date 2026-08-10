@@ -384,6 +384,290 @@ test('[BS:COVERS:HHJA-BR-000001] background initializes defaults and registers r
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
 
+test('background safe status snapshot is read-only and excludes private automation data', async () => {
+  let listener = null;
+  let storageSetCalls = 0;
+  const moscowDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
+  const localData = {
+    dailyApplicationLedger: {
+      date: moscowDate,
+      legacySubmitted: 2,
+      submittedVacancyIds: ['vacancy-secret-101', 'vacancy-secret-102'],
+      alreadyAppliedVacancyIds: ['vacancy-secret-103'],
+      hhDailyLimitReached: true,
+      updatedAt: '2026-08-07T10:00:00.000Z'
+    },
+    automationSettingsAudit: {
+      ready: false,
+      checkedAt: '2026-08-07T10:01:00.000Z',
+      issues: ['resumeProfileFresh', 'raw-api-key=do-not-show']
+    },
+    autoApplyStopBeforeSubmit: {
+      armed: true,
+      runId: 'private-run-id',
+      expiresAt: '2099-01-01T00:00:00.000Z'
+    },
+    runState: {
+      state: 'applying',
+      found: 12,
+      processed: 7,
+      applied: 4,
+      alreadyApplied: 3,
+      skipped: 2,
+      errors: 1,
+      currentAction: 'https://hh.ru/vacancy/private',
+      lastError: 'private raw error text',
+      updatedAt: '2026-08-07T10:02:00.000Z'
+    },
+    automationStartDigest: {
+      starts: 1,
+      continues: 0,
+      shortcutStarts: 1,
+      shortcutContinues: 0,
+      duplicates: 1,
+      conflicts: 0,
+      lastEvent: 'duplicate_start',
+      updatedAt: '2026-08-07T10:03:00.000Z',
+      runId: 'must-not-leak'
+    },
+    agentPrivateQuestionAudit: {
+      entries: [{ vacancyId: 'private-question-vacancy', answer: 'private answer' }]
+    }
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return { ...localData };
+        },
+        async set(value) {
+          storageSetCalls += 1;
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      getManifest() { return { version: '9.8.7' }; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: {
+        addListener(fn) {
+          listener = fn;
+        }
+      }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: { async get() { return { status: 'complete' }; } },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const writesBeforeSnapshot = storageSetCalls;
+  const runStateBeforeSnapshot = structuredClone(localData.runState);
+  const response = await new Promise((resolve) => {
+    assert.equal(listener({ type: 'GET_SAFE_STATUS_SNAPSHOT' }, {}, resolve), true);
+  });
+
+  assert.equal(storageSetCalls, writesBeforeSnapshot);
+  assert.deepEqual(localData.runState, runStateBeforeSnapshot);
+  assert.deepEqual(response, {
+    ok: true,
+    snapshot: {
+      manifestVersion: '9.8.7',
+      dailyLedger: {
+        date: moscowDate,
+        newSubmitted: 4,
+        alreadyApplied: 1,
+        hhDailyLimitReached: true,
+        updatedAt: '2026-08-07T10:00:00.000Z'
+      },
+      automationAudit: {
+        ready: false,
+        checkedAt: '2026-08-07T10:01:00.000Z',
+        issues: ['resumeProfileFresh', 'audit_invalid']
+      },
+      stopBeforeSubmit: { state: 'current' },
+      runState: {
+        state: 'applying',
+        found: 12,
+        processed: 7,
+        applied: 4,
+        alreadyApplied: 3,
+        skipped: 2,
+        errors: 1,
+        updatedAt: '2026-08-07T10:02:00.000Z'
+      },
+      startDigest: {
+        starts: 1,
+        continues: 0,
+        shortcutStarts: 1,
+        shortcutContinues: 0,
+        duplicates: 1,
+        conflicts: 0,
+        lastEvent: 'duplicate_start',
+        updatedAt: '2026-08-07T10:03:00.000Z'
+      }
+    }
+  });
+  const serialized = JSON.stringify(response);
+  assert.doesNotMatch(serialized, /vacancy-secret|private-run-id|private raw error|private answer|raw-api-key|must-not-leak/);
+});
+
+test('safe status preflight refreshes audit without running automation or changing its guard', async () => {
+  let listener = null;
+  const storagePatches = [];
+  let createdTabs = 0;
+  let updatedTabs = 0;
+  let executedScripts = 0;
+  const freshTimestamp = new Date().toISOString();
+  const guard = {
+    armed: true,
+    runId: 'private-guard-run',
+    armedAt: '2026-08-07T09:00:00.000Z',
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    source: 'url_param'
+  };
+  const runState = {
+    state: 'dry_run_complete',
+    found: 8,
+    processed: 8,
+    applied: 0,
+    alreadyApplied: 2,
+    skipped: 8,
+    errors: 0,
+    currentAction: '',
+    lastError: '',
+    updatedAt: '2026-08-07T10:00:00.000Z'
+  };
+  const localData = {
+    aiEnabled: true,
+    aiProvider: 'qwen',
+    aiProviderCredentials: { qwen: { apiKey: 'status-preflight-key' } },
+    aiFallbackProvider: '',
+    aiFallbackEnabled: false,
+    aiFallbackToGroq: false,
+    aiProviderCooldowns: {},
+    groqApiKey: '',
+    groqCooldownUntil: '',
+    dailyLimit: 200,
+    agentDebugLogsEnabled: true,
+    agentDebugRetentionCount: 20,
+    resumeUrl: 'https://hh.ru/resume/test-resume',
+    resumeParsedUrl: 'https://hh.ru/resume/test-resume',
+    resumeParsedText: 'Backend engineer',
+    resumeParsedAt: freshTimestamp,
+    resumeProfileText: 'Safe cached profile',
+    resumeProfileSourceHash: 'profile-source-hash',
+    resumeProfileCheckedAt: freshTimestamp,
+    resumeProfileAutoRefreshEnabled: true,
+    resumeCacheTtlHours: 1,
+    resumeCandidateFacts: {
+      age: 27,
+      extractedAt: freshTimestamp,
+      source: 'resume-personal-age',
+      resumeHash: 'profile-source-hash'
+    },
+    expectedSalary: '200000',
+    telegramUsername: 'safe-status-user',
+    employmentPreference: ['labor_contract'],
+    workFormatPreference: [],
+    autoApplyStopRequested: false,
+    autoApplyStopRequestedAt: '',
+    autoApplyStopBeforeSubmit: structuredClone(guard),
+    runState: structuredClone(runState),
+    runResults: [],
+    automationSettingsAudit: {
+      ready: false,
+      checkedAt: '2020-01-01T00:00:00.000Z',
+      issues: ['audit_not_ready']
+    }
+  };
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          }
+          return { ...localData };
+        },
+        async set(value) {
+          storagePatches.push(structuredClone(value));
+          Object.assign(localData, value);
+        }
+      }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      getManifest() { return { version: '9.8.7' }; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: {
+      async get() { return { status: 'complete' }; },
+      async create() { createdTabs += 1; return { id: 1 }; },
+      async update() { updatedTabs += 1; }
+    },
+    scripting: {
+      async executeScript() { executedScripts += 1; return []; }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  storagePatches.length = 0;
+  const response = await new Promise((resolve) => {
+    assert.equal(listener(
+      { type: 'RUN_SAFE_STATUS_PREFLIGHT' },
+      { tab: { url: 'https://hh.ru/search/vacancy?text=java' } },
+      resolve
+    ), true);
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.preflight, { profileRefreshAttempted: true, auditRefreshed: true });
+  assert.equal(response.snapshot.automationAudit.checkedAt, localData.automationSettingsAudit.checkedAt);
+  assert.notEqual(response.snapshot.automationAudit.checkedAt, '2020-01-01T00:00:00.000Z');
+  assert.deepEqual(localData.autoApplyStopBeforeSubmit, guard);
+  assert.deepEqual(localData.runState, runState);
+  assert.equal(createdTabs, 0);
+  assert.equal(updatedTabs, 0);
+  assert.equal(executedScripts, 0);
+  assert.equal(storagePatches.some((patch) => (
+    Object.hasOwn(patch, 'autoApplyStopBeforeSubmit') ||
+    Object.hasOwn(patch, 'autoApplyStopRequested') ||
+    Object.hasOwn(patch, 'autoApplyStopRequestedAt') ||
+    Object.hasOwn(patch, 'runState') ||
+    Object.hasOwn(patch, 'runResults')
+  )), false);
+  assert.doesNotMatch(JSON.stringify(response), /status-preflight-key|private-guard-run|test-resume|Safe cached profile/);
+
+  const patchesBeforeRejectedSender = storagePatches.length;
+  const rejectedSender = await new Promise((resolve) => {
+    assert.equal(listener(
+      { type: 'RUN_SAFE_STATUS_PREFLIGHT' },
+      { tab: { url: 'chrome-extension://test/src/popup.html' } },
+      resolve
+    ), true);
+  });
+  assert.deepEqual(rejectedSender, { ok: false });
+  assert.equal(storagePatches.length, patchesBeforeRejectedSender);
+});
+
 test('background migrates old default employer question prompt', async () => {
   const oldEmployerQuestionPrompt = 'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.';
   const oldCoverPrompt = 'Напиши одну живую строку для отклика hh.ru: 70-160 символов, по-русски, без приветствия. Используй конкретное пересечение резюме и вакансии. Без канцелярита, HR-клише, markdown, списков и фраз "готов обсудить", "релевантный опыт". Только текст.';
@@ -3153,9 +3437,9 @@ test('trusted page shortcut shares a single-flight live start guard', async () =
   assert.match(content, /event\?\.altKey === true/);
   assert.match(content, /event\?\.shiftKey === true/);
   assert.match(content, /addEventListener\?\.\('keydown', handleTrustedAutoApplyShortcut, true\)/);
-  assert.match(content, /startRunSingleFlight\('live'\)/);
+  assert.match(content, /startRunSingleFlight\('live', null, \{ entrySource: 'shortcut' \}\)/);
   assert.match(content, /queueStatus\.canContinueAutoApply/);
-  assert.match(content, /continueRunSingleFlight\(\)/);
+  assert.match(content, /continueRunSingleFlight\(\{ entrySource: 'shortcut' \}\)/);
   assert.match(content, /trusted_shortcut_continue/);
   assert.match(content, /start_run_duplicate_ignored/);
 });
