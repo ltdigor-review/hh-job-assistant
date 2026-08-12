@@ -2608,6 +2608,20 @@ test('[BS:COVERS:HHJA-BR-000012] resume profile auto refresh does not require HH
   assert.equal(audited.audit.checks.fallbackProviderReady, true);
   assert.equal(audited.audit.ready, true);
 
+  localData.expectedSalary = '';
+  localData.resumeParsedText = resumeText.replace('600 000 ₽ на руки\n', '');
+  const auditedWithoutSalary = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(auditedWithoutSalary.ok, true);
+  assert.equal(auditedWithoutSalary.audit.checks.expectedSalaryConfigured, null);
+  assert.equal(auditedWithoutSalary.audit.checks.expectedSalaryMatchesResume, null);
+  assert.equal(auditedWithoutSalary.audit.ready, true);
+
+  localData.dailyLimit = 2;
+  const auditedWithBoundedLimit = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });
+  assert.equal(auditedWithBoundedLimit.ok, true);
+  assert.equal(auditedWithBoundedLimit.audit.checks.dailyLimit200, true);
+  assert.equal(auditedWithBoundedLimit.audit.ready, true);
+
   localData.aiFallbackProvider = 'groq';
   localData.aiFallbackToGroq = true;
   const fallbackAudit = await send({ type: 'GET_AUTOMATION_SETTINGS_AUDIT' });

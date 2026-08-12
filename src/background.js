@@ -1681,7 +1681,7 @@ async function buildAutomationSettingsAudit() {
       current.resumeProfileCheckedAt &&
       Date.now() - Date.parse(current.resumeProfileCheckedAt) <= 24 * 60 * 60 * 1000
     ),
-    expectedSalaryConfigured: Boolean(configuredSalary),
+    expectedSalaryConfigured: configuredSalary ? true : null,
     expectedSalaryMatchesResume: resumeSalary ? configuredSalary === resumeSalary : null,
     contactConfigured: Boolean(
       String(current.telegramUsername || '').trim() ||
@@ -1689,7 +1689,8 @@ async function buildAutomationSettingsAudit() {
     ),
     laborContractEnabled: employmentPreference.includes('labor_contract'),
     workFormatsMatchResume: requiredWorkFormats.every((value) => workFormatPreference.includes(value)),
-    dailyLimit200: Number(current.dailyLimit) === 200,
+    dailyLimit200: Number.isFinite(Number(current.dailyLimit)) &&
+      Number(current.dailyLimit) >= 1 && Number(current.dailyLimit) <= 200,
     debugLogsEnabled: current.agentDebugLogsEnabled === true,
     debugRetention20: Number(current.agentDebugRetentionCount) >= 20,
     resumeAutoRefreshEnabled: !aiEnabled || current.resumeProfileAutoRefreshEnabled === true,
