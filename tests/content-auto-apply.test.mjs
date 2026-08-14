@@ -36,13 +36,18 @@ async function runContentAutoApply({
   navigateOnResponseClick = false,
   delayedNavigateOnResponseClick = false,
   bodyTextAfterResponseClick = '',
+  cardTextAfterResponseClick = '',
+  removeResponseButtonAfterClick = false,
+  stopAfterResponseClick = false,
   expectedSalary = '',
   initialFollowupDialogText = '',
   initialFollowupBodyOnlyText = '',
   followupDialogText = '',
   followupConfirmText = 'Все равно откликнуться',
   submitButtonText = 'Отправить',
+  submitButtonTextAfterCoverInput = '',
   dialogTextAfterCoverInput = '',
+  bodyTextAfterCoverInputOnly = '',
   disabledSubmit = false,
   validateRequiredBeforeSubmit = false,
   keepDialogOpenAfterSubmit = false,
@@ -80,6 +85,7 @@ async function runContentAutoApply({
   let followupClicks = 0;
   let navigateUrl = '';
   let listener = null;
+  let stopAfterResponseClickPromise = null;
   let dialog = null;
   let bodyOnlyFollowupOpen = false;
   let bodyNode = null;
@@ -113,7 +119,16 @@ async function runContentAutoApply({
         this.value = '';
       }
       if (!hasQuestionField && event?.type === 'input') {
-        setDialogAndBodyText(dialogTextAfterCoverInput);
+        if (submitButtonTextAfterCoverInput) {
+          submitButton.innerText = submitButtonTextAfterCoverInput;
+          submitButton.textContent = submitButtonTextAfterCoverInput;
+        }
+        if (bodyTextAfterCoverInputOnly && bodyNode) {
+          bodyNode.innerText = bodyTextAfterCoverInputOnly;
+          bodyNode.textContent = bodyTextAfterCoverInputOnly;
+        } else {
+          setDialogAndBodyText(dialogTextAfterCoverInput);
+        }
       }
     }
   }));
@@ -288,6 +303,19 @@ async function runContentAutoApply({
       if (bodyTextAfterResponseClick && bodyNode) {
         bodyNode.innerText = bodyTextAfterResponseClick;
         bodyNode.textContent = bodyTextAfterResponseClick;
+      }
+      if (cardTextAfterResponseClick) {
+        card.innerText = cardTextAfterResponseClick;
+        card.textContent = cardTextAfterResponseClick;
+      }
+      if (removeResponseButtonAfterClick) {
+        card.selectorMap['[data-qa="vacancy-serp__vacancy_response"]'] = [];
+        card.selectorMap.button = [];
+      }
+      if (stopAfterResponseClick && listener) {
+        stopAfterResponseClickPromise = new Promise((resolve) => {
+          listener({ type: 'STOP_RUN' }, {}, resolve);
+        });
       }
       if (navigateOnResponseClick && responseHref) {
         const parsed = new URL(responseHref);
@@ -544,6 +572,9 @@ async function runContentAutoApply({
       const stayedAsync = listener(message || { type: messageType }, {}, resolve);
       assert.equal(stayedAsync, true);
     });
+    if (stopAfterResponseClickPromise) {
+      await stopAfterResponseClickPromise;
+    }
   } else {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -1275,6 +1306,7 @@ test('auto apply does not count global search already-applied text as current va
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.length, 0);
   assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
+  assert.equal(result.localStore.autoApplyQueue.responseAttempt.vacancyId, '123');
 });
 
 test('auto apply does not count current card as applied while response button is active', async () => {
@@ -1313,6 +1345,68 @@ test('auto apply does not click detail response twice when hh confirms direct su
   assert.equal(result.navigateUrl, '');
 });
 
+test('auto apply counts a new direct response when hh changes the page to Вы откликнулись', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseClickOpensDialog: false,
+    bodyText: 'Java Developer\nОткликнуться',
+    bodyTextAfterResponseClick: 'Java Developer\nВы откликнулись'
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.alreadyApplied, 0);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.length, 1);
+  assert.equal(result.appended.at(-1).status, 'applied_direct_click');
+  assert.equal(result.navigateUrl, '');
+});
+
+test('auto apply finalizes a same-search stopped response from the changed target card only', async () => {
+  const unrelatedSuccess = 'Другая вакансия\nВы откликнулись';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseClickOpensDialog: false,
+    bodyText: unrelatedSuccess,
+    bodyTextAfterResponseClick: unrelatedSuccess,
+    cardText: 'Java Developer\nООО Test\nОткликнуться',
+    cardTextAfterResponseClick: 'Java Developer\nООО Test\nРезюме доставлено',
+    removeResponseButtonAfterClick: true,
+    stopAfterResponseClick: true
+  });
+
+  assert.equal(result.appended.length, 1);
+  assert.equal(result.appended.at(-1).status, 'applied_direct_click');
+  assert.equal(result.localStore.dailyApplicationLedger.newSubmitted, 1);
+  assert.equal(result.localStore.autoApplyQueue.responseAttempt, null);
+  assert.equal(result.states.at(-1).state, 'stopped');
+  assert.equal(result.states.at(-1).applied, 1);
+  assert.equal(result.navigateUrl, '');
+});
+
+test('auto apply ignores unrelated global success when stopped target card is still actionable', async () => {
+  const unrelatedSuccess = 'Другая вакансия\nВы откликнулись';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseClickOpensDialog: false,
+    bodyText: unrelatedSuccess,
+    bodyTextAfterResponseClick: unrelatedSuccess,
+    cardText: 'Java Developer\nООО Test\nОткликнуться',
+    cardTextAfterResponseClick: 'Java Developer\nООО Test\nОткликнуться',
+    stopAfterResponseClick: true
+  });
+
+  assert.equal(result.appended.length, 0);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(result.localStore.autoApplyQueue.responseAttempt.vacancyId, '123');
+  assert.equal(result.states.at(-1).state, 'stopped');
+  assert.equal(result.navigateUrl, '');
+});
+
 test('auto apply opens direct response url instead of skipping when search click does not open form', async () => {
   const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
   const result = await runContentAutoApply({
@@ -1330,6 +1424,7 @@ test('auto apply opens direct response url instead of skipping when search click
   assert.equal(result.appended.length, 0);
   assert.equal(result.localStore.autoApplyQueue.active, true);
   assert.equal(result.localStore.autoApplyQueue.counters.processed, 1);
+  assert.equal(result.localStore.autoApplyQueue.responseAttempt.vacancyId, '123');
   assert.equal(result.navigateUrl, responseUrl);
 });
 
@@ -1895,6 +1990,23 @@ test('auto apply does not count open response form submit without hh confirmatio
   assert.equal(result.submitClicks, 1);
   assert.equal(result.appended.at(-1).status, 'skipped_submit_not_confirmed');
   assert.equal(result.localStore.autoApplyPendingSubmit, null);
+});
+
+test('auto apply ignores unrelated delivered-resume text when current response form has no confirmation', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nСопроводительное письмо',
+    hasTextarea: true,
+    startOnResponseForm: true,
+    submitButtonTextAfterCoverInput: 'Закрыть',
+    bodyText: 'Отклик на вакансию',
+    bodyTextAfterCoverInputOnly: 'Рекомендованная вакансия\nРезюме доставлено',
+    groqResponse: { ok: true, text: 'Работал со Spring Boot. Откликаюсь.' }
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.alreadyApplied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.appended.at(-1).status, 'skipped_submit_not_found');
 });
 
 test('auto apply keeps hh validation text when submit remains unconfirmed', async () => {
@@ -4663,6 +4775,623 @@ test('auto apply finalizes pending response on detail confirmation page and retu
   assert.equal(logs.some((item) => item.event === 'pending_submit_finalized'), true);
 });
 
+test('auto apply preserves a confirmed pending response when stop URL arrives after submit', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const states = [];
+  const navigations = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    runState: {
+      state: 'submitting',
+      found: 10,
+      processed: 1,
+      applied: 0,
+      skipped: 0,
+      errors: 0
+    },
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      returnToSearch: true,
+      counters: {
+        found: 10,
+        processed: 1,
+        applied: 0,
+        skipped: 0,
+        errors: 0
+      }
+    },
+    autoApplyPendingSubmit: {
+      runId: 'test-run',
+      item: {
+        index: 1,
+        vacancyId: '136142722',
+        title: 'Java Developer',
+        url: 'https://hh.ru/vacancy/136142722'
+      },
+      counters: {
+        found: 10,
+        processed: 1,
+        applied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      status: 'applied_test_assisted',
+      coverLetterUsed: false,
+      testDetected: true,
+      createdAt: new Date().toISOString(),
+      sourceUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=136142722',
+      returnToSearchUrl: 'https://hh.ru/search/vacancy?text=java',
+      queueLimit: 20,
+      queueProcessedVacancyIds: ['136142722']
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/?hhjaStopRun=1',
+    pathname: '/'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    history: { replaceState() {} },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH response confirmation page',
+    body: new FakeElement({ text: 'HH main page' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+          localStore.runState = { ...(localStore.runState || {}), ...message.patch };
+        }
+        if (message.type === 'APPEND_RUN_RESULT') {
+          appended.push(message.item);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stop-after-confirmed-submit-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (states.at(-1)?.state !== 'stopped' && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(appended.length, 0);
+  assert.equal(localStore.autoApplyPendingSubmit.item.vacancyId, '136142722');
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(states.at(-1).state, 'stopped');
+
+  globalThis.location = {
+    href: 'https://hh.ru/applicant/vacancy_response?vacancyId=136142722',
+    pathname: '/applicant/vacancy_response'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH response confirmation page',
+    body: new FakeElement({ text: 'Вы откликнулись\nРезюме доставлено' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stopped-confirmation-recovery-${crypto.randomUUID()}`);
+  const recoveryStarted = Date.now();
+  while (appended.length === 0 && Date.now() - recoveryStarted < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended.at(-1).status, 'applied_test_assisted');
+  assert.equal(localStore.autoApplyPendingSubmit, null);
+  assert.equal(localStore.dailyApplicationLedger.newSubmitted, 1);
+  assert.equal(states.at(-1).state, 'stopped');
+  assert.equal(states.at(-1).applied, 1);
+  assert.deepEqual(navigations, []);
+});
+
+test('auto apply preserves a fresh direct response attempt across stop and finalizes delivered-resume confirmation', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const states = [];
+  const navigations = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    runState: {
+      state: 'waiting_for_dialog',
+      found: 10,
+      processed: 1,
+      applied: 0,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0
+    },
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      returnToSearch: true,
+      processedCounted: true,
+      limit: 20,
+      items: [
+        {
+          index: 1,
+          vacancyId: '135646486',
+          title: 'Lead Java Developer',
+          url: 'https://hh.ru/vacancy/135646486',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
+          testDetected: false
+        }
+      ],
+      counters: {
+        found: 10,
+        processed: 1,
+        applied: 0,
+        alreadyApplied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      responseAttempt: {
+        vacancyId: '135646486',
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        startedAt: new Date().toISOString()
+      }
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/?hhjaStopRun=1',
+    pathname: '/'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    history: { replaceState() {} },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH main page',
+    body: new FakeElement({ text: 'HH main page' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+          localStore.runState = { ...(localStore.runState || {}), ...message.patch };
+        }
+        if (message.type === 'APPEND_RUN_RESULT') {
+          appended.push(message.item);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stop-with-direct-attempt-${crypto.randomUUID()}`);
+  const stopStarted = Date.now();
+  while (states.at(-1)?.state !== 'stopped' && Date.now() - stopStarted < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(appended.length, 0);
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '135646486');
+
+  globalThis.location = {
+    href: 'https://hh.ru/vacancy/135646486',
+    pathname: '/vacancy/135646486'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH vacancy confirmation page',
+    body: new FakeElement({ text: 'Lead Java Developer\nРезюме доставлено' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#recover-stopped-direct-attempt-${crypto.randomUUID()}`);
+  const recoveryStarted = Date.now();
+  while (appended.length === 0 && Date.now() - recoveryStarted < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended.at(-1).status, 'applied_direct_click');
+  assert.equal(localStore.dailyApplicationLedger.newSubmitted, 1);
+  assert.equal(localStore.autoApplyQueue.active, false);
+  assert.equal(localStore.autoApplyQueue.responseAttempt, null);
+  assert.equal(states.at(-1).state, 'stopped');
+  assert.equal(states.at(-1).applied, 1);
+  assert.deepEqual(navigations, []);
+});
+
+test('auto apply finalizes a stopped fresh attempt from a deeply nested current vacancy header confirmation', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const navigations = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    autoApplyStopRequested: true,
+    runState: { state: 'stopped', found: 10, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    autoApplyQueue: {
+      active: false,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      returnToSearch: true,
+      items: [{
+        index: 1,
+        vacancyId: '135646486',
+        title: 'Lead Java Developer',
+        url: 'https://hh.ru/vacancy/135646486',
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
+        testDetected: false
+      }],
+      counters: { found: 10, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+      responseAttempt: {
+        vacancyId: '135646486',
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        startedAt: new Date().toISOString(),
+        targetCardTextBefore: 'Lead Java Developer\nОткликнуться',
+        targetResponseControlEnabledBefore: true
+      }
+    }
+  };
+  const title = new FakeElement({ text: 'Lead Java Developer' });
+  const headerAncestors = Array.from({ length: 8 }, (_, index) => new FakeElement({
+    text: index === 7 ? 'Lead Java Developer\nВы откликнулись' : 'Lead Java Developer'
+  }));
+  title.parentElement = headerAncestors[0];
+  headerAncestors.forEach((node, index) => {
+    node.parentElement = headerAncestors[index + 1] || null;
+  });
+  const body = new FakeElement({ text: 'Lead Java Developer\nВы откликнулись' });
+  headerAncestors.at(-1).parentElement = body;
+
+  globalThis.location = { href: 'https://hh.ru/vacancy/135646486', pathname: '/vacancy/135646486' };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'Lead Java Developer',
+    body,
+    querySelectorAll(selector) {
+      if (selector.includes(',')) return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+      if (selector === 'h1[data-qa="vacancy-title"]') return [title];
+      return [];
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'APPEND_RUN_RESULT') appended.push(message.item);
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: { local: {
+      async get() {
+        return localStore;
+      },
+      async set(value) {
+        Object.assign(localStore, value);
+      }
+    } }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stopped-detail-deep-header-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].status, 'applied_direct_click');
+  assert.equal(localStore.dailyApplicationLedger.newSubmitted, 1);
+  assert.equal(localStore.autoApplyQueue.responseAttempt, null);
+  assert.equal(localStore.runState.state, 'stopped');
+  assert.deepEqual(navigations, []);
+});
+
+test('auto apply does not finalize stopped detail from unrelated delivered text while target response stays active', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    autoApplyStopRequested: true,
+    runState: {
+      state: 'stopped',
+      found: 10,
+      processed: 1,
+      applied: 0,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0
+    },
+    autoApplyQueue: {
+      active: false,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      returnToSearch: true,
+      items: [{
+        index: 1,
+        vacancyId: '135646486',
+        title: 'Lead Java Developer',
+        url: 'https://hh.ru/vacancy/135646486',
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
+        testDetected: false
+      }],
+      counters: {
+        found: 10,
+        processed: 1,
+        applied: 0,
+        alreadyApplied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      responseAttempt: {
+        vacancyId: '135646486',
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        startedAt: new Date().toISOString(),
+        targetCardTextBefore: 'Lead Java Developer\nОткликнуться',
+        targetResponseControlEnabledBefore: true
+      }
+    }
+  };
+  const responseButton = new FakeElement({
+    text: 'Откликнуться',
+    href: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486'
+  });
+
+  globalThis.location = {
+    href: 'https://hh.ru/vacancy/135646486',
+    pathname: '/vacancy/135646486'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'Lead Java Developer',
+    body: new FakeElement({ text: 'Lead Java Developer\nОткликнуться\nРекомендованная вакансия\nРезюме доставлено' }),
+    querySelectorAll(selector) {
+      if (selector.includes(',')) {
+        return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+      }
+      if (selector === '[data-qa="vacancy-response-link-top"]') return [responseButton];
+      if (selector === 'button') return [responseButton];
+      return [];
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'APPEND_RUN_RESULT') appended.push(message.item);
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stopped-detail-unrelated-confirmation-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(appended.length, 0);
+  assert.equal(localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '135646486');
+  assert.equal(localStore.runState.state, 'stopped');
+});
+
+test('auto apply does not finalize matching detail from another vacancy recommendation confirmation', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    autoApplyStopRequested: true,
+    runState: { state: 'stopped', found: 10, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    autoApplyQueue: {
+      active: false,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      returnToSearch: true,
+      items: [{
+        index: 1,
+        vacancyId: '135646486',
+        title: 'Lead Java Developer',
+        url: 'https://hh.ru/vacancy/135646486',
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
+        testDetected: false
+      }],
+      counters: { found: 10, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+      responseAttempt: {
+        vacancyId: '135646486',
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        startedAt: new Date().toISOString(),
+        targetCardTextBefore: 'Lead Java Developer\nОткликнуться',
+        targetResponseControlEnabledBefore: true
+      }
+    }
+  };
+  const title = new FakeElement({ text: 'Lead Java Developer' });
+  const header = new FakeElement({ text: 'Lead Java Developer' });
+  title.parentElement = header;
+  const otherVacancyLink = new FakeElement({ text: 'Other vacancy', href: 'https://hh.ru/vacancy/999999999' });
+  const otherResponseLink = new FakeElement({
+    text: 'Откликнуться',
+    href: 'https://hh.ru/applicant/vacancy_response?vacancyId=999999999'
+  });
+
+  globalThis.location = { href: 'https://hh.ru/vacancy/135646486', pathname: '/vacancy/135646486' };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'Lead Java Developer',
+    body: new FakeElement({ text: 'Lead Java Developer\nРекомендованная вакансия\nРезюме доставлено' }),
+    querySelectorAll(selector) {
+      if (selector.includes(',')) return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
+      if (selector === 'h1[data-qa="vacancy-title"]') return [title];
+      if (selector === 'div.noprint') return [header];
+      if (selector === '[data-qa="vacancy-serp__vacancy_response"]') return [otherResponseLink];
+      if (selector === 'a[href*="/vacancy/"]') return [otherVacancyLink];
+      return [];
+    },
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'APPEND_RUN_RESULT') appended.push(message.item);
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: { local: {
+      async get() {
+        return localStore;
+      },
+      async set(value) {
+        Object.assign(localStore, value);
+      }
+    } }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stopped-detail-other-recommendation-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(appended.length, 0);
+  assert.equal(localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '135646486');
+  assert.equal(localStore.runState.state, 'stopped');
+});
+
 test('auto apply resumes search from pending submit when response queue was cleared early', async () => {
   const source = await readContentScriptSource();
   const appended = [];
@@ -4894,6 +5623,124 @@ test('auto apply returns from already applied queued detail page without respons
   assert.equal(localStore.autoApplySearchQueue.counters.applied, 5);
   assert.equal(localStore.autoApplySearchQueue.counters.alreadyApplied, 1);
   assert.equal(localStore.autoApplySearchQueue.counters.processed, 7);
+  assert.equal(states.at(-1).state, 'applying');
+  assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
+});
+
+test('auto apply counts a fresh direct-response queue landing on confirmation detail as submitted', async () => {
+  const source = await readContentScriptSource();
+  const appended = [];
+  const states = [];
+  const navigations = [];
+  let bodyReads = 0;
+  const loadingBody = new FakeElement({ text: 'Java Developer\nЗагрузка отклика' });
+  const confirmedBody = new FakeElement({ text: 'Java Developer\nВы откликнулись\nРезюме доставлено' });
+  const localStore = { ...TEST_READY_CONFIG,
+    autoApplyQueue: {
+      active: true,
+      runId: 'test-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      limit: 20,
+      returnToSearch: true,
+      processedCounted: true,
+      responseAttempt: {
+        vacancyId: '136259707',
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        startedAt: new Date().toISOString()
+      },
+      items: [
+        {
+          index: 2,
+          vacancyId: '136259707',
+          title: 'Java Developer',
+          url: 'https://hh.ru/vacancy/136259707',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=136259707',
+          testDetected: false
+        }
+      ],
+      counters: {
+        found: 20,
+        processed: 2,
+        applied: 1,
+        alreadyApplied: 0,
+        skipped: 0,
+        errors: 0
+      },
+      config: {
+        delayMinMs: 1,
+        delayMaxMs: 1
+      },
+      processedVacancyIds: ['136257642', '136259707']
+    }
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/vacancy/136259707',
+    pathname: '/vacancy/136259707'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+      navigations.push(url);
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH vacancy confirmation page',
+    get body() {
+      bodyReads += 1;
+      return bodyReads < 4 ? loadingBody : confirmedBody;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          states.push(message.patch);
+        }
+        if (message.type === 'APPEND_RUN_RESULT') {
+          appended.push(message.item);
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#fresh-direct-confirmation-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (navigations.length === 0 && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.deepEqual(appended.map((item) => item.status), ['applied_direct_click']);
+  assert.equal(bodyReads >= 4, true);
+  assert.equal(localStore.autoApplySearchQueue.counters.applied, 2);
+  assert.equal(localStore.autoApplySearchQueue.counters.alreadyApplied, 0);
   assert.equal(states.at(-1).state, 'applying');
   assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
 });

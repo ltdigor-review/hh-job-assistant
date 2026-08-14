@@ -57,6 +57,7 @@ const RUNTIME_MESSAGE_TIMEOUT_MS =
   ) ?? 170000;
 const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
 const AUTO_APPLY_STOP_BEFORE_SUBMIT_TTL_MS = 15 * 60 * 1000;
+const AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS = 5 * 60 * 1000;
 const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
 const AUTO_START_TOKEN_EXPIRES_AT_KEY = 'autoApplyAutoStartTokenExpiresAt';
 const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
@@ -74,6 +75,7 @@ const QUESTION_CONTEXT_GROQ_MAX_CHARS = 2200;
 const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
 const HH_DAILY_RESPONSE_LIMIT_ACTION = 'Исчерпан лимит в 200 откликов в день';
 const HH_DAILY_RESPONSE_LIMIT_MESSAGE = 'HH временно не дает отправлять новые отклики.';
+const RESPONSE_CONFIRMATION_PATTERN = /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен|резюме\s+(?:доставлено|отправлено)/i;
 const {
   cleanText,
   sanitizeGeneratedText,
@@ -101,6 +103,7 @@ let actionOverlay = null;
 let startRunPromise = null;
 let activeRunEntryKind = '';
 let automationStartDigestWrite = Promise.resolve();
+let responseAttemptStopFinalizationPromise = null;
 
 class StopRequestedError extends Error {
   constructor() {
@@ -123,6 +126,35 @@ function getVacancyDedupeKey(item) {
 
 function serializeProcessedVacancyIds(processedIds) {
   return Array.from(processedIds || []).filter(Boolean);
+}
+
+function buildResponseAttempt(item, sourceUrl = location.href) {
+  const vacancyId = getVacancyDedupeKey(item);
+  if (!vacancyId) return null;
+  return {
+    vacancyId,
+    sourceUrl: isHhSearchPageUrl(sourceUrl) ? sourceUrl : '',
+    startedAt: new Date().toISOString(),
+    targetCardTextBefore: cleanText(item?.cardText || textOf(item?.card)).slice(0, 2000),
+    targetResponseControlEnabledBefore: Boolean(item?.responseButton && !isDisabled(item.responseButton))
+  };
+}
+
+function hasFreshMatchingResponseAttempt(queue, item) {
+  const attempt = queue?.responseAttempt;
+  const vacancyId = getVacancyDedupeKey(item) || getCurrentVacancyId();
+  const startedAtMs = Date.parse(attempt?.startedAt || '');
+  const sourceUrl = String(attempt?.sourceUrl || '');
+  return Boolean(
+    attempt &&
+    vacancyId &&
+    String(attempt.vacancyId || '') === String(vacancyId) &&
+    isHhSearchPageUrl(sourceUrl) &&
+    (!queue?.sourceUrl || sourceUrl === String(queue.sourceUrl)) &&
+    Number.isFinite(startedAtMs) &&
+    Date.now() - startedAtMs >= 0 &&
+    Date.now() - startedAtMs <= AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS
+  );
 }
 
 function getMoscowDate(now = new Date()) {
@@ -555,11 +587,141 @@ async function waitBeforeClick(minMs = CLICK_DELAY_MIN_MS, maxMs = CLICK_DELAY_M
   await sleep(randomDelay(minMs, maxMs));
 }
 
-async function markStopped(counters = {}) {
-  await clearPendingSubmit();
-  await saveQueue({ active: false });
+function getResponseAttemptQueueItem(queue) {
+  const queueItem = Array.isArray(queue?.items) ? queue.items[Number(queue.index) || 0] : null;
+  if (!queueItem) return null;
+  return {
+    ...queueItem,
+    navigationQueue: queue,
+    testDetected: Boolean(queueItem.testDetected)
+  };
+}
+
+function isExactResponseAttemptSourcePage(attempt) {
+  try {
+    return new URL(location.href).href === new URL(attempt?.sourceUrl || '', location.href).href;
+  } catch {
+    return false;
+  }
+}
+
+function findConfirmedSameSearchAttemptItem(queue, item) {
+  const attempt = queue?.responseAttempt;
+  const beforeText = cleanText(attempt?.targetCardTextBefore || '');
+  if (
+    !isHhSearchPageUrl(location.href) ||
+    !isExactResponseAttemptSourcePage(attempt) ||
+    attempt?.targetResponseControlEnabledBefore !== true ||
+    !beforeText ||
+    RESPONSE_CONFIRMATION_PATTERN.test(beforeText)
+  ) {
+    return null;
+  }
+
+  const targetItem = scanVacancies().find((candidate) => (
+    getVacancyDedupeKey(candidate) === getVacancyDedupeKey(item)
+  ));
+  if (!targetItem || hasActiveResponseControl(targetItem.card, targetItem)) {
+    return null;
+  }
+  const currentText = cleanText(targetItem.cardText || textOf(targetItem.card));
+  if (currentText === beforeText || !RESPONSE_CONFIRMATION_PATTERN.test(currentText)) {
+    return null;
+  }
+  return targetItem;
+}
+
+async function finalizeConfirmedResponseAttemptForStop(counters = {}, queueOverride = null) {
+  if (responseAttemptStopFinalizationPromise) {
+    return responseAttemptStopFinalizationPromise;
+  }
+  responseAttemptStopFinalizationPromise = (async () => {
+    if (!(await syncStopRequestedFromStorage())) {
+      return null;
+    }
+    const queue = queueOverride || (await storageGet(['autoApplyQueue'])).autoApplyQueue;
+    const item = getResponseAttemptQueueItem(queue);
+    const attempt = queue?.responseAttempt;
+    if (!item || !hasFreshMatchingResponseAttempt(queue, item)) {
+      return null;
+    }
+    const destinationConfirmed = isConfirmedResponseAttemptDestination(item, attempt);
+    const sameSearchItem = destinationConfirmed ? null : findConfirmedSameSearchAttemptItem(queue, item);
+    if (!destinationConfirmed && !sameSearchItem) {
+      return null;
+    }
+
+    const finalizedCounters = {
+      found: 0,
+      processed: 0,
+      applied: 0,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0,
+      ...(queue.counters || {}),
+      ...counters
+    };
+    queue.responseAttempt = null;
+    await saveQueue({ ...queue, active: false, responseAttempt: null });
+    await appendDirectClickResponse({ ...item, ...(sameSearchItem || {}) }, finalizedCounters);
+    await saveQueue({ ...queue, active: false, responseAttempt: null, counters: { ...finalizedCounters } });
+    await saveSearchQueue({ active: false });
+    await setRunState({ state: 'stopped', ...finalizedCounters, currentAction: 'Остановлено', lastError: '' });
+    await appendAgentLog('response_attempt_finalized_before_stop', {
+      vacancyId: item.vacancyId,
+      sourceUrl: attempt?.sourceUrl || '',
+      confirmationSource: sameSearchItem ? 'target_card' : 'vacancy_destination'
+    });
+    return finalizedCounters;
+  })();
+  try {
+    return await responseAttemptStopFinalizationPromise;
+  } finally {
+    responseAttemptStopFinalizationPromise = null;
+  }
+}
+
+async function markStopped(counters = {}, { discardPendingSubmit = false } = {}) {
+  const { autoApplyQueue = {} } = await storageGet(['autoApplyQueue']);
+  const responseAttemptConsumed = Array.isArray(autoApplyQueue.items) && autoApplyQueue.responseAttempt === null;
+  const finalizedCounters = discardPendingSubmit
+    ? null
+    : await finalizeConfirmedPendingSubmitForStop(counters);
+  const finalizedResponseAttemptCounters = (finalizedCounters || discardPendingSubmit)
+    ? null
+    : await finalizeConfirmedResponseAttemptForStop(counters, autoApplyQueue);
+  const stoppedCounters = {
+    ...(responseAttemptConsumed ? autoApplyQueue.counters || {} : {}),
+    ...(finalizedCounters || finalizedResponseAttemptCounters || counters)
+  };
+  if (responseAttemptConsumed && !finalizedCounters && !finalizedResponseAttemptCounters) {
+    for (const key of ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']) {
+      stoppedCounters[key] = Math.max(
+        Number(stoppedCounters[key]) || 0,
+        Number(autoApplyQueue.counters?.[key]) || 0
+      );
+    }
+  }
+  if (!finalizedCounters && discardPendingSubmit) {
+    await clearPendingSubmit();
+  }
+  const responseAttemptItem = getResponseAttemptQueueItem(autoApplyQueue);
+  const preserveResponseAttempt = Boolean(
+    !discardPendingSubmit &&
+    !finalizedCounters &&
+    !finalizedResponseAttemptCounters &&
+    responseAttemptItem &&
+    hasFreshMatchingResponseAttempt(autoApplyQueue, responseAttemptItem)
+  );
+  await saveQueue(finalizedResponseAttemptCounters
+    ? { ...autoApplyQueue, active: false, responseAttempt: null, counters: { ...stoppedCounters } }
+    : preserveResponseAttempt
+      ? { ...autoApplyQueue, active: false }
+      : responseAttemptConsumed
+        ? { ...autoApplyQueue, active: false, responseAttempt: null }
+        : { active: false });
   await saveSearchQueue({ active: false });
-  await setRunState({ state: 'stopped', ...counters, currentAction: 'Остановлено', lastError: '' });
+  await setRunState({ state: 'stopped', ...stoppedCounters, currentAction: 'Остановлено', lastError: '' });
 }
 
 async function stopIfRequested(counters = {}) {
@@ -1181,17 +1343,16 @@ function isResponseFormRoot(root) {
 }
 
 function isAlreadyAppliedPage(root = document) {
-  return /вы откликнулись|отклик отправлен|отклик успешно|отклик на вакансию отправлен/i.test(
-    textOf(root) || textOf(root.body)
-  );
+  return RESPONSE_CONFIRMATION_PATTERN.test(textOf(root) || textOf(root.body));
 }
 
-function hasNewResponseSuccessText(beforeText, root = document) {
+function hasNewResponseSuccessText(beforeText, root = document, item = null) {
   const before = cleanText(beforeText);
   const current = cleanText(textOf(root) || textOf(root?.body) || textOf(document.body));
   if (!current || current === before) return false;
-  const successPattern = /отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен/i;
-  return successPattern.test(current) && !successPattern.test(before);
+  const currentItemText = cleanText(textOf(item?.card));
+  if (RESPONSE_CONFIRMATION_PATTERN.test(currentItemText) && hasActiveResponseControl(item?.card, item)) return false;
+  return RESPONSE_CONFIRMATION_PATTERN.test(current) && !RESPONSE_CONFIRMATION_PATTERN.test(before);
 }
 
 function hasActiveResponseControl(root = document, item = null) {
@@ -1206,11 +1367,87 @@ function hasActiveResponseControl(root = document, item = null) {
   });
 }
 
+function confirmationScopeHasDifferentVacancy(scope, currentVacancyId) {
+  return queryAll(['a[href*="/vacancy/"]', 'a[href*="vacancy_response"]'], scope).some((link) => {
+    const linkedVacancyId = getVacancyId(link.href || link.getAttribute?.('href') || '');
+    return linkedVacancyId && linkedVacancyId !== currentVacancyId;
+  });
+}
+
+function findScopedCurrentVacancyConfirmation(node, currentVacancyId, maxDepth = 12) {
+  let scope = node;
+  for (let depth = 0; scope && scope !== document && scope !== document.body && depth < maxDepth; depth += 1) {
+    if (
+      RESPONSE_CONFIRMATION_PATTERN.test(textOf(scope)) &&
+      !confirmationScopeHasDifferentVacancy(scope, currentVacancyId)
+    ) {
+      return scope;
+    }
+    scope = scope.parentElement;
+  }
+  return null;
+}
+
+function isCurrentVacancyDetailConfirmed(item) {
+  if (!isVacancyDetailPage()) return false;
+  const currentVacancyId = getCurrentVacancyId();
+  const itemVacancyId = getVacancyDedupeKey(item);
+  if (!currentVacancyId || currentVacancyId !== itemVacancyId || hasActiveResponseControl(document, item)) {
+    return false;
+  }
+
+  const title = document.querySelector('h1[data-qa="vacancy-title"]');
+  const attachCoverLetterButton = document.querySelector('button[data-qa="responded-success-attach-cover-letter"]');
+  const headerScope = title?.closest?.('div.noprint') || title?.parentElement || null;
+  if (
+    findScopedCurrentVacancyConfirmation(headerScope, currentVacancyId) ||
+    findScopedCurrentVacancyConfirmation(attachCoverLetterButton?.parentElement || attachCoverLetterButton, currentVacancyId)
+  ) {
+    return true;
+  }
+
+  const hasRealCurrentVacancyStructure = Boolean(title || attachCoverLetterButton);
+  const hasRecommendationStructure = queryAll([
+    '[data-qa="vacancy-serp__vacancy_response"]',
+    '[data-qa="vacancy-serp__vacancy"]',
+    '[data-qa="serp-item"]'
+  ], document).length > 0;
+  if (hasRealCurrentVacancyStructure || hasRecommendationStructure) {
+    return false;
+  }
+  return isAlreadyAppliedPage(document);
+}
+
+async function isStructurelessCurrentDetailConfirmedByPendingSubmit(item) {
+  if (!isVacancyDetailPage() || !isAlreadyAppliedPage(document)) return false;
+  const { autoApplyPendingSubmit } = await storageGet(['autoApplyPendingSubmit']);
+  const currentVacancyId = getCurrentVacancyId();
+  if (
+    !autoApplyPendingSubmit?.item ||
+    !currentVacancyId ||
+    currentVacancyId !== getVacancyDedupeKey(item) ||
+    currentVacancyId !== getVacancyDedupeKey(autoApplyPendingSubmit.item)
+  ) {
+    return false;
+  }
+  const hasRealCurrentVacancyStructure = Boolean(
+    document.querySelector('h1[data-qa="vacancy-title"]') ||
+    document.querySelector('button[data-qa="responded-success-attach-cover-letter"]')
+  );
+  const hasRecommendationStructure = queryAll([
+    '[data-qa="vacancy-serp__vacancy_response"]',
+    '[data-qa="vacancy-serp__vacancy"]',
+    '[data-qa="serp-item"]'
+  ], document).length > 0;
+  return !hasRealCurrentVacancyStructure && !hasRecommendationStructure;
+}
+
 function isAlreadyAppliedForCurrentItem(root = document, item = null, { ignoreActiveResponseControl = false } = {}) {
   if (!ignoreActiveResponseControl && hasActiveResponseControl(root, item)) return false;
   if (!isAlreadyAppliedPage(root)) return false;
   if (root !== document) return true;
   if (isResponseFormPage()) return true;
+  if (isVacancyDetailPage()) return isCurrentVacancyDetailConfirmed(item);
 
   const currentVacancyId = getVacancyId(location.href);
   const itemVacancyId = getVacancyDedupeKey(item);
@@ -1220,9 +1457,11 @@ function isAlreadyAppliedForCurrentItem(root = document, item = null, { ignoreAc
 async function waitForAlreadyAppliedConfirmation(item, { timeoutMs = 5000 } = {}) {
   const startedAt = Date.now();
   while (Date.now() - startedAt <= timeoutMs) {
+    const responseRoot = getDialogRoot();
+    const exactItemRoot = item?.card && item.card !== document ? item.card : null;
     if (
-      isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
-      /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно/i.test(textOf(document.body))
+      (responseRoot !== document && isAlreadyAppliedForCurrentItem(responseRoot, item)) ||
+      (exactItemRoot && isAlreadyAppliedForCurrentItem(exactItemRoot, item))
     ) {
       return true;
     }
@@ -1812,6 +2051,7 @@ function closeDialog() {
     return;
   }
 
+  if (typeof globalThis.KeyboardEvent !== 'function') return;
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
   document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
   if (root !== document) {
@@ -2028,6 +2268,45 @@ async function appendDirectClickResponse(item, counters, { status = 'applied_dir
   closeDialog();
 }
 
+function isMatchingResponseAttemptDestination(item, attempt) {
+  const currentVacancyId = getCurrentVacancyId();
+  const itemVacancyId = getVacancyDedupeKey(item);
+  return Boolean(
+    (isVacancyDetailPage() || /\/applicant\/vacancy_response/.test(location.pathname)) &&
+    currentVacancyId &&
+    currentVacancyId === itemVacancyId &&
+    currentVacancyId === String(attempt?.vacancyId || '')
+  );
+}
+
+function isConfirmedResponseAttemptDestination(item, attempt) {
+  if (!isMatchingResponseAttemptDestination(item, attempt)) {
+    return false;
+  }
+  if (isVacancyDetailPage()) return isCurrentVacancyDetailConfirmed(item);
+  if (hasActiveResponseControl(document, item)) return false;
+  const responseRoot = getDialogRoot();
+  return responseRoot !== document
+    ? isAlreadyAppliedForCurrentItem(responseRoot, item)
+    : isAlreadyAppliedPage(document);
+}
+
+async function appendCurrentVacancyConfirmation(
+  item,
+  counters,
+  { coverLetterUsed = false, testDetected = item.testDetected } = {}
+) {
+  const attempt = item.navigationQueue?.responseAttempt;
+  if (isMatchingResponseAttemptDestination(item, attempt) && hasFreshMatchingResponseAttempt(item.navigationQueue, item)) {
+    item.navigationQueue.responseAttempt = null;
+    await saveQueue(item.navigationQueue);
+    await appendDirectClickResponse(item, counters, { coverLetterUsed, testDetected });
+    return 'submitted';
+  }
+  await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected });
+  return 'already_applied';
+}
+
 async function completeHhDailyResponseLimit(item, counters, reason = '') {
   counters.skipped += 1;
   const { ledger } = await recordDailyApplication(item, 'hh_daily_limit', counters);
@@ -2071,7 +2350,7 @@ async function stopBeforeSubmitIfRequested(counters) {
   await clearStopBeforeSubmitForRun(runId, 'before_submit');
   await setStopRequested('stop_before_submit');
   await appendAgentLog('stop_before_submit', { url: location.href });
-  await markStopped(counters);
+  await markStopped(counters, { discardPendingSubmit: true });
   return true;
 }
 
@@ -2083,6 +2362,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     if (
       isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
       isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
+      await isStructurelessCurrentDetailConfirmedByPendingSubmit(item) ||
       detectHhDailyResponseLimit(root) ||
       detectHhDailyResponseLimit(document) ||
       detectBlockedResponseReason(root) ||
@@ -2116,7 +2396,8 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
 
   if (
     isAlreadyAppliedForCurrentItem(root, item, { ignoreActiveResponseControl: true }) ||
-    isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })
+    isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
+    await isStructurelessCurrentDetailConfirmedByPendingSubmit(item)
   ) {
     const { ledger } = await recordDailyApplication(item, 'submitted', counters);
     syncCountersFromLedger(counters, ledger);
@@ -2212,6 +2493,53 @@ function getUnselectedQuestionControlGroups(groups) {
     .filter((group) => !group.options.some((option) => Boolean(option.control?.checked)));
 }
 
+async function finalizeConfirmedPendingSubmitForStop(counters = {}) {
+  const { autoApplyPendingSubmit } = await storageGet(['autoApplyPendingSubmit']);
+  if (!autoApplyPendingSubmit?.item || !isAlreadyAppliedPage(document)) {
+    return null;
+  }
+
+  const pendingVacancyId = getVacancyDedupeKey(autoApplyPendingSubmit.item);
+  const currentVacancyId = getCurrentVacancyId() || getVacancyId(autoApplyPendingSubmit.sourceUrl || '');
+  if (!pendingVacancyId || !currentVacancyId || pendingVacancyId !== currentVacancyId) {
+    return null;
+  }
+
+  const finalizedCounters = {
+    found: 0,
+    processed: 0,
+    applied: 0,
+    alreadyApplied: 0,
+    skipped: 0,
+    errors: 0,
+    ...counters
+  };
+  const pendingCounters = autoApplyPendingSubmit.counters || {};
+  for (const key of ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']) {
+    finalizedCounters[key] = Math.max(
+      Number(finalizedCounters[key]) || 0,
+      Number(pendingCounters[key]) || 0
+    );
+  }
+
+  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', finalizedCounters);
+  syncCountersFromLedger(finalizedCounters, ledger);
+  await clearPendingSubmit();
+  await appendResult({
+    ...autoApplyPendingSubmit.item,
+    status: autoApplyPendingSubmit.status || 'applied',
+    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
+    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
+    error: ''
+  });
+  await appendAgentLog('pending_submit_finalized_before_stop', {
+    vacancyId: autoApplyPendingSubmit.item.vacancyId,
+    status: autoApplyPendingSubmit.status || 'applied',
+    sourceUrl: autoApplyPendingSubmit.sourceUrl || ''
+  });
+  return finalizedCounters;
+}
+
 async function finalizePendingSubmit() {
   const { autoApplyPendingSubmit, autoApplyQueue } = await storageGet(['autoApplyPendingSubmit', 'autoApplyQueue']);
   if (!autoApplyPendingSubmit?.item) {
@@ -2221,6 +2549,8 @@ async function finalizePendingSubmit() {
   if (!isAlreadyAppliedPage(document)) {
     return false;
   }
+
+  const shouldRemainStopped = await syncStopRequestedFromStorage();
 
   const counters = {
     found: 1,
@@ -2245,6 +2575,12 @@ async function finalizePendingSubmit() {
     status: autoApplyPendingSubmit.status || 'applied',
     sourceUrl: autoApplyPendingSubmit.sourceUrl || ''
   });
+  if (shouldRemainStopped) {
+    await saveQueue({ active: false });
+    await saveSearchQueue({ active: false });
+    await setRunState({ state: 'stopped', ...counters, currentAction: 'Остановлено', lastError: '' });
+    return true;
+  }
   const activeQueueReturnUrl = autoApplyQueue?.active && autoApplyQueue.returnToSearch && isHhSearchPageUrl(autoApplyQueue.sourceUrl)
     ? autoApplyQueue.sourceUrl
     : '';
@@ -2845,12 +3181,12 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   if (item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
-    await appendAlreadyAppliedResponse(item, counters);
+    await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
 
   if (isAlreadyAppliedForCurrentItem(item.card, item)) {
-    await appendAlreadyAppliedResponse(item, counters);
+    await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
 
@@ -2867,7 +3203,8 @@ async function applyToVacancy(item, counters, config = null) {
       items: item.navigationQueue.items?.map((queueItem, index) => index === 0 ? { ...queueItem, responseUrl } : queueItem),
       active: true,
       index: 0,
-      counters: { ...counters }
+      counters: { ...counters },
+      responseAttempt: buildResponseAttempt(item, item.navigationQueue.sourceUrl || location.href)
     };
     await saveQueue(navigationQueue);
     await setRunState({
@@ -2894,7 +3231,7 @@ async function applyToVacancy(item, counters, config = null) {
         isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
         /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно/i.test(settledText)
       ) {
-        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
+        await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
         return;
       }
       const detailResponseButton = findEnabledClickableByText(document, [/откликнуться/i]) || findClickableByText(document, [/откликнуться/i]);
@@ -2912,7 +3249,7 @@ async function applyToVacancy(item, counters, config = null) {
       const fallback = await fallbackToDirectResponse('no_response_button');
       if (fallback) return fallback;
       if (isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true })) {
-        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
+        await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed: false, testDetected: item.testDetected });
         return;
       }
       counters.skipped += 1;
@@ -2944,6 +3281,10 @@ async function applyToVacancy(item, counters, config = null) {
     beforeText = textOf(document.body);
     beforeUrl = location.href;
     if (item.navigationQueue) {
+      item.navigationQueue.responseAttempt = buildResponseAttempt(
+        item,
+        item.navigationQueue.sourceUrl || location.href
+      );
       await saveQueue(item.navigationQueue);
     }
     await sleep(250);
@@ -2978,7 +3319,7 @@ async function applyToVacancy(item, counters, config = null) {
     return completeHhDailyResponseLimit(item, counters, dailyLimitReason);
   }
 
-  if (!item.responseFormOpen && root === document && !isResponseFormPage() && hasNewResponseSuccessText(beforeText, document)) {
+  if (!item.responseFormOpen && root === document && !isResponseFormPage() && hasNewResponseSuccessText(beforeText, document, item)) {
     await appendDirectClickResponse(item, counters, { testDetected: item.testDetected });
     return;
   }
@@ -2988,7 +3329,7 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   if (isAlreadyAppliedForCurrentItem(root, item)) {
-    await appendAlreadyAppliedResponse(item, counters);
+    await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
 
@@ -3290,12 +3631,8 @@ async function applyToVacancy(item, counters, config = null) {
 
     const submitButton = findSubmitButton(root);
     if (!submitButton) {
-      if (
-        isAlreadyAppliedForCurrentItem(root, item) ||
-        isAlreadyAppliedForCurrentItem(document, item) ||
-        await waitForAlreadyAppliedConfirmation(item)
-      ) {
-        await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: true });
+      if (await waitForAlreadyAppliedConfirmation(item)) {
+        await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed, testDetected: true });
         return;
       }
       const blockedReason = detectBlockedResponseReason(root);
@@ -3425,12 +3762,8 @@ async function applyToVacancy(item, counters, config = null) {
 
   const submitButton = findSubmitButton(root);
   if (!submitButton) {
-    if (
-      isAlreadyAppliedForCurrentItem(root, item) ||
-      isAlreadyAppliedForCurrentItem(document, item) ||
-      await waitForAlreadyAppliedConfirmation(item)
-    ) {
-      await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected: false });
+    if (await waitForAlreadyAppliedConfirmation(item)) {
+      await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed, testDetected: false });
       return;
     }
     const blockedReason = detectBlockedResponseReason(root);
@@ -3671,6 +4004,7 @@ async function continueQueuedAutoApply() {
     counters.processed += 1;
   }
   const item = isResponseFormPage() ? buildResponseFormItem(itemData) : buildQueuedVacancyDetailItem(itemData);
+  item.navigationQueue = queue;
   const queueConfig = queue.config || await getConfig();
   if (await stopIfRequested(counters)) return true;
 
@@ -3734,7 +4068,13 @@ async function continueQueuedAutoApply() {
   }
 
   const nextItem = queue.items[nextIndex];
-  await saveQueue({ ...queue, index: nextIndex, counters });
+  const nextQueue = {
+    ...queue,
+    index: nextIndex,
+    counters,
+    responseAttempt: buildResponseAttempt(nextItem, queue.sourceUrl || location.href)
+  };
+  await saveQueue(nextQueue);
   await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
   const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
   await sleep(delayMs);
@@ -3847,6 +4187,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     const appliedBeforeItem = counters.applied;
     try {
       if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
+        item.navigationQueue.responseAttempt = buildResponseAttempt(item, sourceUrl);
         await saveQueue(item.navigationQueue);
         await setRunState({
           state: 'waiting_for_dialog',
@@ -3896,6 +4237,9 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       closeDialog();
     }
 
+    if (stopRequested) {
+      return { ok: true, ...counters };
+    }
     await setRunState({ state: stopRequested ? 'paused' : 'applying', ...counters });
     const processedCapReached = maxProcessed != null && counters.processed >= maxProcessed;
     const appliedThisItem = counters.applied > appliedBeforeItem;
@@ -4503,6 +4847,10 @@ async function initializeContentScript() {
   }
   const finalizedPendingSubmit = await finalizePendingSubmit();
   if (finalizedPendingSubmit) {
+    return;
+  }
+  const finalizedStoppedResponseAttempt = await finalizeConfirmedResponseAttemptForStop();
+  if (finalizedStoppedResponseAttempt) {
     return;
   }
   const continuedQueue = await continueQueuedAutoApply();
