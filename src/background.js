@@ -99,6 +99,10 @@ const RESPONSE_FORM_PROCESSING_STATES = new Set([
 ]);
 const DAILY_APPLICATION_LEDGER_KEY = 'dailyApplicationLedger';
 const AUTOMATION_START_DIGEST_KEY = 'automationStartDigest';
+const AUTO_APPLY_RUN_LEASE_KEY = 'autoApplyRunLease';
+const AUTO_APPLY_RESPONSE_ATTEMPTS_KEY = 'autoApplyResponseAttempts';
+const AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS = 5 * 60 * 1000;
+const AUTO_APPLY_ORPHAN_CLAIM_GRACE_MS = 30 * 1000;
 const SAFE_STATUS_RUN_STATES = new Set([
   'idle',
   'scanning',
@@ -152,6 +156,7 @@ const AUTOMATION_STATE_DEFAULT_KEYS = new Set([
 ]);
 let resumeProfileRefreshPromise = null;
 let groqHttpQueue = Promise.resolve();
+let autoApplyOwnershipQueue = Promise.resolve();
 
 function nowIso() {
   return new Date().toISOString();
@@ -646,6 +651,772 @@ async function storageRemove(keys) {
   if (chrome.storage.local.remove) {
     return chrome.storage.local.remove(keys);
   }
+}
+
+function enqueueAutoApplyOwnership(operation) {
+  const next = autoApplyOwnershipQueue.then(operation, operation);
+  autoApplyOwnershipQueue = next.catch(() => {});
+  return next;
+}
+
+function normalizeRunOwnerId(value) {
+  const ownerId = Number(value);
+  return Number.isInteger(ownerId) && ownerId > 0 ? ownerId : 0;
+}
+
+function normalizeRunId(value) {
+  return String(value || '').trim().slice(0, 160);
+}
+
+function isFreshTimestamp(value, ttlMs, now = Date.now()) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) && now - timestamp >= 0 && now - timestamp <= ttlMs;
+}
+
+function responseAttemptStorageKey(runId, vacancyId, ownerId) {
+  return `${normalizeRunId(runId)}:${String(vacancyId || '').trim()}:${normalizeRunOwnerId(ownerId)}`;
+}
+
+const OWNED_AUTO_APPLY_STATE_KEYS = new Set([
+  'autoApplyQueue',
+  'autoApplySearchQueue',
+  'autoApplyPendingSubmit',
+  'runResults'
+]);
+
+function normalizeDailyApplicationLedgerForMutation(value, now = new Date()) {
+  const date = getMoscowStatusDate(now);
+  if (!value || value.date !== date) {
+    return {
+      date,
+      legacySubmitted: 0,
+      newSubmitted: 0,
+      alreadyApplied: 0,
+      submittedVacancyIds: [],
+      alreadyAppliedVacancyIds: [],
+      hhDailyLimitReached: false,
+      updatedAt: now.toISOString()
+    };
+  }
+  const submittedVacancyIds = [...new Set((value.submittedVacancyIds || []).map(String).filter(Boolean))];
+  const alreadyAppliedVacancyIds = [...new Set((value.alreadyAppliedVacancyIds || []).map(String).filter(Boolean))]
+    .filter((id) => !submittedVacancyIds.includes(id));
+  const legacySubmitted = Math.max(0, Number(value.legacySubmitted) || 0);
+  return {
+    date,
+    legacySubmitted,
+    newSubmitted: legacySubmitted + submittedVacancyIds.length,
+    alreadyApplied: alreadyAppliedVacancyIds.length,
+    submittedVacancyIds,
+    alreadyAppliedVacancyIds,
+    hhDailyLimitReached: value.hhDailyLimitReached === true,
+    updatedAt: String(value.updatedAt || now.toISOString())
+  };
+}
+
+function updateDailyApplicationLedger(value, vacancyId, kind, counterBaseline = 0, now = new Date()) {
+  const ledger = normalizeDailyApplicationLedgerForMutation(value, now);
+  const baseline = Math.max(0, Number(counterBaseline) || 0);
+  if (baseline > ledger.newSubmitted) {
+    ledger.legacySubmitted += baseline - ledger.newSubmitted;
+  }
+  let added = false;
+  const normalizedVacancyId = String(vacancyId || '').trim();
+  if (kind === 'submitted' && normalizedVacancyId && !ledger.submittedVacancyIds.includes(normalizedVacancyId)) {
+    ledger.submittedVacancyIds.push(normalizedVacancyId);
+    ledger.alreadyAppliedVacancyIds = ledger.alreadyAppliedVacancyIds.filter((id) => id !== normalizedVacancyId);
+    added = true;
+  } else if (
+    kind === 'already_applied' &&
+    normalizedVacancyId &&
+    !ledger.submittedVacancyIds.includes(normalizedVacancyId) &&
+    !ledger.alreadyAppliedVacancyIds.includes(normalizedVacancyId)
+  ) {
+    ledger.alreadyAppliedVacancyIds.push(normalizedVacancyId);
+    added = true;
+  } else if (kind === 'hh_daily_limit') {
+    ledger.hhDailyLimitReached = true;
+    added = true;
+  }
+  ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
+  ledger.alreadyApplied = ledger.alreadyAppliedVacancyIds.length;
+  ledger.updatedAt = now.toISOString();
+  return { ledger, added };
+}
+
+async function claimAutoApplyRun(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const requestedRunId = normalizeRunId(message?.runId);
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    if (!requestedRunId || !ownerId) {
+      return { ok: false, claimed: false, error: 'Run ownership requires an HH tab.' };
+    }
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    const leaseRunId = normalizeRunId(lease?.runId);
+    const leaseOwnerId = normalizeRunOwnerId(lease?.ownerId);
+    const runState = stored.runState || {};
+    const ownedPendingSubmit = stored.autoApplyPendingSubmit?.item &&
+      normalizeRunId(stored.autoApplyPendingSubmit.runId) === leaseRunId &&
+      normalizeRunOwnerId(stored.autoApplyPendingSubmit.ownerId) === leaseOwnerId;
+    const ownedUnresolvedAttempts = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).filter((attempt) => (
+      normalizeRunId(attempt?.runId) === leaseRunId &&
+      normalizeRunOwnerId(attempt?.ownerId) === leaseOwnerId &&
+      !attempt?.finalizedAt &&
+      !attempt?.cancelledAt
+    ));
+    const senderUrl = String(sender?.tab?.url || '');
+    const senderVacancyId = getVacancyIdFromUrl(senderUrl);
+    const isMatchingAttemptDestination = (attempt) => {
+      const attemptVacancyId = String(attempt?.vacancyId || '');
+      return senderUrl === String(attempt?.responseUrl || '') || Boolean(
+        senderVacancyId &&
+        senderVacancyId === attemptVacancyId &&
+        (isHhResponseFormUrl(senderUrl) || isHhVacancyDetailUrl(senderUrl))
+      );
+    };
+    const recoverableStaleTerminalAttempts = lease?.active === true &&
+      leaseOwnerId === ownerId &&
+      normalizeRunId(runState.runId) === leaseRunId &&
+      normalizeRunOwnerId(runState.ownerId) === leaseOwnerId &&
+      !ownedPendingSubmit &&
+      ['stopped', 'paused'].includes(String(runState.state || '')) &&
+      isAutoApplySearchUrl(senderUrl) &&
+      ownedUnresolvedAttempts.length > 0 &&
+      ownedUnresolvedAttempts.every((attempt) => !isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) &&
+      !ownedUnresolvedAttempts.some(isMatchingAttemptDestination);
+    const hasOwnedSideEffectProvenance = Boolean(ownedPendingSubmit || ownedUnresolvedAttempts.length > 0);
+    let recoveredOrphan = false;
+    let recoveredTerminalAttempt = false;
+    if (lease?.active === true) {
+      const owned = leaseRunId === requestedRunId && leaseOwnerId === ownerId;
+      if (owned) {
+        return { ok: true, claimed: true, owned: true, runId: requestedRunId, ownerId };
+      }
+      if (recoverableStaleTerminalAttempts) {
+        recoveredTerminalAttempt = true;
+      } else if (leaseOwnerId === ownerId && hasOwnedSideEffectProvenance) {
+        return {
+          ok: true,
+          claimed: false,
+          owned: false,
+          alreadyRunning: true,
+          reason: 'active_run_has_side_effect_provenance',
+          runId: leaseRunId,
+          ownerId: leaseOwnerId
+        };
+      }
+      const leaseClaimedAt = Date.parse(String(lease.claimedAt || ''));
+      const orphanOldEnough = Number.isFinite(leaseClaimedAt) && Date.now() - leaseClaimedAt >= AUTO_APPLY_ORPHAN_CLAIM_GRACE_MS;
+      const noOwnedQueue = ![stored.autoApplyQueue, stored.autoApplySearchQueue].some((queue) => (
+        normalizeRunId(queue?.runId) === leaseRunId &&
+        normalizeRunOwnerId(queue?.ownerId) === leaseOwnerId
+      ));
+      const initialCounters = ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']
+        .every((key) => (Number(runState[key]) || 0) === 0);
+      const pristineLeaseState = normalizeRunId(runState.runId) === leaseRunId &&
+        normalizeRunOwnerId(runState.ownerId) === leaseOwnerId &&
+        runState.state === 'scanning' &&
+        !runState.lastError &&
+        initialCounters &&
+        (!Array.isArray(stored.runResults) || stored.runResults.length === 0);
+      if (leaseOwnerId === ownerId && orphanOldEnough && noOwnedQueue && pristineLeaseState) {
+        recoveredOrphan = true;
+      }
+      let ownerTabPresent = true;
+      if (!recoveredOrphan && !recoveredTerminalAttempt && chrome.tabs?.get && leaseOwnerId) {
+        ownerTabPresent = await chrome.tabs.get(leaseOwnerId).then(() => true).catch(() => false);
+      }
+      if (!recoveredOrphan && !recoveredTerminalAttempt && ownerTabPresent) {
+        return {
+          ok: true,
+          claimed: false,
+          owned: false,
+          alreadyRunning: true,
+          reason: leaseOwnerId === ownerId ? 'active_run_in_progress' : 'active_run_owned_by_other_tab',
+          runId: leaseRunId,
+          ownerId: leaseOwnerId
+        };
+      }
+    }
+    if (!recoveredOrphan && !recoveredTerminalAttempt && hasOwnedSideEffectProvenance) {
+      return {
+        ok: true,
+        claimed: false,
+        owned: false,
+        alreadyRunning: true,
+        reason: 'active_run_has_side_effect_provenance',
+        runId: leaseRunId,
+        ownerId: leaseOwnerId
+      };
+    }
+    if (!isAutoApplySearchUrl(sender?.tab?.url)) {
+      return { ok: false, claimed: false, owned: false, reason: 'unprovenanced_start_url' };
+    }
+    const now = nowIso();
+    const nextLease = {
+      active: true,
+      runId: requestedRunId,
+      ownerId,
+      claimedAt: now,
+      updatedAt: now
+    };
+    const nextRunState = {
+      ...DEFAULTS.runState,
+      state: 'scanning',
+      runId: requestedRunId,
+      ownerId,
+      currentAction: 'Инициализация запуска откликов',
+      lastError: '',
+      updatedAt: now
+    };
+    const nextAttempts = recoveredTerminalAttempt
+      ? Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
+        if (
+          normalizeRunId(attempt?.runId) === leaseRunId &&
+          normalizeRunOwnerId(attempt?.ownerId) === leaseOwnerId &&
+          !attempt?.finalizedAt &&
+          !attempt?.cancelledAt
+        ) {
+          return [key, { ...attempt, cancelledAt: now, cancelReason: 'stale_terminal_restart' }];
+        }
+        return [key, attempt];
+      }))
+      : null;
+    await storageSet({
+      [AUTO_APPLY_RUN_LEASE_KEY]: nextLease,
+      ...(nextAttempts ? { [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: nextAttempts } : {}),
+      runState: nextRunState,
+      runResults: [],
+      autoApplyQueue: { active: false },
+      autoApplySearchQueue: { active: false },
+      autoApplyPendingSubmit: null
+    });
+    return {
+      ok: true,
+      claimed: true,
+      owned: true,
+      runId: requestedRunId,
+      ownerId,
+      recoveredOrphan,
+      recoveredTerminalAttempt
+    };
+  });
+}
+
+async function checkAutoApplyRunOwnership(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const expectedOwnerId = normalizeRunOwnerId(message?.ownerId);
+    const senderOwnerId = normalizeRunOwnerId(sender?.tab?.id);
+    if (!runId || !senderOwnerId || (expectedOwnerId && expectedOwnerId !== senderOwnerId)) {
+      return { ok: true, owned: false };
+    }
+    const { [AUTO_APPLY_RUN_LEASE_KEY]: lease } = await storageGet([AUTO_APPLY_RUN_LEASE_KEY]);
+    const owned = Boolean(
+      lease?.active === true &&
+      normalizeRunId(lease.runId) === runId &&
+      normalizeRunOwnerId(lease.ownerId) === senderOwnerId
+    );
+    return {
+      ok: true,
+      owned,
+      runId: normalizeRunId(lease?.runId),
+      ownerId: normalizeRunOwnerId(lease?.ownerId)
+    };
+  });
+}
+
+async function resumeAutoApplyRun(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const expectedOwnerId = normalizeRunOwnerId(message?.ownerId);
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (lease?.active === true) {
+      const owned = normalizeRunId(lease.runId) === runId && normalizeRunOwnerId(lease.ownerId) === ownerId;
+      return { ok: true, resumed: owned, owned, runId: normalizeRunId(lease.runId), ownerId: normalizeRunOwnerId(lease.ownerId) };
+    }
+    const queues = [stored.autoApplyQueue, stored.autoApplySearchQueue];
+    const queueProof = queues.find((queue) => (
+      queue?.active === true &&
+      normalizeRunId(queue.runId) === runId &&
+      normalizeRunOwnerId(queue.ownerId) === ownerId &&
+      (!expectedOwnerId || expectedOwnerId === ownerId)
+    ));
+    if (!runId || !ownerId || !queueProof) {
+      return { ok: true, resumed: false, owned: false };
+    }
+    const now = nowIso();
+    await storageSet({
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        active: true,
+        runId,
+        ownerId,
+        claimedAt: now,
+        updatedAt: now,
+        resumed: true
+      }
+    });
+    return { ok: true, resumed: true, owned: true, runId, ownerId };
+  });
+}
+
+function isOwnedRunLease(lease, message, sender) {
+  return Boolean(
+    lease?.active === true &&
+    normalizeRunId(lease.runId) === normalizeRunId(message?.runId) &&
+    normalizeRunOwnerId(lease.ownerId) === normalizeRunOwnerId(sender?.tab?.id) &&
+    (!message?.ownerId || normalizeRunOwnerId(message.ownerId) === normalizeRunOwnerId(sender?.tab?.id))
+  );
+}
+
+async function mutateOwnedAutoApplyRun(message, sender, mutation) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([AUTO_APPLY_RUN_LEASE_KEY]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (!isOwnedRunLease(lease, message, sender)) {
+      return { ok: false, ignored: true, reason: 'run_not_owned' };
+    }
+    const result = await mutation(lease);
+    const refreshed = await storageGet([AUTO_APPLY_RUN_LEASE_KEY]);
+    if (isOwnedRunLease(refreshed[AUTO_APPLY_RUN_LEASE_KEY], message, sender)) {
+      await storageSet({
+        [AUTO_APPLY_RUN_LEASE_KEY]: {
+          ...refreshed[AUTO_APPLY_RUN_LEASE_KEY],
+          updatedAt: nowIso()
+        }
+      });
+    }
+    return { ok: true, ...(result || {}) };
+  });
+}
+
+async function mutateUnscopedStateWithoutActiveRun(mutation) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([AUTO_APPLY_RUN_LEASE_KEY]);
+    if (stored[AUTO_APPLY_RUN_LEASE_KEY]?.active === true) {
+      return { ok: false, ignored: true, reason: 'active_run_requires_scope' };
+    }
+    await mutation();
+    return { ok: true };
+  });
+}
+
+async function writeOwnedAutoApplyState(message, sender) {
+  return mutateOwnedAutoApplyRun(message, sender, async () => {
+    const patch = Object.fromEntries(Object.entries(message?.patch || {})
+      .filter(([key]) => OWNED_AUTO_APPLY_STATE_KEYS.has(key)));
+    if (Object.keys(patch).length === 0) {
+      return { written: false, reason: 'empty_patch' };
+    }
+    await storageSet(patch);
+    return { written: true };
+  });
+}
+
+async function recordOwnedDailyApplication(message, sender) {
+  return mutateOwnedAutoApplyRun(message, sender, async () => {
+    const stored = await storageGet([DAILY_APPLICATION_LEDGER_KEY]);
+    const { ledger, added } = updateDailyApplicationLedger(
+      stored[DAILY_APPLICATION_LEDGER_KEY],
+      message?.vacancyId,
+      message?.kind,
+      message?.counterBaseline
+    );
+    await storageSet({ [DAILY_APPLICATION_LEDGER_KEY]: ledger });
+    return { recorded: true, ledger, added };
+  });
+}
+
+async function registerAutoApplyResponseAttempt(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const attempt = message?.attempt || {};
+    const runId = normalizeRunId(message?.runId || attempt.runId);
+    const vacancyId = String(attempt.vacancyId || '').trim();
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const responseVacancyId = (() => {
+      try {
+        return new URL(String(attempt.responseUrl || '')).searchParams.get('vacancyId') || '';
+      } catch {
+        return '';
+      }
+    })();
+    const sourceIsSearch = (() => {
+      try {
+        const source = new URL(String(attempt.sourceUrl || ''));
+        return /(^|\.)hh\.ru$/.test(source.hostname) && source.pathname === '/search/vacancy';
+      } catch {
+        return false;
+      }
+    })();
+    const queue = message?.queue || {};
+    const item = message?.item || {};
+    const ownership = await storageGet([AUTO_APPLY_RUN_LEASE_KEY, AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]);
+    const lease = ownership[AUTO_APPLY_RUN_LEASE_KEY];
+    const valid = Boolean(
+      runId && vacancyId && ownerId &&
+      lease?.active === true && normalizeRunId(lease.runId) === runId && normalizeRunOwnerId(lease.ownerId) === ownerId &&
+      attempt.kind === 'direct_response_navigation' &&
+      sourceIsSearch && String(queue.sourceUrl || '') === String(attempt.sourceUrl || '') &&
+      normalizeRunId(queue.runId) === runId &&
+      (!queue.ownerId || normalizeRunOwnerId(queue.ownerId) === ownerId) &&
+      String(item.vacancyId || '') === vacancyId &&
+      responseVacancyId === vacancyId &&
+      attempt.targetResponseControlEnabledBefore === true &&
+      attempt.alreadyAppliedBefore === false &&
+      isFreshTimestamp(attempt.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)
+    );
+    if (!valid) return { ok: true, registered: false, reason: 'invalid_attempt_provenance' };
+    const key = responseAttemptStorageKey(runId, vacancyId, ownerId);
+    const attempts = { ...(ownership[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
+    const registeredAt = nowIso();
+    for (const [candidateKey, candidate] of Object.entries(attempts)) {
+      if (
+        candidateKey !== key &&
+        normalizeRunId(candidate?.runId) === runId &&
+        normalizeRunOwnerId(candidate?.ownerId) === ownerId &&
+        !candidate?.finalizedAt &&
+        !candidate?.cancelledAt
+      ) {
+        attempts[candidateKey] = { ...candidate, cancelledAt: registeredAt, cancelReason: 'superseded', supersededBy: key };
+      }
+    }
+    attempts[key] = {
+      ...attempt,
+      key,
+      runId,
+      vacancyId,
+      ownerId,
+      finalizedAt: '',
+      cancelledAt: '',
+      queue: message.queue || null,
+      item: message.item || null
+    };
+    const retained = Object.fromEntries(Object.entries(attempts)
+      .filter(([, value]) => isFreshTimestamp(value?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS))
+      .slice(-40));
+    await storageSet({ [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: retained });
+    return { ok: true, registered: true, attempt: retained[key] };
+  });
+}
+
+async function getAutoApplyResponseAttempt(message, sender, { consume = false } = {}) {
+  return enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const vacancyId = String(message?.vacancyId || '').trim();
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    if (!vacancyId || !ownerId) return { ok: true, found: false, status: 'missing' };
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyPendingSubmit'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (
+      lease?.active !== true ||
+      normalizeRunOwnerId(lease.ownerId) !== ownerId ||
+      (runId && normalizeRunId(lease.runId) !== runId)
+    ) {
+      return { ok: false, found: false, status: 'run_not_owned' };
+    }
+    const effectiveRunId = runId || normalizeRunId(lease.runId);
+    const attempts = { ...(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
+    const candidates = Object.values(attempts).filter((attempt) => (
+      String(attempt?.vacancyId || '') === vacancyId &&
+      normalizeRunId(attempt?.runId) === effectiveRunId &&
+      normalizeRunOwnerId(attempt?.ownerId) === ownerId &&
+      !attempt?.cancelledAt
+    ));
+    const attempt = candidates.sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')))[0];
+    if (!attempt) return { ok: true, found: false, status: 'missing' };
+    if (!isFreshTimestamp(attempt.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) {
+      return { ok: true, found: true, status: 'stale' };
+    }
+    if (attempt.finalizedAt) {
+      return { ok: true, found: true, status: 'finalized', attempt };
+    }
+    if (consume) {
+      attempts[attempt.key] = { ...attempt, finalizedAt: nowIso() };
+      await storageSet({ [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts });
+      return { ok: true, found: true, status: 'consumed', consumed: true, attempt: attempts[attempt.key] };
+    }
+    return { ok: true, found: true, status: 'ready', attempt };
+  });
+}
+
+async function cancelAutoApplyResponseAttempt(message, sender) {
+  return mutateOwnedAutoApplyRun(message, sender, async () => {
+    const runId = normalizeRunId(message?.runId);
+    const vacancyId = String(message?.vacancyId || '').trim();
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const stored = await storageGet([AUTO_APPLY_RESPONSE_ATTEMPTS_KEY, 'autoApplyQueue']);
+    const attempts = { ...(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
+    const key = responseAttemptStorageKey(runId, vacancyId, ownerId);
+    const attempt = attempts[key];
+    if (!attempt) return { cancelled: false, status: 'missing' };
+    if (attempt.finalizedAt) return { cancelled: false, status: 'finalized' };
+    const cancelledAt = nowIso();
+    attempts[key] = {
+      ...attempt,
+      cancelledAt,
+      cancelReason: String(message?.reason || 'cancelled').slice(0, 120)
+    };
+    const queue = stored.autoApplyQueue;
+    const queueAttemptMatches = normalizeRunId(queue?.runId) === runId &&
+      String(queue?.responseAttempt?.vacancyId || '') === vacancyId;
+    await storageSet({
+      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+      ...(queueAttemptMatches ? { autoApplyQueue: { ...queue, responseAttempt: null } } : {})
+    });
+    return { cancelled: true, status: 'cancelled' };
+  });
+}
+
+async function finalizeAutoApplyResponseAttempt(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const vacancyId = String(message?.vacancyId || '').trim();
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      DAILY_APPLICATION_LEDGER_KEY,
+      'runResults',
+      'runState',
+      'autoApplyQueue',
+      'autoApplyPendingSubmit'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (!isOwnedRunLease(lease, message, sender) || !runId || !vacancyId || !ownerId) {
+      return { ok: false, finalized: false, reason: 'run_not_owned' };
+    }
+    const key = responseAttemptStorageKey(runId, vacancyId, ownerId);
+    const attempts = { ...(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
+    const attempt = attempts[key];
+    if (!attempt) return { ok: true, finalized: false, status: 'missing' };
+    if (attempt.cancelledAt) return { ok: true, finalized: false, status: 'cancelled' };
+    if (attempt.finalizedAt) {
+      return { ok: true, finalized: false, alreadyFinalized: true, status: 'finalized', attempt };
+    }
+    if (!isFreshTimestamp(attempt.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) {
+      return { ok: true, finalized: false, status: 'stale' };
+    }
+    const result = {
+      ...(message?.result || {}),
+      vacancyId,
+      timestamp: message?.result?.timestamp || nowIso()
+    };
+    const { ledger } = updateDailyApplicationLedger(
+      stored[DAILY_APPLICATION_LEDGER_KEY],
+      vacancyId,
+      'submitted',
+      message?.counters?.applied
+    );
+    const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+    const resultExists = runResults.some((entry) => (
+      String(entry?.vacancyId || '') === vacancyId &&
+      String(entry?.status || '') === String(result.status || '')
+    ));
+    const nextResults = resultExists ? runResults : [...runResults.slice(-199), result];
+    const counters = {
+      found: 0,
+      processed: 0,
+      applied: 0,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0,
+      ...(message?.counters || {})
+    };
+    counters.applied = Math.max(Number(counters.applied) || 0, ledger.newSubmitted);
+    counters.alreadyApplied = Math.max(Number(counters.alreadyApplied) || 0, ledger.alreadyApplied);
+    counters.processed = Math.max(Number(counters.processed) || 0, nextResults.length);
+    counters.found = Math.max(Number(counters.found) || 0, counters.processed);
+    const finalizedAt = nowIso();
+    attempts[key] = { ...attempt, finalizedAt, resultStatus: result.status || '' };
+    const queue = stored.autoApplyQueue;
+    const queueAttemptMatches = normalizeRunId(queue?.runId) === runId &&
+      String(queue?.responseAttempt?.vacancyId || '') === vacancyId;
+    const runState = {
+      ...DEFAULTS.runState,
+      ...(stored.runState || {}),
+      ...counters,
+      state: String(stored.runState?.state || 'applying'),
+      currentAction: 'Отклик отправлен',
+      lastError: '',
+      updatedAt: finalizedAt
+    };
+    await storageSet({
+      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+      [DAILY_APPLICATION_LEDGER_KEY]: ledger,
+      runResults: nextResults,
+      runState,
+      ...(queueAttemptMatches ? { autoApplyQueue: { ...queue, responseAttempt: null, counters } } : {}),
+      ...(normalizeRunId(stored.autoApplyPendingSubmit?.runId) === runId &&
+        String(stored.autoApplyPendingSubmit?.item?.vacancyId || '') === vacancyId
+        ? { autoApplyPendingSubmit: null }
+        : {})
+    });
+    return { ok: true, finalized: true, status: 'finalized', attempt: attempts[key], ledger, counters, result };
+  });
+}
+
+async function finalizeAutoApplyPendingSubmit(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const vacancyId = String(message?.vacancyId || '').trim();
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      DAILY_APPLICATION_LEDGER_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'runResults',
+      'runState'
+    ]);
+    if (!isOwnedRunLease(stored[AUTO_APPLY_RUN_LEASE_KEY], message, sender)) {
+      return { ok: false, finalized: false, reason: 'run_not_owned' };
+    }
+    const pending = stored.autoApplyPendingSubmit;
+    const resultStatus = String(message?.result?.status || pending?.status || 'applied');
+    const existingResult = (stored.runResults || []).find((entry) => (
+      String(entry?.vacancyId || '') === vacancyId && String(entry?.status || '') === resultStatus
+    ));
+    if (!pending?.item) {
+      return existingResult
+        ? { ok: true, finalized: false, alreadyFinalized: true, result: existingResult }
+        : { ok: true, finalized: false, status: 'missing' };
+    }
+    if (
+      normalizeRunId(pending.runId) !== runId ||
+      normalizeRunOwnerId(pending.ownerId) !== ownerId ||
+      String(pending.item.vacancyId || '') !== vacancyId
+    ) {
+      return { ok: false, finalized: false, reason: 'pending_submit_not_owned' };
+    }
+    const result = {
+      ...pending.item,
+      ...(message?.result || {}),
+      vacancyId,
+      status: resultStatus,
+      timestamp: message?.result?.timestamp || nowIso()
+    };
+    const { ledger } = updateDailyApplicationLedger(
+      stored[DAILY_APPLICATION_LEDGER_KEY],
+      vacancyId,
+      'submitted',
+      message?.counters?.applied
+    );
+    const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+    const nextResults = existingResult ? runResults : [...runResults.slice(-199), result];
+    const counters = {
+      found: 0,
+      processed: 0,
+      applied: 0,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0,
+      ...(pending.counters || {}),
+      ...(message?.counters || {})
+    };
+    counters.applied = Math.max(Number(counters.applied) || 0, ledger.newSubmitted);
+    counters.alreadyApplied = Math.max(Number(counters.alreadyApplied) || 0, ledger.alreadyApplied);
+    counters.processed = Math.max(Number(counters.processed) || 0, nextResults.length);
+    counters.found = Math.max(Number(counters.found) || 0, counters.processed);
+    const finalizedAt = nowIso();
+    const queue = stored.autoApplyQueue;
+    const queueMatches = normalizeRunId(queue?.runId) === runId;
+    await storageSet({
+      [DAILY_APPLICATION_LEDGER_KEY]: ledger,
+      autoApplyPendingSubmit: null,
+      runResults: nextResults,
+      runState: {
+        ...DEFAULTS.runState,
+        ...(stored.runState || {}),
+        ...counters,
+        runId,
+        ownerId,
+        updatedAt: finalizedAt
+      },
+      ...(queueMatches ? { autoApplyQueue: { ...queue, counters } } : {})
+    });
+    return { ok: true, finalized: true, ledger, counters, result };
+  });
+}
+
+async function releaseAutoApplyRunLeaseIfTerminal(message, sender) {
+  const state = String(message?.patch?.state || '');
+  if (!['complete', 'idle', 'dry_run_complete', 'stopped', 'paused', 'error'].includes(state)) return;
+  await enqueueAutoApplyOwnership(async () => {
+    const runId = normalizeRunId(message?.runId);
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyPendingSubmit'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (normalizeRunId(lease?.runId) !== runId || normalizeRunOwnerId(lease?.ownerId) !== ownerId) return;
+    const ownedUnresolvedAttempts = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).filter((attempt) => (
+      normalizeRunId(attempt?.runId) === runId &&
+      normalizeRunOwnerId(attempt?.ownerId) === ownerId &&
+      !attempt?.finalizedAt &&
+      !attempt?.cancelledAt
+    ));
+    const hasFreshUnresolvedAttempt = ownedUnresolvedAttempts.some((attempt) => (
+      isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)
+    ));
+    const senderUrl = String(sender?.tab?.url || '');
+    const senderVacancyId = getVacancyIdFromUrl(senderUrl);
+    const hasStaleAttemptAtMatchingDestination = ownedUnresolvedAttempts.some((attempt) => {
+      if (isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) return false;
+      const attemptVacancyId = String(attempt?.vacancyId || '');
+      const isMatchingVacancyDestination = senderVacancyId && senderVacancyId === attemptVacancyId &&
+        (isHhResponseFormUrl(senderUrl) || isHhVacancyDetailUrl(senderUrl));
+      return senderUrl === String(attempt?.responseUrl || '') || isMatchingVacancyDestination;
+    });
+    const hasOwnedPendingSubmit = normalizeRunId(stored.autoApplyPendingSubmit?.runId) === runId &&
+      normalizeRunOwnerId(stored.autoApplyPendingSubmit?.ownerId) === ownerId;
+    if (
+      ['stopped', 'paused'].includes(state) &&
+      (hasFreshUnresolvedAttempt || hasStaleAttemptAtMatchingDestination || hasOwnedPendingSubmit)
+    ) {
+      return;
+    }
+    const releasedAt = nowIso();
+    const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
+      if (
+        normalizeRunId(attempt?.runId) === runId &&
+        !attempt?.finalizedAt &&
+        !attempt?.cancelledAt
+      ) {
+        return [key, { ...attempt, cancelledAt: releasedAt, cancelReason: `run_${state}` }];
+      }
+      return [key, attempt];
+    }));
+    await storageSet({
+      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...lease,
+        active: false,
+        updatedAt: releasedAt,
+        releasedState: state
+      }
+    });
+  });
 }
 
 function getMoscowStatusDate(now = new Date()) {
@@ -2619,6 +3390,18 @@ function isAutoApplyStartUrl(value) {
   }
 }
 
+function isAutoApplySearchUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      url.pathname === '/search/vacancy' &&
+      url.search.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function isSafeHhStatusUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -2644,9 +3427,20 @@ function isHhResponseFormUrl(value) {
 function getVacancyIdFromUrl(value) {
   try {
     const url = new URL(String(value || ''));
-    return url.searchParams.get('vacancyId') || '';
+    return url.searchParams.get('vacancyId') || url.pathname.match(/^\/vacancy\/(\d+)/)?.[1] || '';
   } catch {
     return '';
+  }
+}
+
+function isHhVacancyDetailUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      /^\/vacancy\/\d+/.test(url.pathname);
+  } catch {
+    return false;
   }
 }
 
@@ -2662,83 +3456,101 @@ function isResponseFormProcessingState(runState = {}) {
   return RESPONSE_FORM_PROCESSING_STATES.has(runState.state);
 }
 
-async function recoverStalledResponseNavigation(tabId, expectedUrl, scheduledAt) {
-  const { autoApplyQueue, autoApplySearchQueue, runState = DEFAULTS.runState } = await storageGet([
-    'autoApplyQueue',
-    'autoApplySearchQueue',
-    'runState'
-  ]);
-  if (!autoApplyQueue?.active || !autoApplyQueue.returnToSearch || !isAutoApplyStartUrl(autoApplyQueue.sourceUrl)) {
-    return;
-  }
-
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab?.id || tab.url !== expectedUrl || !isHhResponseFormUrl(tab.url)) {
-    return;
-  }
-
-  if (isResponseFormProcessingState(runState)) {
-    return;
-  }
-
-  const stateUpdatedAt = Date.parse(runState.updatedAt || '');
-  if (Number.isFinite(stateUpdatedAt) && stateUpdatedAt > scheduledAt) {
-    return;
-  }
-
-  const counters = {
-    found: 0,
-    processed: 0,
-    applied: 0,
-    skipped: 0,
-    errors: 0,
-    ...(autoApplyQueue.counters || autoApplySearchQueue?.counters || {})
-  };
-  counters.processed = Math.max(Number(counters.processed) || 0, Number(runState.processed) || 0) + 1;
-  counters.applied = Math.max(Number(counters.applied) || 0, Number(runState.applied) || 0);
-  counters.skipped = Math.max(Number(counters.skipped) || 0, Number(runState.skipped) || 0) + 1;
-  counters.errors = Math.max(Number(counters.errors) || 0, Number(runState.errors) || 0);
-  counters.found = Math.max(Number(counters.found) || 0, Number(runState.found) || 0);
-
-  const item = autoApplyQueue.items?.[autoApplyQueue.index || 0] || {};
-  const vacancyId = item.vacancyId || getVacancyIdFromUrl(expectedUrl);
-  const processedVacancyIds = [
-    ...new Set([
-      ...(autoApplyQueue.processedVacancyIds || []),
-      ...(autoApplySearchQueue?.processedVacancyIds || []),
+async function recoverStalledResponseNavigation(watchdog) {
+  let recovery = null;
+  await enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    const tabId = normalizeRunOwnerId(watchdog?.tabId);
+    const runId = normalizeRunId(watchdog?.runId);
+    const vacancyId = String(watchdog?.vacancyId || '');
+    if (
+      lease?.active !== true ||
+      normalizeRunId(lease.runId) !== runId ||
+      normalizeRunOwnerId(lease.ownerId) !== tabId ||
+      normalizeRunOwnerId(watchdog?.ownerId) !== tabId
+    ) return;
+    const queue = stored.autoApplyQueue;
+    const searchQueue = stored.autoApplySearchQueue;
+    const item = queue?.items?.[queue.index || 0] || {};
+    const attemptKey = responseAttemptStorageKey(runId, vacancyId, tabId);
+    const attempt = stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]?.[attemptKey];
+    if (
+      !queue?.active || normalizeRunId(queue.runId) !== runId ||
+      String(item.vacancyId || '') !== vacancyId ||
+      !attempt || attempt.finalizedAt || attempt.cancelledAt ||
+      String(attempt.responseUrl || '') !== String(watchdog.url || '') ||
+      !isAutoApplySearchUrl(queue.sourceUrl)
+    ) return;
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id || tab.url !== watchdog.url || !isHhResponseFormUrl(tab.url)) return;
+    const runState = stored.runState || DEFAULTS.runState;
+    if (normalizeRunId(runState.runId) !== runId || isResponseFormProcessingState(runState)) return;
+    const stateUpdatedAt = Date.parse(runState.updatedAt || '');
+    if (Number.isFinite(stateUpdatedAt) && stateUpdatedAt > Number(watchdog.scheduledAt || 0)) return;
+    const counters = {
+      found: 0, processed: 0, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0,
+      ...(queue.counters || searchQueue?.counters || {})
+    };
+    counters.processed = Math.max(Number(counters.processed) || 0, Number(runState.processed) || 0);
+    counters.skipped = Math.max(Number(counters.skipped) || 0, Number(runState.skipped) || 0) + 1;
+    const error = 'Пропущено: страница отклика HH не загрузилась вовремя.';
+    const result = {
+      index: item.index || Number(queue.index || 0) + 1,
+      vacancyId,
+      title: item.title || '',
+      url: item.url || watchdog.url,
+      status: 'skipped_response_page_timeout',
+      coverLetterUsed: false,
+      testDetected: Boolean(item.testDetected),
+      error,
+      timestamp: nowIso()
+    };
+    const attempts = { ...(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
+    attempts[attemptKey] = { ...attempt, cancelledAt: result.timestamp, cancelReason: 'response_page_timeout' };
+    const processedVacancyIds = [...new Set([
+      ...(queue.processedVacancyIds || []),
+      ...(searchQueue?.processedVacancyIds || []),
       vacancyId
-    ].filter(Boolean))
-  ];
-  const message = 'Пропущено: страница отклика HH не загрузилась вовремя.';
-  await appendRunResult({
-    index: item.index || Number(autoApplyQueue.index || 0) + 1,
-    vacancyId,
-    title: item.title || '',
-    url: item.url || expectedUrl,
-    status: 'skipped_response_page_timeout',
-    coverLetterUsed: false,
-    testDetected: Boolean(item.testDetected),
-    error: message
-  });
-  await storageSet({
-    autoApplyQueue: { ...autoApplyQueue, active: false, recoveredFromUrl: expectedUrl, counters },
-    autoApplySearchQueue: {
+    ].filter(Boolean))];
+    const nextSearchQueue = {
       active: true,
-      runId: autoApplyQueue.runId || autoApplySearchQueue?.runId || '',
-      limit: autoApplyQueue.limit || autoApplySearchQueue?.limit || 20,
+      runId,
+      ownerId: tabId,
+      limit: queue.limit || searchQueue?.limit || 20,
       counters,
-      config: autoApplyQueue.config || autoApplySearchQueue?.config,
+      config: queue.config || searchQueue?.config,
       processedVacancyIds
-    }
+    };
+    await storageSet({
+      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+      runResults: [...(stored.runResults || []).slice(-199), result],
+      autoApplyQueue: { ...queue, active: false, responseAttempt: null, recoveredFromUrl: watchdog.url, counters },
+      autoApplySearchQueue: nextSearchQueue,
+      runState: {
+        ...DEFAULTS.runState,
+        ...runState,
+        ...counters,
+        state: 'applying',
+        runId,
+        ownerId: tabId,
+        currentAction: 'Возвращаюсь на страницу поиска HH',
+        lastError: error,
+        updatedAt: result.timestamp
+      }
+    });
+    recovery = { tabId, vacancyId, sourceUrl: queue.sourceUrl, responseUrl: watchdog.url };
   });
-  await setRunState({ state: 'applying', ...counters, currentAction: 'Возвращаюсь на страницу поиска HH', lastError: message });
-  await appendAgentLog('response_navigation_watchdog_recovered', {
-    tabId,
-    vacancyId,
-    responseUrl: expectedUrl,
-    sourceUrl: autoApplyQueue.sourceUrl
-  });
-  await chrome.tabs.update(tabId, { url: autoApplyQueue.sourceUrl }).catch(() => {});
+  if (!recovery) return;
+  await appendAgentLog('response_navigation_watchdog_recovered', recovery);
+  await chrome.tabs.update(recovery.tabId, { url: recovery.sourceUrl }).catch(() => {});
 }
 
 async function handleResponseNavigationWatchdogAlarm() {
@@ -2746,11 +3558,7 @@ async function handleResponseNavigationWatchdogAlarm() {
   if (!responseNavigationWatchdog?.tabId || !responseNavigationWatchdog?.url) return;
   const handledWatchdog = { ...responseNavigationWatchdog };
   try {
-    await recoverStalledResponseNavigation(
-      handledWatchdog.tabId,
-      handledWatchdog.url,
-      Number(handledWatchdog.scheduledAt) || 0
-    );
+    await recoverStalledResponseNavigation(handledWatchdog);
   } finally {
     const { responseNavigationWatchdog: currentWatchdog = null } = await storageGet(['responseNavigationWatchdog']);
     if (
@@ -2780,7 +3588,30 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
   if (!tabId || !isHhResponseFormUrl(url)) return;
   const scheduledAt = Date.now();
   try {
-    await storageSet({ responseNavigationWatchdog: { tabId, url, scheduledAt } });
+    const scheduled = await enqueueAutoApplyOwnership(async () => {
+      const stored = await storageGet([
+        AUTO_APPLY_RUN_LEASE_KEY,
+        AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+        'autoApplyQueue'
+      ]);
+      const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+      if (lease?.active !== true || normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(tabId)) return null;
+      const vacancyId = getVacancyIdFromUrl(url);
+      const runId = normalizeRunId(lease.runId);
+      const key = responseAttemptStorageKey(runId, vacancyId, tabId);
+      const attempt = stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]?.[key];
+      const queue = stored.autoApplyQueue;
+      if (
+        !vacancyId || !attempt || attempt.finalizedAt || attempt.cancelledAt ||
+        String(attempt.responseUrl || '') !== String(url) ||
+        normalizeRunId(queue?.runId) !== runId ||
+        String(queue?.items?.[queue.index || 0]?.vacancyId || '') !== vacancyId
+      ) return null;
+      const watchdog = { tabId, ownerId: tabId, runId, vacancyId, url, scheduledAt };
+      await storageSet({ responseNavigationWatchdog: watchdog });
+      return watchdog;
+    });
+    if (!scheduled) return;
   } catch (error) {
     appendAgentLog('response_navigation_watchdog_error', {
       tabId,
@@ -2817,7 +3648,7 @@ async function startAutoApplyFromActiveTab() {
     'employerQuestionPrompt'
   ]));
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !isAutoApplyStartUrl(tab.url)) {
+  if (!tab?.id || !isAutoApplySearchUrl(tab.url)) {
     throw new Error('Перед запуском откликов откройте страницу поиска вакансий или форму отклика на hh.ru.');
   }
   await appendAgentLog('command_start_auto_apply', { tabId: tab.id, url: tab.url });
@@ -2869,6 +3700,37 @@ chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   });
 });
 
+chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+  enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([AUTO_APPLY_RUN_LEASE_KEY, AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (lease?.active !== true || normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(tabId)) return;
+    const closedAt = nowIso();
+    const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
+      if (
+        normalizeRunId(attempt?.runId) === normalizeRunId(lease.runId) &&
+        normalizeRunOwnerId(attempt?.ownerId) === normalizeRunOwnerId(tabId) &&
+        !attempt?.finalizedAt &&
+        !attempt?.cancelledAt
+      ) {
+        return [key, { ...attempt, cancelledAt: closedAt, cancelReason: 'owner_tab_closed' }];
+      }
+      return [key, attempt];
+    }));
+    await storageSet({
+      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...lease,
+        active: false,
+        updatedAt: closedAt,
+        releasedState: 'owner_tab_closed'
+      }
+    });
+  }).catch((error) => {
+    appendAgentLog('auto_apply_owner_tab_close_error', { tabId, error: localizeError(error) }).catch(() => {});
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.type === 'GET_SAFE_STATUS_SNAPSHOT') {
@@ -2898,6 +3760,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     await ensureDefaults();
 
     switch (message?.type) {
+      case 'CLAIM_AUTO_APPLY_RUN': {
+        sendResponse(await claimAutoApplyRun(message, sender));
+        break;
+      }
+      case 'CHECK_AUTO_APPLY_RUN_OWNERSHIP': {
+        sendResponse(await checkAutoApplyRunOwnership(message, sender));
+        break;
+      }
+      case 'RESUME_AUTO_APPLY_RUN': {
+        sendResponse(await resumeAutoApplyRun(message, sender));
+        break;
+      }
+      case 'WRITE_AUTO_APPLY_STATE': {
+        sendResponse(await writeOwnedAutoApplyState(message, sender));
+        break;
+      }
+      case 'RECORD_DAILY_APPLICATION': {
+        sendResponse(await recordOwnedDailyApplication(message, sender));
+        break;
+      }
+      case 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT': {
+        sendResponse(await registerAutoApplyResponseAttempt(message, sender));
+        break;
+      }
+      case 'GET_AUTO_APPLY_RESPONSE_ATTEMPT': {
+        sendResponse(await getAutoApplyResponseAttempt(message, sender));
+        break;
+      }
+      case 'CONSUME_AUTO_APPLY_RESPONSE_ATTEMPT': {
+        sendResponse({ ok: false, consumed: false, status: 'unsupported' });
+        break;
+      }
+      case 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT': {
+        sendResponse(await cancelAutoApplyResponseAttempt(message, sender));
+        break;
+      }
+      case 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT': {
+        sendResponse(await finalizeAutoApplyResponseAttempt(message, sender));
+        break;
+      }
+      case 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT': {
+        sendResponse(await finalizeAutoApplyPendingSubmit(message, sender));
+        break;
+      }
       case 'GET_STATUS': {
         const state = await storageGet(['runState', 'runResults']);
         sendResponse({ ok: true, ...state });
@@ -2922,13 +3828,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'SET_RUN_STATE': {
-        await setRunState(message.patch || {});
-        sendResponse({ ok: true });
+        if (message.runId) {
+          const result = await mutateOwnedAutoApplyRun(message, sender, async () => {
+            await setRunState(message.patch || {});
+            return { written: true };
+          });
+          if (!result.ok) {
+            sendResponse(result);
+            break;
+          }
+          await releaseAutoApplyRunLeaseIfTerminal(message, sender);
+          sendResponse(result);
+          break;
+        }
+        sendResponse(await mutateUnscopedStateWithoutActiveRun(() => setRunState(message.patch || {})));
         break;
       }
       case 'APPEND_RUN_RESULT': {
-        await appendRunResult(message.item || {});
-        sendResponse({ ok: true });
+        if (message.runId) {
+          const result = await mutateOwnedAutoApplyRun(message, sender, async () => {
+            if (message.ensure === true) {
+              const { runResults = [] } = await storageGet(['runResults']);
+              const exists = runResults.some((entry) => (
+                String(entry?.vacancyId || '') === String(message.item?.vacancyId || '') &&
+                String(entry?.status || '') === String(message.item?.status || '') &&
+                (!message.item?.timestamp || entry?.timestamp === message.item.timestamp)
+              ));
+              if (exists) return { appended: false, exists: true };
+            }
+            await appendRunResult(message.item || {});
+            return { appended: true };
+          });
+          if (!result.ok) {
+            sendResponse(result);
+            break;
+          }
+          sendResponse(result);
+          break;
+        }
+        sendResponse(await mutateUnscopedStateWithoutActiveRun(() => appendRunResult(message.item || {})));
         break;
       }
       case 'NAVIGATE_TAB': {

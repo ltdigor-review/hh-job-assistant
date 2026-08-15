@@ -852,6 +852,387 @@ test('background clears stale current action when a run completes', async () => 
   assert.equal(localData.runState.lastError, '');
 });
 
+test('background owns one auto-apply run and keeps direct-navigation provenance across queue replacement', async () => {
+  let listener = null;
+  let removedListener = null;
+  const localData = { agentDebugLogsEnabled: false };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (keys == null) return { ...localData };
+          return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+        },
+        async set(value) {
+          Object.assign(localData, value);
+        },
+        async remove(keys) {
+          for (const key of Array.isArray(keys) ? keys : [keys]) delete localData[key];
+        }
+      }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: {
+      async get(tabId) { return { id: tabId, url: 'https://hh.ru/search/vacancy?text=java' }; },
+      onUpdated: { addListener() {} },
+      onRemoved: { addListener(fn) { removedListener = fn; } }
+    },
+    scripting: {}
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const send = (message, tabId, url = 'https://hh.ru/search/vacancy?text=java') => new Promise((resolve) => {
+    const stayedAsync = listener(message, { tab: { id: tabId, url } }, resolve);
+    assert.equal(stayedAsync, true);
+  });
+
+  const claimA = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-a' }, 11);
+  assert.equal(claimA.claimed, true);
+  assert.equal(claimA.ownerId, 11);
+  const racingClaimB = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-b-race' }, 22);
+  assert.equal(racingClaimB.claimed, false);
+  assert.equal(racingClaimB.runId, 'run-a');
+  assert.equal(localData.runState.runId, 'run-a');
+  assert.equal(localData.runState.ownerId, 11);
+  const beforeReadOnlyCheck = structuredClone(localData);
+  const readOnlyCheck = await send({ type: 'CHECK_AUTO_APPLY_RUN_OWNERSHIP', runId: 'run-a', ownerId: 11 }, 11);
+  assert.equal(readOnlyCheck.owned, true);
+  assert.deepEqual(localData, beforeReadOnlyCheck);
+  const stateBeforeLegacyWrite = structuredClone(localData.runState);
+  const deniedLegacyState = await send({ type: 'SET_RUN_STATE', patch: { state: 'error', processed: 999 } }, 22);
+  assert.equal(deniedLegacyState.ignored, true);
+  assert.deepEqual(localData.runState, stateBeforeLegacyWrite);
+  const deniedLegacyResult = await send({
+    type: 'APPEND_RUN_RESULT',
+    item: { vacancyId: 'legacy-bypass', status: 'applied' }
+  }, 22);
+  assert.equal(deniedLegacyResult.ignored, true);
+  assert.equal((localData.runResults || []).some((item) => item.vacancyId === 'legacy-bypass'), false);
+
+  const attempt = {
+    kind: 'direct_response_navigation',
+    runId: 'run-a',
+    vacancyId: '123',
+    sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+    responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+    startedAt: new Date().toISOString(),
+    targetResponseControlEnabledBefore: true,
+    alreadyAppliedBefore: false
+  };
+  const registered = await send({
+    type: 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    attempt,
+    item: { vacancyId: '123' },
+    queue: {
+      active: true,
+      runId: 'run-a',
+      ownerId: 11,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      index: 0,
+      items: [{ vacancyId: '123' }]
+    }
+  }, 11);
+  assert.equal(registered.registered, true);
+
+  const claimB = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-b' }, 22);
+  assert.equal(claimB.claimed, false);
+  assert.equal(claimB.runId, 'run-a');
+  const deniedMutation = await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-b',
+    ownerId: 22,
+    patch: { state: 'scanning', processed: 99 }
+  }, 22);
+  assert.equal(deniedMutation.ignored, true);
+  assert.notEqual(localData.runState?.processed, 99);
+  localData.runResults = [{ vacancyId: 'existing', status: 'applied' }];
+  const deniedResult = await send({
+    type: 'APPEND_RUN_RESULT',
+    runId: 'run-b',
+    ownerId: 22,
+    item: { vacancyId: 'evil', status: 'applied' }
+  }, 22);
+  assert.equal(deniedResult.ignored, true);
+  assert.deepEqual(localData.runResults.map((item) => item.vacancyId), ['existing']);
+  const deniedStateWrite = await send({
+    type: 'WRITE_AUTO_APPLY_STATE',
+    runId: 'run-b',
+    ownerId: 22,
+    patch: {
+      autoApplyQueue: { active: true, runId: 'run-b' },
+      autoApplySearchQueue: { active: true, runId: 'run-b' },
+      autoApplyPendingSubmit: { runId: 'run-b' },
+      runResults: [{ vacancyId: 'evil-state-write' }]
+    }
+  }, 22);
+  assert.equal(deniedStateWrite.ignored, true);
+  assert.notEqual(localData.autoApplySearchQueue?.runId, 'run-b');
+  assert.notEqual(localData.autoApplyPendingSubmit?.runId, 'run-b');
+  assert.deepEqual(localData.runResults.map((item) => item.vacancyId), ['existing']);
+
+  localData.autoApplyQueue = { active: false, runId: 'run-b' };
+  const recovered = await send({
+    type: 'GET_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    vacancyId: '123'
+  }, 11);
+  assert.equal(recovered.status, 'ready');
+  assert.equal(recovered.attempt.ownerId, 11);
+  const deniedRead = await send({
+    type: 'GET_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    vacancyId: '123'
+  }, 22);
+  assert.equal(deniedRead.status, 'run_not_owned');
+
+  const finalResult = {
+    index: 1,
+    vacancyId: '123',
+    title: 'Java Developer',
+    url: 'https://hh.ru/vacancy/123',
+    status: 'applied_direct_navigation',
+    coverLetterUsed: false,
+    testDetected: false,
+    error: ''
+  };
+  const firstFinalize = await send({
+    type: 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    vacancyId: '123',
+    counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    result: finalResult
+  }, 11, 'https://hh.ru/vacancy/123');
+  const secondFinalize = await send({
+    type: 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    vacancyId: '123',
+    counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    result: finalResult
+  }, 11, 'https://hh.ru/vacancy/123');
+  assert.equal(firstFinalize.finalized, true);
+  assert.equal(secondFinalize.alreadyFinalized, true);
+  assert.equal(localData.runResults.filter((item) => item.vacancyId === '123').length, 1);
+  assert.deepEqual(localData.dailyApplicationLedger.submittedVacancyIds, ['123']);
+
+  localData.autoApplyPendingSubmit = {
+    runId: 'run-a',
+    ownerId: 11,
+    item: { index: 2, vacancyId: '456', title: 'Pending Java', url: 'https://hh.ru/vacancy/456' },
+    counters: { found: 2, processed: 2, applied: 1, alreadyApplied: 0, skipped: 0, errors: 0 },
+    status: 'applied',
+    coverLetterUsed: false,
+    testDetected: false
+  };
+  const pendingFinalizeMessage = {
+    type: 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT',
+    runId: 'run-a',
+    ownerId: 11,
+    vacancyId: '456',
+    counters: localData.autoApplyPendingSubmit.counters,
+    result: { ...localData.autoApplyPendingSubmit.item, status: 'applied', error: '' }
+  };
+  const firstPendingFinalize = await send(pendingFinalizeMessage, 11, 'https://hh.ru/vacancy/456');
+  const committedPendingSnapshot = {
+    ledger: structuredClone(localData.dailyApplicationLedger),
+    results: structuredClone(localData.runResults),
+    pending: localData.autoApplyPendingSubmit
+  };
+  // Retry as if the content script crashed or lost the first successful response.
+  const secondPendingFinalize = await send(pendingFinalizeMessage, 11, 'https://hh.ru/vacancy/456');
+  assert.equal(firstPendingFinalize.finalized, true);
+  assert.equal(secondPendingFinalize.alreadyFinalized, true);
+  assert.equal(localData.autoApplyPendingSubmit, null);
+  assert.equal(localData.runResults.filter((item) => item.vacancyId === '456').length, 1);
+  assert.deepEqual(localData.dailyApplicationLedger.submittedVacancyIds, ['123', '456']);
+  assert.deepEqual(localData.dailyApplicationLedger, committedPendingSnapshot.ledger);
+  assert.deepEqual(localData.runResults, committedPendingSnapshot.results);
+  assert.equal(committedPendingSnapshot.pending, null);
+
+  await send({ type: 'SET_RUN_STATE', runId: 'run-a', ownerId: 11, patch: { state: 'complete' } }, 11);
+  const lateCheck = await send({ type: 'CHECK_AUTO_APPLY_RUN_OWNERSHIP', runId: 'run-a', ownerId: 11 }, 11);
+  assert.equal(lateCheck.owned, false);
+
+  const claimPendingStop = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-pending-stop' }, 11);
+  assert.equal(claimPendingStop.claimed, true);
+  localData.autoApplyPendingSubmit = {
+    runId: 'run-pending-stop',
+    ownerId: 11,
+    item: { index: 1, vacancyId: 'pending-stop', title: 'Pending stop', url: 'https://hh.ru/vacancy/pending-stop' },
+    counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    status: 'applied',
+    coverLetterUsed: false,
+    testDetected: false
+  };
+  await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-pending-stop',
+    ownerId: 11,
+    patch: { state: 'stopped' }
+  }, 11);
+  assert.equal(localData.autoApplyRunLease.active, true);
+  const pendingAfterStop = await send({
+    type: 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT',
+    runId: 'run-pending-stop',
+    ownerId: 11,
+    vacancyId: 'pending-stop',
+    counters: localData.autoApplyPendingSubmit.counters,
+    result: { ...localData.autoApplyPendingSubmit.item, status: 'applied', error: '' }
+  }, 11, 'https://hh.ru/vacancy/pending-stop');
+  assert.equal(pendingAfterStop.finalized, true);
+  assert.equal(localData.autoApplyPendingSubmit, null);
+  assert.equal(localData.runResults.filter((item) => item.vacancyId === 'pending-stop').length, 1);
+  await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-pending-stop',
+    ownerId: 11,
+    patch: { state: 'stopped' }
+  }, 11);
+  assert.equal(localData.autoApplyRunLease.active, false);
+
+  const claimOrphan = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-orphan' }, 11);
+  assert.equal(claimOrphan.claimed, true);
+  const freshSameTabClaim = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-too-soon' }, 11);
+  assert.equal(freshSameTabClaim.claimed, false);
+  const orphanedAt = new Date(Date.now() - 60_000).toISOString();
+  localData.autoApplyRunLease.claimedAt = orphanedAt;
+  localData.autoApplyRunLease.updatedAt = orphanedAt;
+  localData.runState.updatedAt = orphanedAt;
+  localData.runState.currentAction = 'Проверяю страницу HH';
+  const recoveredOrphan = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-recovered' }, 11);
+  assert.equal(recoveredOrphan.claimed, true);
+  assert.equal(recoveredOrphan.recoveredOrphan, true);
+  assert.equal(localData.autoApplyRunLease.runId, 'run-recovered');
+  assert.equal(localData.runState.runId, 'run-recovered');
+  assert.equal(localData.runState.processed, 0);
+  await send({ type: 'SET_RUN_STATE', runId: 'run-recovered', ownerId: 11, patch: { state: 'complete' } }, 11);
+
+  const claimProtectedOrphan = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-protected-orphan' }, 11);
+  assert.equal(claimProtectedOrphan.claimed, true);
+  localData.autoApplyRunLease.claimedAt = orphanedAt;
+  localData.autoApplyRunLease.updatedAt = orphanedAt;
+  localData.runState.updatedAt = orphanedAt;
+  localData.autoApplyPendingSubmit = {
+    runId: 'run-protected-orphan',
+    ownerId: 11,
+    item: { vacancyId: 'protected-side-effect' },
+    counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 }
+  };
+  const deniedProtectedRecovery = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-must-not-replace' }, 11);
+  assert.equal(deniedProtectedRecovery.claimed, false);
+  assert.equal(deniedProtectedRecovery.reason, 'active_run_has_side_effect_provenance');
+  assert.equal(localData.autoApplyRunLease.runId, 'run-protected-orphan');
+  localData.autoApplyPendingSubmit = null;
+  await send({ type: 'SET_RUN_STATE', runId: 'run-protected-orphan', ownerId: 11, patch: { state: 'complete' } }, 11);
+
+  const claimStaleDestination = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-stale-destination' }, 11);
+  assert.equal(claimStaleDestination.claimed, true);
+  const staleAttemptKey = 'run-stale-destination:777:11';
+  localData.autoApplyResponseAttempts = {
+    ...(localData.autoApplyResponseAttempts || {}),
+    [staleAttemptKey]: {
+      key: staleAttemptKey,
+      kind: 'direct_response_navigation',
+      runId: 'run-stale-destination',
+      ownerId: 11,
+      vacancyId: '777',
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=777',
+      startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      finalizedAt: '',
+      cancelledAt: ''
+    }
+  };
+  await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-stale-destination',
+    ownerId: 11,
+    patch: { state: 'stopped' }
+  }, 11, 'https://hh.ru/applicant/vacancy_response?vacancyId=777');
+  assert.equal(localData.autoApplyRunLease.active, true);
+  assert.equal(localData.autoApplyResponseAttempts[staleAttemptKey].cancelledAt, '');
+  const restartedAfterStaleAttempt = await send(
+    { type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-after-stale-terminal' },
+    11,
+    'https://hh.ru/search/vacancy?text=java'
+  );
+  assert.equal(restartedAfterStaleAttempt.claimed, true);
+  assert.equal(restartedAfterStaleAttempt.recoveredTerminalAttempt, true);
+  assert.equal(localData.autoApplyRunLease.runId, 'run-after-stale-terminal');
+  assert.equal(localData.autoApplyResponseAttempts[staleAttemptKey].cancelReason, 'stale_terminal_restart');
+  await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-after-stale-terminal',
+    ownerId: 11,
+    patch: { state: 'complete' }
+  }, 11);
+
+  const claimOwnerClose = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-owner-close' }, 11);
+  assert.equal(claimOwnerClose.claimed, true);
+  const registerOwnedAttempt = async (vacancyId) => send({
+    type: 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-owner-close',
+    attempt: {
+      kind: 'direct_response_navigation',
+      runId: 'run-owner-close',
+      vacancyId,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      responseUrl: `https://hh.ru/applicant/vacancy_response?vacancyId=${vacancyId}`,
+      startedAt: new Date().toISOString(),
+      targetResponseControlEnabledBefore: true,
+      alreadyAppliedBefore: false
+    },
+    item: { vacancyId },
+    queue: {
+      active: true,
+      runId: 'run-owner-close',
+      ownerId: 11,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      index: 0,
+      items: [{ vacancyId }]
+    }
+  }, 11);
+  assert.equal((await registerOwnedAttempt('124')).registered, true);
+  assert.equal((await registerOwnedAttempt('125')).registered, true);
+  const ownedAttempts = Object.values(localData.autoApplyResponseAttempts);
+  assert.equal(ownedAttempts.find((item) => item.vacancyId === '124').cancelReason, 'superseded');
+  assert.equal(ownedAttempts.find((item) => item.vacancyId === '125').cancelledAt, '');
+  await send({
+    type: 'SET_RUN_STATE',
+    runId: 'run-owner-close',
+    ownerId: 11,
+    patch: { state: 'stopped' }
+  }, 11);
+  assert.equal(localData.autoApplyRunLease.active, true);
+  assert.equal(Object.values(localData.autoApplyResponseAttempts).find((item) => item.vacancyId === '125').cancelledAt, '');
+  const cancelled = await send({
+    type: 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-owner-close',
+    ownerId: 11,
+    vacancyId: '125',
+    reason: 'active_response_form'
+  }, 11);
+  assert.equal(cancelled.cancelled, true);
+  await removedListener(11);
+  const claimAfterClose = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-after-close' }, 22);
+  assert.equal(claimAfterClose.claimed, true);
+  await removedListener(22);
+  const deniedResponsePageStart = await send(
+    { type: 'CLAIM_AUTO_APPLY_RUN', runId: 'response-page-start' },
+    33,
+    'https://hh.ru/applicant/vacancy_response?vacancyId=999'
+  );
+  assert.equal(deniedResponsePageStart.claimed, false);
+  assert.equal(deniedResponsePageStart.reason, 'unprovenanced_start_url');
+});
+
 test('background response watchdog leaves active form processing alone', async () => {
   let onUpdatedListener = null;
   let alarmListener = null;
@@ -859,18 +1240,45 @@ test('background response watchdog leaves active form processing alone', async (
   let tabUpdateCalls = 0;
   const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&employerId=456';
   const sourceUrl = 'https://hh.ru/search/vacancy?resume=abc';
+  const attemptKey = 'watchdog-run:123:7';
   const localData = {
+    autoApplyRunLease: {
+      active: true,
+      runId: 'watchdog-run',
+      ownerId: 7,
+      claimedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    },
+    autoApplyResponseAttempts: {
+      [attemptKey]: {
+        key: attemptKey,
+        kind: 'direct_response_navigation',
+        runId: 'watchdog-run',
+        ownerId: 7,
+        vacancyId: '123',
+        sourceUrl,
+        responseUrl,
+        startedAt: new Date().toISOString(),
+        finalizedAt: '',
+        cancelledAt: ''
+      }
+    },
     autoApplyQueue: {
       active: true,
+      runId: 'watchdog-run',
+      ownerId: 7,
       returnToSearch: true,
       sourceUrl,
       index: 0,
       items: [{ index: 1, vacancyId: '123', title: 'QA', url: 'https://hh.ru/vacancy/123' }],
+      responseAttempt: { vacancyId: '123', runId: 'watchdog-run', durableRegistered: true },
       counters: { found: 1, processed: 1, applied: 0, skipped: 0, errors: 0 }
     },
     autoApplySearchQueue: { active: false },
     runState: {
       state: 'filling_cover_letter',
+      runId: 'watchdog-run',
+      ownerId: 7,
       found: 1,
       processed: 1,
       applied: 0,
@@ -937,6 +1345,8 @@ test('background response watchdog leaves active form processing alone', async (
 
   try {
     await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
+    await onUpdatedListener(8, { url: responseUrl }, { id: 8, url: responseUrl });
+    assert.equal(createdAlarm, null);
     await onUpdatedListener(7, { url: responseUrl }, { id: 7, url: responseUrl });
     assert.equal(createdAlarm.name, 'hhja-response-navigation-watchdog');
     assert.equal(localData.responseNavigationWatchdog.tabId, 7);
@@ -946,6 +1356,17 @@ test('background response watchdog leaves active form processing alone', async (
     assert.equal(localData.autoApplyQueue.active, true);
     assert.equal(localData.runResults.length, 0);
     assert.equal(localData.runState.state, 'filling_cover_letter');
+
+    localData.runState = { ...localData.runState, state: 'idle', updatedAt: '2020-01-01T00:00:00.000Z' };
+    await onUpdatedListener(7, { url: responseUrl }, { id: 7, url: responseUrl });
+    await alarmListener({ name: 'hhja-response-navigation-watchdog' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(tabUpdateCalls, 1);
+    assert.equal(localData.autoApplyQueue.active, false);
+    assert.equal(localData.runResults.length, 1);
+    assert.equal(localData.runResults[0].status, 'skipped_response_page_timeout');
+    assert.equal(localData.runState.processed, 1);
+    assert.equal(localData.runState.skipped, 1);
   } finally {
     delete globalThis.__HH_JOB_ASSISTANT_TEST_RESPONSE_WATCHDOG_MS__;
   }

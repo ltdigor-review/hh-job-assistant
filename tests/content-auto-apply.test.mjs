@@ -76,7 +76,8 @@ async function runContentAutoApply({
   trustedShortcutEvents = [],
   beforeTrustedShortcutEvents = null,
   authenticated = true,
-  stopWhenState = ''
+  stopWhenState = '',
+  runtimeNavigationResponse = null
 }) {
   const source = await readContentScriptSource();
   const appended = [];
@@ -417,17 +418,17 @@ async function runContentAutoApply({
         href: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
         pathname: '/applicant/vacancy_response'
       }
-    : {
+      : {
         href: 'https://hh.ru/search/vacancy?text=java',
         pathname: '/search/vacancy'
       };
+  globalThis.location.assign = (url) => {
+    navigateUrl = String(url || '');
+  };
   globalThis.window = {
     __HH_JOB_ASSISTANT_TEST_AUTHENTICATED__: authenticated,
     __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
     __HH_JOB_ASSISTANT_TEST_RUNTIME_TIMEOUT_MS__: runtimeMessageTimeoutMs,
-    __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
-      navigateUrl = url;
-    },
     addEventListener(type, handler) {
       windowEventListeners.set(type, handler);
     },
@@ -435,6 +436,11 @@ async function runContentAutoApply({
       return { visibility: 'visible', display: 'block' };
     }
   };
+  if (runtimeNavigationResponse === null) {
+    globalThis.window.__HH_JOB_ASSISTANT_TEST_NAVIGATE__ = (url) => {
+      navigateUrl = url;
+    };
+  }
   globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ = authenticated;
   globalThis.getComputedStyle = globalThis.window.getComputedStyle;
   bodyNode = new FakeElement({ text: bodyText });
@@ -539,6 +545,103 @@ async function runContentAutoApply({
           const response = runtimeResponses[message.type];
           return settle(typeof response === 'function' ? response(message) : response);
         }
+        if (message.type === 'NAVIGATE_TAB' && runtimeNavigationResponse !== null) {
+          return settle(runtimeNavigationResponse);
+        }
+        if (message.type === 'CLAIM_AUTO_APPLY_RUN') {
+          return settle({ ok: true, claimed: true, owned: true, runId: message.runId, ownerId: 7 });
+        }
+        if (message.type === 'CHECK_AUTO_APPLY_RUN_OWNERSHIP') {
+          return settle({ ok: true, owned: true, runId: message.runId, ownerId: 7 });
+        }
+        if (message.type === 'RESUME_AUTO_APPLY_RUN') {
+          return settle({ ok: true, resumed: true, owned: true, runId: message.runId, ownerId: 7 });
+        }
+        if (message.type === 'WRITE_AUTO_APPLY_STATE') {
+          Object.assign(localStore, message.patch || {});
+          return settle({ ok: true, written: true });
+        }
+        if (message.type === 'RECORD_DAILY_APPLICATION') {
+          const date = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit'
+          }).format(new Date());
+          const current = localStore.dailyApplicationLedger?.date === date
+            ? { ...localStore.dailyApplicationLedger }
+            : {
+                date,
+                legacySubmitted: 0,
+                newSubmitted: 0,
+                alreadyApplied: 0,
+                submittedVacancyIds: [],
+                alreadyAppliedVacancyIds: [],
+                hhDailyLimitReached: false
+              };
+          current.submittedVacancyIds = [...(current.submittedVacancyIds || [])];
+          current.alreadyAppliedVacancyIds = [...(current.alreadyAppliedVacancyIds || [])];
+          const baseline = Math.max(0, Number(message.counterBaseline) || 0);
+          if (baseline > (Number(current.newSubmitted) || 0)) {
+            current.legacySubmitted = (Number(current.legacySubmitted) || 0) + baseline - (Number(current.newSubmitted) || 0);
+          }
+          let added = false;
+          if (message.kind === 'submitted' && message.vacancyId && !current.submittedVacancyIds.includes(message.vacancyId)) {
+            current.submittedVacancyIds.push(message.vacancyId);
+            current.alreadyAppliedVacancyIds = current.alreadyAppliedVacancyIds.filter((id) => id !== message.vacancyId);
+            added = true;
+          } else if (
+            message.kind === 'already_applied' && message.vacancyId &&
+            !current.submittedVacancyIds.includes(message.vacancyId) &&
+            !current.alreadyAppliedVacancyIds.includes(message.vacancyId)
+          ) {
+            current.alreadyAppliedVacancyIds.push(message.vacancyId);
+            added = true;
+          } else if (message.kind === 'hh_daily_limit') {
+            current.hhDailyLimitReached = true;
+            added = true;
+          }
+          current.newSubmitted = (Number(current.legacySubmitted) || 0) + current.submittedVacancyIds.length;
+          current.alreadyApplied = current.alreadyAppliedVacancyIds.length;
+          current.updatedAt = new Date().toISOString();
+          localStore.dailyApplicationLedger = current;
+          return settle({ ok: true, recorded: true, ledger: current, added });
+        }
+        if (message.type === 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          return settle({ ok: true, registered: true, attempt: { ...message.attempt, ownerId: 7 } });
+        }
+        if (message.type === 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          if (localStore.autoApplyQueue?.responseAttempt?.vacancyId === message.vacancyId) {
+            localStore.autoApplyQueue = { ...localStore.autoApplyQueue, responseAttempt: null };
+          }
+          return settle({ ok: true, cancelled: true, status: 'cancelled' });
+        }
+        if (message.type === 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          const existing = (localStore.runResults || []).some((item) => (
+            item.vacancyId === message.result?.vacancyId && item.status === message.result?.status
+          ));
+          if (!existing) {
+            appended.push(message.result);
+            localStore.runResults = [...(localStore.runResults || []), message.result];
+          }
+          const submittedVacancyIds = [...new Set([
+            ...(localStore.dailyApplicationLedger?.submittedVacancyIds || []),
+            message.vacancyId
+          ])];
+          const ledger = {
+            date: new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit'
+            }).format(new Date()),
+            legacySubmitted: Number(localStore.dailyApplicationLedger?.legacySubmitted) || 0,
+            submittedVacancyIds,
+            alreadyAppliedVacancyIds: [],
+            newSubmitted: (Number(localStore.dailyApplicationLedger?.legacySubmitted) || 0) + submittedVacancyIds.length,
+            alreadyApplied: 0,
+            hhDailyLimitReached: false,
+            updatedAt: new Date().toISOString()
+          };
+          localStore.dailyApplicationLedger = ledger;
+          const counters = { ...(message.counters || {}), applied: ledger.newSubmitted };
+          if (localStore.autoApplyQueue) localStore.autoApplyQueue = { ...localStore.autoApplyQueue, responseAttempt: null, counters };
+          return settle({ ok: true, finalized: true, status: 'finalized', ledger, counters });
+        }
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
           if (message.patch.state === stopWhenState && listener) {
@@ -547,8 +650,15 @@ async function runContentAutoApply({
           return settle({ ok: true });
         }
         if (message.type === 'APPEND_RUN_RESULT') {
-          appended.push(message.item);
-          return settle({ ok: true });
+          const exists = message.ensure === true && appended.some((item) => (
+            item.vacancyId === message.item?.vacancyId && item.status === message.item?.status &&
+            (!message.item?.timestamp || item.timestamp === message.item.timestamp)
+          ));
+          if (!exists) {
+            appended.push(message.item);
+            localStore.runResults = [...(localStore.runResults || []).slice(-199), message.item];
+          }
+          return settle({ ok: true, appended: !exists, exists });
         }
         if (message.type === 'GENERATE_COVER_LETTER') {
           groqRequests.push(message);
@@ -618,6 +728,9 @@ async function runContentAutoApply({
     }
   } else {
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (runtimeNavigationResponse !== null) {
+    await new Promise((resolve) => setTimeout(resolve, 550));
   }
 
   return {
@@ -965,6 +1078,39 @@ test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A resumes saved queue without
   );
 });
 
+test('a second tab cannot reset or mutate a leased auto-apply run', async () => {
+  const preservedQueue = {
+    active: true,
+    runId: 'run-a',
+    index: 0,
+    items: [{ vacancyId: '777', responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=777' }]
+  };
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    initialLocalStore: {
+      autoApplyQueue: preservedQueue,
+      runResults: [{ vacancyId: '777', status: 'applied' }]
+    },
+    runtimeResponses: {
+      CHECK_AUTO_APPLY_RUN_OWNERSHIP: { ok: true, owned: false },
+      CLAIM_AUTO_APPLY_RUN: {
+        ok: true,
+        claimed: false,
+        alreadyRunning: true,
+        runId: 'run-a'
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.alreadyRunning, true);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.localStore.autoApplyQueue, preservedQueue);
+  assert.deepEqual(result.localStore.runResults, [{ vacancyId: '777', status: 'applied' }]);
+  assert.equal(result.states.length, 0);
+});
+
 test('[BS:COVERS:HHJA-BR-000017] start and continue reject incomplete configuration before runtime mutations', async () => {
   for (const messageType of ['START_AUTO_APPLY', 'START_DRY_RUN', 'CONTINUE_AUTO_APPLY']) {
     const result = await runContentAutoApply({
@@ -1017,6 +1163,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
       title: `Vacancy ${index + 1}`,
       url: `https://hh.ru/vacancy/${vacancyId}`,
       responseUrl: `https://hh.ru/applicant/vacancy_response?vacancyId=${vacancyId}`,
+      targetResponseControlEnabledBefore: true,
       testDetected: true
     };
   });
@@ -1026,6 +1173,7 @@ async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 р
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
+      ownerId: 7,
       index: 0,
       items,
       sourceUrl: 'https://hh.ru/search/vacancy?text=java',
@@ -1468,6 +1616,44 @@ test('auto apply opens direct response url instead of skipping when search click
   assert.equal(result.localStore.autoApplyQueue.counters.processed, 1);
   assert.equal(result.localStore.autoApplyQueue.responseAttempt.vacancyId, '123');
   assert.equal(result.navigateUrl, responseUrl);
+});
+
+test('auto apply never direct-navigates when durable attempt registration is rejected', async () => {
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseHref: responseUrl,
+    responseClickOpensDialog: false,
+    runtimeResponses: {
+      REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT: {
+        ok: true,
+        registered: false,
+        reason: 'run_not_owned'
+      }
+    }
+  });
+
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_direct_navigation_not_registered']);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+});
+
+test('auto apply does not locally navigate to a direct response when background navigation is denied', async () => {
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&startedWithQuestion=false';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseHref: responseUrl,
+    responseClickOpensDialog: false,
+    runtimeNavigationResponse: { ok: false, error: 'run_not_owned' }
+  });
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.runtimeMessages.some((message) => (
+    message.type === 'NAVIGATE_TAB' && message.url === responseUrl
+  )), true);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
 });
 
 test('auto apply derives response url when live hh broad selector returns response button node', async () => {
@@ -5077,6 +5263,7 @@ test('[BS:COVERS:HHJA-BR-000024] auto apply finalizes pending response when hh r
     },
     autoApplyPendingSubmit: {
       runId: 'test-run',
+      ownerId: 7,
       item: {
         index: 1,
         vacancyId: '123',
@@ -5209,6 +5396,7 @@ test('auto apply finalizes pending response on detail confirmation page and retu
     },
     autoApplyPendingSubmit: {
       runId: 'test-run',
+      ownerId: 7,
       item: {
         index: 3,
         vacancyId: '133983014',
@@ -5312,6 +5500,7 @@ test('auto apply preserves a confirmed pending response when stop URL arrives af
   const appended = [];
   const states = [];
   const navigations = [];
+  const runtimeMessages = [];
   const localStore = { ...TEST_READY_CONFIG,
     runState: {
       state: 'submitting',
@@ -5337,11 +5526,13 @@ test('auto apply preserves a confirmed pending response when stop URL arrives af
     },
     autoApplyPendingSubmit: {
       runId: 'test-run',
+      ownerId: 7,
       item: {
         index: 1,
         vacancyId: '136142722',
         title: 'Java Developer',
-        url: 'https://hh.ru/vacancy/136142722'
+        url: 'https://hh.ru/vacancy/136142722',
+        navigationQueue: { card: () => 'must-not-cross-runtime-boundary' }
       },
       counters: {
         found: 10,
@@ -5391,6 +5582,7 @@ test('auto apply preserves a confirmed pending response when stop URL arrives af
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(message) {
+        runtimeMessages.push(message);
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
           localStore.runState = { ...(localStore.runState || {}), ...message.patch };
@@ -5466,6 +5658,19 @@ test('auto apply preserves a confirmed pending response when stop URL arrives af
   assert.equal(states.at(-1).state, 'stopped');
   assert.equal(states.at(-1).applied, 1);
   assert.deepEqual(navigations, []);
+  const finalizeMessage = runtimeMessages.find((message) => message.type === 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT');
+  assert.ok(finalizeMessage);
+  assert.deepEqual(Object.keys(finalizeMessage.result).sort(), [
+    'coverLetterUsed',
+    'error',
+    'index',
+    'status',
+    'testDetected',
+    'title',
+    'url',
+    'vacancyId'
+  ]);
+  assert.doesNotThrow(() => structuredClone(finalizeMessage));
 });
 
 test('auto apply preserves a fresh direct response attempt across stop and finalizes delivered-resume confirmation', async () => {
@@ -5510,9 +5715,15 @@ test('auto apply preserves a fresh direct response attempt across stop and final
         errors: 0
       },
       responseAttempt: {
+        kind: 'direct_response_navigation',
+        runId: 'test-run',
         vacancyId: '135646486',
         sourceUrl: 'https://hh.ru/search/vacancy?text=java',
-        startedAt: new Date().toISOString()
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
+        startedAt: new Date().toISOString(),
+        targetResponseControlEnabledBefore: true,
+        alreadyAppliedBefore: false,
+        durableRegistered: true
       }
     }
   };
@@ -5615,7 +5826,7 @@ test('auto apply preserves a fresh direct response attempt across stop and final
   }
 
   assert.equal(appended.length, 1);
-  assert.equal(appended.at(-1).status, 'applied_direct_click');
+  assert.equal(appended.at(-1).status, 'applied_direct_navigation');
   assert.equal(localStore.dailyApplicationLedger.newSubmitted, 1);
   assert.equal(localStore.autoApplyQueue.active, false);
   assert.equal(localStore.autoApplyQueue.responseAttempt, null);
@@ -5647,11 +5858,16 @@ test('auto apply finalizes a stopped fresh attempt from a deeply nested current 
       }],
       counters: { found: 10, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
       responseAttempt: {
+        kind: 'direct_response_navigation',
+        runId: 'test-run',
         vacancyId: '135646486',
         sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
         startedAt: new Date().toISOString(),
         targetCardTextBefore: 'Lead Java Developer\nОткликнуться',
-        targetResponseControlEnabledBefore: true
+        targetResponseControlEnabledBefore: true,
+        alreadyAppliedBefore: false,
+        durableRegistered: true
       }
     }
   };
@@ -5715,7 +5931,7 @@ test('auto apply finalizes a stopped fresh attempt from a deeply nested current 
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.equal(appended.length, 1);
-  assert.equal(appended[0].status, 'applied_direct_click');
+  assert.equal(appended[0].status, 'applied_direct_navigation');
   assert.equal(localStore.dailyApplicationLedger.newSubmitted, 1);
   assert.equal(localStore.autoApplyQueue.responseAttempt, null);
   assert.equal(localStore.runState.state, 'stopped');
@@ -5944,6 +6160,7 @@ test('auto apply resumes search from pending submit when response queue was clea
     },
     autoApplyPendingSubmit: {
       runId: 'test-run',
+      ownerId: 7,
       item: {
         index: 3,
         vacancyId: '134134596',
@@ -6167,20 +6384,26 @@ test('auto apply counts a fresh direct-response queue landing on confirmation de
   let bodyReads = 0;
   const loadingBody = new FakeElement({ text: 'Java Developer\nЗагрузка отклика' });
   const confirmedBody = new FakeElement({ text: 'Java Developer\nВы откликнулись\nРезюме доставлено' });
-  const localStore = { ...TEST_READY_CONFIG,
-    autoApplyQueue: {
+  const directAttempt = {
+    kind: 'direct_response_navigation',
+    runId: 'test-run',
+    vacancyId: '136259707',
+    sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+    responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=136259707',
+    startedAt: new Date().toISOString(),
+    targetResponseControlEnabledBefore: true,
+    alreadyAppliedBefore: false
+  };
+  const durableQueue = {
       active: true,
       runId: 'test-run',
+      ownerId: 7,
       index: 0,
       sourceUrl: 'https://hh.ru/search/vacancy?text=java',
       limit: 20,
       returnToSearch: true,
       processedCounted: true,
-      responseAttempt: {
-        vacancyId: '136259707',
-        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
-        startedAt: new Date().toISOString()
-      },
+      responseAttempt: directAttempt,
       items: [
         {
           index: 2,
@@ -6204,7 +6427,9 @@ test('auto apply counts a fresh direct-response queue landing on confirmation de
         delayMaxMs: 1
       },
       processedVacancyIds: ['136257642', '136259707']
-    }
+  };
+  const localStore = { ...TEST_READY_CONFIG,
+    autoApplyQueue: { active: false, runId: 'run-b', items: [] }
   };
 
   globalThis.location = {
@@ -6242,6 +6467,20 @@ test('auto apply counts a fresh direct-response queue landing on confirmation de
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(message) {
+        if (message.type === 'GET_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          return Promise.resolve({
+            ok: true,
+            found: true,
+            status: 'ready',
+            attempt: { ...directAttempt, ownerId: 7, queue: durableQueue }
+          });
+        }
+        if (message.type === 'CHECK_AUTO_APPLY_RUN_OWNERSHIP') {
+          return Promise.resolve({ ok: true, owned: true, runId: 'test-run', ownerId: 7 });
+        }
+        if (message.type === 'CONSUME_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          return Promise.resolve({ ok: true, found: true, status: 'consumed', consumed: true });
+        }
         if (message.type === 'SET_RUN_STATE') {
           states.push(message.patch);
         }
@@ -6269,12 +6508,152 @@ test('auto apply counts a fresh direct-response queue landing on confirmation de
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 
-  assert.deepEqual(appended.map((item) => item.status), ['applied_direct_click']);
+  assert.deepEqual(appended.map((item) => item.status), ['applied_direct_navigation']);
+  assert.equal(localStore.autoApplyQueue.runId, 'test-run');
   assert.equal(bodyReads >= 4, true);
   assert.equal(localStore.autoApplySearchQueue.counters.applied, 2);
   assert.equal(localStore.autoApplySearchQueue.counters.alreadyApplied, 0);
   assert.equal(states.at(-1).state, 'applying');
   assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
+});
+
+test('auto apply neutrally skips a mismatched direct-navigation attempt without touching the ledger', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    bodyText: 'Вы откликнулись',
+    hasTextarea: false,
+    sendMessageAfterImport: false,
+    initialLocalStore: {
+      autoApplyQueue: {
+        active: true,
+        runId: 'direct-run',
+        index: 0,
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        returnToSearch: false,
+        processedCounted: true,
+        limit: 1,
+        items: [{
+          index: 1,
+          vacancyId: '123',
+          title: 'Java Developer',
+          url: 'https://hh.ru/vacancy/123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          testDetected: false
+        }],
+        counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+        responseAttempt: {
+          kind: 'direct_response_navigation',
+          runId: 'direct-run',
+          vacancyId: '123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=999',
+          sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+          startedAt: new Date().toISOString(),
+          targetResponseControlEnabledBefore: true,
+          alreadyAppliedBefore: false,
+          durableRegistered: true
+        }
+      }
+    }
+  });
+
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_unverified_response_attempt']);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(result.localStore.dailyApplicationLedger?.alreadyApplied || 0, 0);
+});
+
+test('auto apply neutrally skips an expired direct-navigation attempt', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    bodyText: 'Вы откликнулись',
+    hasTextarea: false,
+    sendMessageAfterImport: false,
+    initialLocalStore: {
+      autoApplyQueue: {
+        active: true,
+        runId: 'expired-direct-run',
+        index: 0,
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        returnToSearch: false,
+        processedCounted: true,
+        limit: 1,
+        items: [{
+          index: 1,
+          vacancyId: '123',
+          title: 'Java Developer',
+          url: 'https://hh.ru/vacancy/123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          testDetected: false
+        }],
+        counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+        responseAttempt: {
+          kind: 'direct_response_navigation',
+          runId: 'expired-direct-run',
+          vacancyId: '123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+          startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+          targetResponseControlEnabledBefore: true,
+          alreadyAppliedBefore: false,
+          durableRegistered: true
+        }
+      }
+    }
+  });
+
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_unverified_response_attempt']);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(result.localStore.dailyApplicationLedger?.alreadyApplied || 0, 0);
+});
+
+test('direct-navigation provenance does not bypass an active matching response form', async () => {
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    bodyText: 'Вы откликнулись в рекомендациях',
+    submitBodyTextAfterClick: 'Отклик отправлен',
+    hasTextarea: false,
+    sendMessageAfterImport: false,
+    initialLocalStore: {
+      autoApplyQueue: {
+        active: true,
+        runId: 'direct-form-run',
+        ownerId: 7,
+        index: 0,
+        sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+        returnToSearch: false,
+        processedCounted: true,
+        limit: 1,
+        items: [{
+          index: 1,
+          vacancyId: '123',
+          title: 'Java Developer',
+          url: 'https://hh.ru/vacancy/123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          testDetected: false
+        }],
+        counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+        responseAttempt: {
+          kind: 'direct_response_navigation',
+          runId: 'direct-form-run',
+          ownerId: 7,
+          vacancyId: '123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+          startedAt: new Date().toISOString(),
+          targetResponseControlEnabledBefore: true,
+          alreadyAppliedBefore: false,
+          durableRegistered: true
+        }
+      }
+    }
+  });
+
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_submit_not_confirmed']);
+  assert.equal(result.localStore.dailyApplicationLedger?.newSubmitted || 0, 0);
+  assert.equal(result.runtimeMessages.some((message) => message.type === 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT'), true);
+  assert.equal(result.localStore.autoApplyQueue.responseAttempt, null);
 });
 
 test('queued direct fallback preserves the current item until its result makes processed equal run results', async () => {
@@ -6300,6 +6679,7 @@ test('queued direct fallback preserves the current item until its result makes p
         title: 'Java Developer',
         url: 'https://hh.ru/vacancy/136999001',
         responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=136999001',
+        targetResponseControlEnabledBefore: true,
         testDetected: false
       }],
       counters: { found: 20, processed: 20, applied: 19, alreadyApplied: 0, skipped: 0, errors: 0 },
@@ -6367,7 +6747,8 @@ test('queued direct fallback preserves the current item until its result makes p
   assert.equal(navigations.at(-1), 'https://hh.ru/applicant/vacancy_response?vacancyId=136999001');
   assert.equal(localStore.autoApplyQueue.active, true);
   assert.equal(localStore.autoApplyQueue.index, 0);
-  assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '136999001');
+  assert.equal(localStore.autoApplyQueue.responseAttempt?.durableRegistered, true);
+  assert.equal(localStore.autoApplyQueue.responseAttempt?.vacancyId, '136999001');
   assert.equal(localStore.runResults.length, 19);
 
   installPage('https://hh.ru/applicant/vacancy_response?vacancyId=136999001', 'Java Developer\nВы откликнулись');
@@ -6378,7 +6759,7 @@ test('queued direct fallback preserves the current item until its result makes p
   }
 
   assert.equal(localStore.runResults.length, 20);
-  assert.equal(localStore.runResults.at(-1).status, 'applied_direct_click');
+  assert.equal(localStore.runResults.at(-1).status, 'applied_direct_navigation');
   assert.equal(localStore.runState.processed, localStore.runResults.length);
 });
 

@@ -55,7 +55,7 @@ const RUNTIME_MESSAGE_TIMEOUT_MS =
   globalThis.HHJA_AI_PROVIDERS?.getRequestChainTimeoutMs?.(
     AI_PROVIDER_IDS.length > 0 ? AI_PROVIDER_IDS : ['qwen', 'groq']
   ) ?? 170000;
-const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v12';
+const AUTO_APPLY_FLOW_VERSION = 'list-click-return-v13';
 const AUTO_APPLY_STOP_BEFORE_SUBMIT_TTL_MS = 15 * 60 * 1000;
 const AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS = 5 * 60 * 1000;
 const AUTO_START_TOKEN_KEY = 'autoApplyAutoStartToken';
@@ -97,6 +97,7 @@ const {
 let stopRequested = false;
 let stopReason = '';
 let activeRunId = null;
+let activeRunOwnerId = 0;
 let queuedResumeStarted = false;
 let queuedSearchStarted = false;
 let extensionContextInvalidated = false;
@@ -129,16 +130,93 @@ function serializeProcessedVacancyIds(processedIds) {
   return Array.from(processedIds || []).filter(Boolean);
 }
 
-function buildResponseAttempt(item, sourceUrl = location.href) {
+function buildResponseAttempt(item, sourceUrl = location.href, options = {}) {
   const vacancyId = getVacancyDedupeKey(item);
   if (!vacancyId) return null;
   return {
+    kind: options.kind || 'response_control_click',
+    runId: options.runId || item?.navigationQueue?.runId || activeRunId || '',
     vacancyId,
     sourceUrl: isHhSearchPageUrl(sourceUrl) ? sourceUrl : '',
+    responseUrl: options.responseUrl || item?.responseUrl || getItemResponseUrl(item),
     startedAt: new Date().toISOString(),
     targetCardTextBefore: cleanText(item?.cardText || textOf(item?.card)).slice(0, 2000),
-    targetResponseControlEnabledBefore: Boolean(item?.responseButton && !isDisabled(item.responseButton))
+    targetResponseControlEnabledBefore: Boolean(
+      (item?.responseButton && !isDisabled(item.responseButton)) ||
+      item?.targetResponseControlEnabledBefore === true
+    ),
+    alreadyAppliedBefore: options.alreadyAppliedBefore === true
   };
+}
+
+function isValidDirectNavigationAttempt(attempt, queue, item) {
+  const vacancyId = getVacancyDedupeKey(item) || getCurrentVacancyId();
+  return Boolean(
+    attempt?.kind === 'direct_response_navigation' &&
+    attempt?.durableRegistered === true &&
+    vacancyId &&
+    String(attempt.vacancyId || '') === String(vacancyId) &&
+    String(attempt.runId || '') === String(queue?.runId || activeRunId || '') &&
+    getVacancyId(attempt.responseUrl || '') === String(vacancyId) &&
+    attempt.targetResponseControlEnabledBefore === true &&
+    attempt.alreadyAppliedBefore === false &&
+    hasFreshMatchingResponseAttempt(queue, item)
+  );
+}
+
+async function registerDirectNavigationAttempt(item, queue, responseUrl) {
+  const attempt = buildResponseAttempt(item, queue?.sourceUrl || location.href, {
+    kind: 'direct_response_navigation',
+    runId: queue?.runId || activeRunId || '',
+    responseUrl,
+    alreadyAppliedBefore: item?.targetResponseControlEnabledBefore === true
+      ? item?.alreadyAppliedBefore === true
+      : isAlreadyAppliedForCurrentItem(item?.card, item)
+  });
+  if (
+    !attempt ||
+    !attempt.sourceUrl ||
+    getVacancyId(responseUrl) !== attempt.vacancyId ||
+    attempt.targetResponseControlEnabledBefore !== true ||
+    attempt.alreadyAppliedBefore !== false
+  ) {
+    const nextQueue = { ...queue, responseAttempt: null };
+    await saveQueue(nextQueue);
+    return { queue: nextQueue, attempt: null };
+  }
+  const queueWithAttempt = { ...queue, responseAttempt: attempt };
+  const response = await sendRuntimeCommand({
+    type: 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: attempt.runId,
+    attempt,
+    item: queueWithAttempt.items?.[queueWithAttempt.index || 0] || null,
+    queue: queueWithAttempt
+  });
+  if (response?.ok !== true || response?.registered !== true) {
+    const nextQueue = { ...queue, responseAttempt: null };
+    await saveQueue(nextQueue);
+    return { queue: nextQueue, attempt: null };
+  }
+  const registeredAttempt = { ...attempt, durableRegistered: true };
+  const nextQueue = { ...queueWithAttempt, responseAttempt: registeredAttempt };
+  await saveQueue(nextQueue);
+  return { queue: nextQueue, attempt: registeredAttempt };
+}
+
+async function cancelDirectNavigationAttempt(queue, reason) {
+  const attempt = queue?.responseAttempt;
+  if (!attempt?.runId || !attempt?.vacancyId) return false;
+  const response = await sendRuntimeCommand({
+    type: 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: attempt.runId,
+    ownerId: activeRunOwnerId || attempt.ownerId || 0,
+    vacancyId: attempt.vacancyId,
+    reason
+  });
+  if (response?.ok !== true || response?.cancelled !== true) return false;
+  queue.responseAttempt = null;
+  await saveQueue(queue);
+  return true;
 }
 
 function hasFreshMatchingResponseAttempt(queue, item) {
@@ -217,34 +295,21 @@ async function isDailyVacancyDuplicate(item) {
 }
 
 async function recordDailyApplication(item, kind, counters = null) {
-  const ledger = await getDailyApplicationLedger();
-  const counterBaseline = Math.max(0, Number(counters?.applied) || 0);
-  if (counterBaseline > ledger.newSubmitted) {
-    ledger.legacySubmitted += counterBaseline - ledger.newSubmitted;
-  }
   const vacancyId = getVacancyDedupeKey(item);
-  let added = false;
-  if (kind === 'submitted' && vacancyId && !ledger.submittedVacancyIds.includes(vacancyId)) {
-    ledger.submittedVacancyIds.push(vacancyId);
-    ledger.alreadyAppliedVacancyIds = ledger.alreadyAppliedVacancyIds.filter((id) => id !== vacancyId);
-    added = true;
-  } else if (
-    kind === 'already_applied' &&
-    vacancyId &&
-    !ledger.submittedVacancyIds.includes(vacancyId) &&
-    !ledger.alreadyAppliedVacancyIds.includes(vacancyId)
-  ) {
-    ledger.alreadyAppliedVacancyIds.push(vacancyId);
-    added = true;
-  } else if (kind === 'hh_daily_limit') {
-    ledger.hhDailyLimitReached = true;
-    added = true;
+  const response = await sendRuntimeCommand({
+    type: 'RECORD_DAILY_APPLICATION',
+    runId: activeRunId || '',
+    ownerId: activeRunOwnerId || 0,
+    vacancyId,
+    kind,
+    counterBaseline: Math.max(0, Number(counters?.applied) || 0)
+  });
+  if (response?.ok !== true || response?.recorded !== true || !response.ledger) {
+    const error = new Error('Не удалось атомарно обновить дневной журнал откликов.');
+    error.code = 'HHJA_RUN_NOT_OWNED';
+    throw error;
   }
-  ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
-  ledger.alreadyApplied = ledger.alreadyAppliedVacancyIds.length;
-  ledger.updatedAt = new Date().toISOString();
-  await storageSet({ [DAILY_APPLICATION_LEDGER_KEY]: ledger }, { optional: true });
-  return { ledger, added };
+  return { ledger: normalizeDailyApplicationLedger(response.ledger), added: response.added === true };
 }
 
 function syncCountersFromLedger(counters, ledger) {
@@ -427,6 +492,21 @@ async function storageGet(keys, options = {}) {
 
 async function storageSet(value, options = {}) {
   return withExtensionContext(() => chrome.storage.local.set(value), options);
+}
+
+async function writeOwnedAutoApplyState(patch) {
+  const response = await sendRuntimeCommand({
+    type: 'WRITE_AUTO_APPLY_STATE',
+    runId: activeRunId || '',
+    ownerId: activeRunOwnerId || 0,
+    patch
+  });
+  if (response?.ok !== true || response?.written !== true) {
+    const error = new Error('Текущая вкладка больше не владеет запуском откликов.');
+    error.code = 'HHJA_RUN_NOT_OWNED';
+    throw error;
+  }
+  return response;
 }
 
 function safeDigestCount(value) {
@@ -665,6 +745,9 @@ async function finalizeConfirmedResponseAttemptForStop(counters = {}, queueOverr
     if (!destinationConfirmed && !sameSearchItem) {
       return null;
     }
+    if (destinationConfirmed && !isValidDirectNavigationAttempt(attempt, queue, item)) {
+      return null;
+    }
 
     const finalizedCounters = {
       found: 0,
@@ -676,9 +759,48 @@ async function finalizeConfirmedResponseAttemptForStop(counters = {}, queueOverr
       ...(queue.counters || {}),
       ...counters
     };
+    if (destinationConfirmed) {
+      const finalized = await sendRuntimeCommand({
+        type: 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT',
+        runId: attempt.runId,
+        ownerId: activeRunOwnerId || attempt.ownerId || 0,
+        vacancyId: attempt.vacancyId,
+        counters: { ...finalizedCounters },
+        result: {
+          index: item.index,
+          vacancyId: item.vacancyId,
+          title: item.title,
+          url: item.url,
+          status: 'applied_direct_navigation',
+          coverLetterUsed: false,
+          testDetected: item.testDetected,
+          error: ''
+        }
+      });
+      if (finalized?.alreadyFinalized === true) return null;
+      if (finalized?.ok !== true || finalized?.finalized !== true) return null;
+      Object.assign(finalizedCounters, finalized.counters || {});
+      await ensureRunResultStored({
+        index: item.index,
+        vacancyId: item.vacancyId,
+        title: item.title,
+        url: item.url,
+        status: 'applied_direct_navigation',
+        coverLetterUsed: false,
+        testDetected: item.testDetected,
+        error: '',
+        timestamp: finalized.result?.timestamp
+      });
+    }
     queue.responseAttempt = null;
     await saveQueue({ ...queue, active: false, responseAttempt: null });
-    await appendDirectClickResponse({ ...item, ...(sameSearchItem || {}) }, finalizedCounters);
+    if (sameSearchItem) {
+      await appendDirectClickResponse(
+        { ...item, ...sameSearchItem },
+        finalizedCounters,
+        { status: 'applied_direct_click' }
+      );
+    }
     await saveQueue({ ...queue, active: false, responseAttempt: null, counters: { ...finalizedCounters } });
     await saveSearchQueue({ active: false });
     await setRunState({ state: 'stopped', ...finalizedCounters, currentAction: 'Остановлено', lastError: '' });
@@ -777,6 +899,14 @@ function navigateTo(url) {
     return;
   }
   const targetUrl = String(url || '');
+  const directResponseNavigation = (() => {
+    try {
+      const parsed = new URL(targetUrl, location.href);
+      return /(^|\.)hh\.ru$/.test(parsed.hostname) && parsed.pathname === '/applicant/vacancy_response';
+    } catch {
+      return false;
+    }
+  })();
   let settled = false;
   const fallback = () => {
     if (settled) return;
@@ -788,17 +918,17 @@ function navigateTo(url) {
     location.href = targetUrl;
   };
 
-  const fallbackTimer = setTimeout(fallback, 500);
+  const fallbackTimer = directResponseNavigation ? null : setTimeout(fallback, 500);
   chrome.runtime.sendMessage({ type: 'NAVIGATE_TAB', url: targetUrl }).then((response) => {
-    clearTimeout(fallbackTimer);
+    if (fallbackTimer) clearTimeout(fallbackTimer);
     if (response?.ok) {
       settled = true;
       return;
     }
-    fallback();
+    if (!directResponseNavigation) fallback();
   }).catch(() => {
-    clearTimeout(fallbackTimer);
-    fallback();
+    if (fallbackTimer) clearTimeout(fallbackTimer);
+    if (!directResponseNavigation) fallback();
   });
 }
 
@@ -1482,7 +1612,17 @@ function isAlreadyAppliedForCurrentItem(root = document, item = null, { ignoreAc
   if (!ignoreActiveResponseControl && hasActiveResponseControl(root, item)) return false;
   if (!isAlreadyAppliedPage(root)) return false;
   if (root !== document) return true;
-  if (isResponseFormPage()) return true;
+  if (isResponseFormPage()) {
+    const directAttempt = item?.navigationQueue?.responseAttempt;
+    const hasActiveForm = Boolean(
+      queryFirst(HH_SELECTORS.submitButtons.filter((selector) => selector !== 'button'), document) ||
+      findQuestionFields(document).length > 0 ||
+      findQuestionControlGroups(document).length > 0 ||
+      findTextarea(document)
+    );
+    if (directAttempt?.kind === 'direct_response_navigation' && hasActiveForm) return false;
+    return true;
+  }
   if (isVacancyDetailPage()) return isCurrentVacancyDetailConfirmed(item);
 
   const currentVacancyId = getVacancyId(location.href);
@@ -2263,6 +2403,113 @@ async function sendRuntimeMessage(message, options = {}) {
   });
 }
 
+async function sendRuntimeCommand(message) {
+  const response = await withExtensionContext(() => chrome.runtime.sendMessage(message));
+  if (!window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ || response?.ok !== true) return response;
+  if (message.type === 'CLAIM_AUTO_APPLY_RUN' && response.claimed === undefined) {
+    return { ...response, claimed: true, owned: true, runId: message.runId, ownerId: 7 };
+  }
+  if (message.type === 'CHECK_AUTO_APPLY_RUN_OWNERSHIP' && response.owned === undefined) {
+    return { ...response, owned: true, runId: message.runId, ownerId: message.ownerId || 7 };
+  }
+  if (message.type === 'RESUME_AUTO_APPLY_RUN' && response.resumed === undefined) {
+    return { ...response, resumed: true, owned: true, runId: message.runId, ownerId: message.ownerId || 7 };
+  }
+  if (message.type === 'WRITE_AUTO_APPLY_STATE' && response.written === undefined) {
+    await storageSet(message.patch || {});
+    return { ...response, written: true };
+  }
+  if (message.type === 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT' && response.registered === undefined) {
+    return { ...response, registered: true, attempt: message.attempt };
+  }
+  if (message.type === 'CANCEL_AUTO_APPLY_RESPONSE_ATTEMPT' && response.cancelled === undefined) {
+    const { autoApplyQueue } = await storageGet(['autoApplyQueue']);
+    if (autoApplyQueue?.responseAttempt?.vacancyId === message.vacancyId) {
+      await storageSet({ autoApplyQueue: { ...autoApplyQueue, responseAttempt: null } });
+    }
+    return { ...response, cancelled: true, status: 'cancelled' };
+  }
+  if (message.type === 'RECORD_DAILY_APPLICATION' && response.recorded === undefined) {
+    const { [DAILY_APPLICATION_LEDGER_KEY]: current } = await storageGet([DAILY_APPLICATION_LEDGER_KEY]);
+    const ledger = normalizeDailyApplicationLedger(current);
+    const baseline = Math.max(0, Number(message.counterBaseline) || 0);
+    if (baseline > ledger.newSubmitted) ledger.legacySubmitted += baseline - ledger.newSubmitted;
+    let added = false;
+    if (message.kind === 'submitted' && message.vacancyId && !ledger.submittedVacancyIds.includes(message.vacancyId)) {
+      ledger.submittedVacancyIds.push(message.vacancyId);
+      ledger.alreadyAppliedVacancyIds = ledger.alreadyAppliedVacancyIds.filter((id) => id !== message.vacancyId);
+      added = true;
+    } else if (
+      message.kind === 'already_applied' && message.vacancyId &&
+      !ledger.submittedVacancyIds.includes(message.vacancyId) &&
+      !ledger.alreadyAppliedVacancyIds.includes(message.vacancyId)
+    ) {
+      ledger.alreadyAppliedVacancyIds.push(message.vacancyId);
+      added = true;
+    } else if (message.kind === 'hh_daily_limit') {
+      ledger.hhDailyLimitReached = true;
+      added = true;
+    }
+    ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
+    ledger.alreadyApplied = ledger.alreadyAppliedVacancyIds.length;
+    ledger.updatedAt = new Date().toISOString();
+    await storageSet({ [DAILY_APPLICATION_LEDGER_KEY]: ledger });
+    return { ...response, recorded: true, ledger, added };
+  }
+  if (message.type === 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT' && response.finalized === undefined) {
+    const { [DAILY_APPLICATION_LEDGER_KEY]: current, autoApplyQueue } = await storageGet([
+      DAILY_APPLICATION_LEDGER_KEY,
+      'autoApplyQueue'
+    ]);
+    const ledger = normalizeDailyApplicationLedger(current);
+    const baseline = Math.max(0, Number(message.counters?.applied) || 0);
+    if (baseline > ledger.newSubmitted) ledger.legacySubmitted += baseline - ledger.newSubmitted;
+    if (message.vacancyId && !ledger.submittedVacancyIds.includes(message.vacancyId)) {
+      ledger.submittedVacancyIds.push(message.vacancyId);
+    }
+    ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
+    ledger.updatedAt = new Date().toISOString();
+    const counters = { ...(message.counters || {}), applied: Math.max(Number(message.counters?.applied) || 0, ledger.newSubmitted) };
+    await storageSet({
+      [DAILY_APPLICATION_LEDGER_KEY]: ledger,
+      ...(autoApplyQueue ? { autoApplyQueue: { ...autoApplyQueue, responseAttempt: null, counters } } : {})
+    });
+    return { ...response, finalized: true, status: 'finalized', ledger, counters };
+  }
+  if (message.type === 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT' && response.finalized === undefined) {
+    const { [DAILY_APPLICATION_LEDGER_KEY]: current } = await storageGet([DAILY_APPLICATION_LEDGER_KEY]);
+    const ledger = normalizeDailyApplicationLedger(current);
+    const baseline = Math.max(0, Number(message.counters?.applied) || 0);
+    if (baseline > ledger.newSubmitted) ledger.legacySubmitted += baseline - ledger.newSubmitted;
+    if (message.vacancyId && !ledger.submittedVacancyIds.includes(message.vacancyId)) {
+      ledger.submittedVacancyIds.push(message.vacancyId);
+    }
+    ledger.newSubmitted = ledger.legacySubmitted + ledger.submittedVacancyIds.length;
+    ledger.updatedAt = new Date().toISOString();
+    const counters = { ...(message.counters || {}), applied: Math.max(Number(message.counters?.applied) || 0, ledger.newSubmitted) };
+    await storageSet({ [DAILY_APPLICATION_LEDGER_KEY]: ledger, autoApplyPendingSubmit: null });
+    return { ...response, finalized: true, ledger, counters, result: message.result };
+  }
+  return response;
+}
+
+async function checkCurrentRunOwnership(runId, ownerId = activeRunOwnerId) {
+  let response;
+  try {
+    response = await sendRuntimeCommand({
+      type: 'CHECK_AUTO_APPLY_RUN_OWNERSHIP',
+      runId,
+      ownerId
+    });
+  } catch {
+    return false;
+  }
+  if (response?.owned === true && response.ownerId) {
+    activeRunOwnerId = Number(response.ownerId) || activeRunOwnerId;
+  }
+  return response?.ok === true && response?.owned === true;
+}
+
 async function setRunState(patch) {
   await syncStopRequestedFromStorage();
   const terminalStates = new Set(['complete', 'idle', 'dry_run_complete', 'stopped', 'paused']);
@@ -2293,25 +2540,26 @@ async function setRunState(patch) {
       )
     );
   }
-  await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'SET_RUN_STATE', patch: nextPatch }), { optional: true });
+  await withExtensionContext(() => chrome.runtime.sendMessage({
+    type: 'SET_RUN_STATE',
+    runId: activeRunId || '',
+    ownerId: activeRunOwnerId || 0,
+    patch: nextPatch
+  }), { optional: true });
 }
 
 async function appendResult(item) {
-  const response = await withExtensionContext(() => chrome.runtime.sendMessage({ type: 'APPEND_RUN_RESULT', item }), { optional: true });
+  const response = await withExtensionContext(() => chrome.runtime.sendMessage({
+    type: 'APPEND_RUN_RESULT',
+    runId: activeRunId || '',
+    ownerId: activeRunOwnerId || 0,
+    item
+  }), { optional: true });
   if (response?.ok) return;
   if (extensionContextInvalidated) return;
-
-  const { runResults = [] } = await storageGet(['runResults'], { optional: true });
-  const result = {
-    ...item,
-    timestamp: item.timestamp || new Date().toISOString()
-  };
-  await storageSet({ runResults: [...runResults.slice(-199), result] }, { optional: true });
-  await appendAgentLog('run_result_storage_fallback', {
-    status: result.status || '',
-    vacancyId: result.vacancyId || '',
-    title: result.title || ''
-  });
+  const error = new Error('Результат отклика отклонен: вкладка не владеет текущим запуском.');
+  error.code = 'HHJA_RUN_NOT_OWNED';
+  throw error;
 }
 
 async function ensureRunResultStored(item) {
@@ -2323,7 +2571,18 @@ async function ensureRunResultStored(item) {
     result?.timestamp === item.timestamp
   ));
   if (exists) return;
-  await storageSet({ runResults: [...runResults.slice(-199), item] }, { optional: true });
+  const response = await sendRuntimeCommand({
+    type: 'APPEND_RUN_RESULT',
+    runId: activeRunId || '',
+    ownerId: activeRunOwnerId || 0,
+    ensure: true,
+    item
+  });
+  if (response?.ok !== true) {
+    const error = new Error('Результат отклика не сохранен владельцем запуска.');
+    error.code = 'HHJA_RUN_NOT_OWNED';
+    throw error;
+  }
 }
 
 async function savePendingSubmit({ item, counters, status, coverLetterUsed, testDetected }) {
@@ -2331,9 +2590,10 @@ async function savePendingSubmit({ item, counters, status, coverLetterUsed, test
   const returnToSearchUrl = navigationQueue.returnToSearch && isHhSearchPageUrl(navigationQueue.sourceUrl)
     ? navigationQueue.sourceUrl
     : '';
-  await storageSet({
+  await writeOwnedAutoApplyState({
     autoApplyPendingSubmit: {
       runId: activeRunId,
+      ownerId: activeRunOwnerId,
       item: {
         index: item.index,
         vacancyId: item.vacancyId,
@@ -2358,7 +2618,64 @@ async function savePendingSubmit({ item, counters, status, coverLetterUsed, test
 }
 
 async function clearPendingSubmit() {
-  await storageSet({ autoApplyPendingSubmit: null });
+  await writeOwnedAutoApplyState({ autoApplyPendingSubmit: null });
+}
+
+async function finalizePendingSubmitAtomically({
+  item,
+  counters,
+  status = 'applied',
+  coverLetterUsed = false,
+  testDetected = false,
+  runId = activeRunId,
+  ownerId = activeRunOwnerId,
+  throwOnFailure = false
+}) {
+  const vacancyId = getVacancyDedupeKey(item);
+  const result = {
+    index: Math.max(0, Number(item?.index) || 0),
+    vacancyId,
+    title: cleanText(item?.title || ''),
+    url: String(item?.url || ''),
+    status,
+    coverLetterUsed: Boolean(coverLetterUsed),
+    testDetected: Boolean(testDetected),
+    error: ''
+  };
+  const finalized = await sendRuntimeCommand({
+    type: 'FINALIZE_AUTO_APPLY_PENDING_SUBMIT',
+    runId,
+    ownerId,
+    vacancyId,
+    counters: { ...counters },
+    result
+  });
+  if (finalized?.alreadyFinalized === true) return { counters, result: finalized.result, alreadyFinalized: true };
+  if (finalized?.ok !== true || finalized?.finalized !== true) {
+    if (!throwOnFailure) return null;
+    const error = new Error('Подтвержденный отклик не удалось атомарно сохранить; повтор будет выполнен из журнала отправки.');
+    error.code = 'HHJA_PENDING_FINALIZE_FAILED';
+    throw error;
+  }
+  Object.assign(counters, finalized.counters || {});
+  await ensureRunResultStored({ ...result, timestamp: finalized.result?.timestamp });
+  return { counters, result: finalized.result || result };
+}
+
+async function finalizeOwnedPendingSubmit(pending, counters) {
+  if (!pending?.item || !pending.runId || !pending.ownerId) return null;
+  activeRunId = pending.runId;
+  activeRunOwnerId = Number(pending.ownerId) || 0;
+  if (!await checkCurrentRunOwnership(activeRunId, activeRunOwnerId)) return null;
+  return finalizePendingSubmitAtomically({
+    item: pending.item,
+    counters,
+    status: pending.status || 'applied',
+    coverLetterUsed: pending.coverLetterUsed,
+    testDetected: pending.testDetected,
+    runId: activeRunId,
+    ownerId: activeRunOwnerId
+  });
 }
 
 async function appendSkippedResponse(item, counters, status, error) {
@@ -2427,7 +2744,13 @@ function isConfirmedResponseAttemptDestination(item, attempt) {
     return false;
   }
   if (isVacancyDetailPage()) return isCurrentVacancyDetailConfirmed(item);
-  if (hasActiveResponseControl(document, item)) return false;
+  if (
+    hasActiveResponseControl(document, item) ||
+    hasSubmitControl(document) ||
+    findQuestionFields(document).length > 0 ||
+    findQuestionControlGroups(document).length > 0 ||
+    Boolean(findTextarea(document))
+  ) return false;
   const responseRoot = getDialogRoot();
   return responseRoot !== document
     ? isAlreadyAppliedForCurrentItem(responseRoot, item)
@@ -2440,10 +2763,50 @@ async function appendCurrentVacancyConfirmation(
   { coverLetterUsed = false, testDetected = item.testDetected } = {}
 ) {
   const attempt = item.navigationQueue?.responseAttempt;
-  if (isMatchingResponseAttemptDestination(item, attempt) && hasFreshMatchingResponseAttempt(item.navigationQueue, item)) {
+  if (isMatchingResponseAttemptDestination(item, attempt) && attempt) {
+    if (!isValidDirectNavigationAttempt(attempt, item.navigationQueue, item)) {
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_unverified_response_attempt',
+        'Пропущено: не удалось подтвердить происхождение прямого отклика.'
+      );
+      return 'unverified_attempt';
+    }
+    const result = {
+      index: item.index,
+      vacancyId: item.vacancyId,
+      title: item.title,
+      url: item.url,
+      status: 'applied_direct_navigation',
+      coverLetterUsed,
+      testDetected,
+      error: ''
+    };
+    const finalized = await sendRuntimeCommand({
+      type: 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT',
+      runId: attempt.runId,
+      ownerId: activeRunOwnerId || attempt.ownerId || 0,
+      vacancyId: attempt.vacancyId,
+      counters: { ...counters },
+      result
+    });
+    if (finalized?.alreadyFinalized === true) {
+      return 'already_finalized';
+    }
+    if (finalized?.ok !== true || finalized?.finalized !== true) {
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_unverified_response_attempt',
+        'Пропущено: попытка прямого отклика устарела или не принадлежит текущему запуску.'
+      );
+      return 'unverified_attempt';
+    }
+    Object.assign(counters, finalized.counters || {});
+    await ensureRunResultStored({ ...result, timestamp: finalized.result?.timestamp });
     item.navigationQueue.responseAttempt = null;
-    await saveQueue(item.navigationQueue);
-    await appendDirectClickResponse(item, counters, { coverLetterUsed, testDetected });
+    closeDialog();
     return 'submitted';
   }
   await appendAlreadyAppliedResponse(item, counters, { coverLetterUsed, testDetected });
@@ -2542,19 +2905,13 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     isAlreadyAppliedForCurrentItem(document, item, { ignoreActiveResponseControl: true }) ||
     await isStructurelessCurrentDetailConfirmedByPendingSubmit(item)
   ) {
-    const { ledger } = await recordDailyApplication(item, 'submitted', counters);
-    syncCountersFromLedger(counters, ledger);
-    await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
-    await clearPendingSubmit();
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
+    await finalizePendingSubmitAtomically({
+      item,
+      counters,
       status,
       coverLetterUsed,
       testDetected,
-      error: ''
+      throwOnFailure: true
     });
     closeDialog();
     return false;
@@ -2673,16 +3030,8 @@ async function finalizeConfirmedPendingSubmitForStop(counters = {}) {
     );
   }
 
-  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', finalizedCounters);
-  syncCountersFromLedger(finalizedCounters, ledger);
-  await clearPendingSubmit();
-  await appendResult({
-    ...autoApplyPendingSubmit.item,
-    status: autoApplyPendingSubmit.status || 'applied',
-    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
-    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
-    error: ''
-  });
+  const finalized = await finalizeOwnedPendingSubmit(autoApplyPendingSubmit, finalizedCounters);
+  if (!finalized) return null;
   await appendAgentLog('pending_submit_finalized_before_stop', {
     vacancyId: autoApplyPendingSubmit.item.vacancyId,
     status: autoApplyPendingSubmit.status || 'applied',
@@ -2711,16 +3060,8 @@ async function finalizePendingSubmit() {
     errors: 0,
     ...(autoApplyPendingSubmit.counters || {})
   };
-  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', counters);
-  syncCountersFromLedger(counters, ledger);
-  await clearPendingSubmit();
-  await appendResult({
-    ...autoApplyPendingSubmit.item,
-    status: autoApplyPendingSubmit.status || 'applied',
-    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
-    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
-    error: ''
-  });
+  const finalized = await finalizeOwnedPendingSubmit(autoApplyPendingSubmit, counters);
+  if (!finalized) return false;
   await appendAgentLog('pending_submit_finalized', {
     vacancyId: autoApplyPendingSubmit.item.vacancyId,
     status: autoApplyPendingSubmit.status || 'applied',
@@ -2745,6 +3086,7 @@ async function finalizePendingSubmit() {
     await saveSearchQueue({
       active: true,
       runId: autoApplyQueue?.runId || autoApplyPendingSubmit.runId || activeRunId,
+      ownerId: autoApplyQueue?.ownerId || activeRunOwnerId,
       limit: autoApplyQueue?.limit || autoApplyPendingSubmit.queueLimit || 20,
       counters,
       config: autoApplyQueue?.config || autoApplyPendingSubmit.queueConfig || null,
@@ -2775,16 +3117,8 @@ async function finalizePendingSubmitFromSearchReturn(counters, runId = activeRun
   if (!Number.isFinite(Number(pendingCounters.processed))) {
     counters.processed += 1;
   }
-  const { ledger } = await recordDailyApplication(autoApplyPendingSubmit.item, 'submitted', counters);
-  syncCountersFromLedger(counters, ledger);
-  await clearPendingSubmit();
-  await appendResult({
-    ...autoApplyPendingSubmit.item,
-    status: autoApplyPendingSubmit.status || 'applied',
-    coverLetterUsed: Boolean(autoApplyPendingSubmit.coverLetterUsed),
-    testDetected: Boolean(autoApplyPendingSubmit.testDetected),
-    error: ''
-  });
+  const finalized = await finalizeOwnedPendingSubmit(autoApplyPendingSubmit, counters);
+  if (!finalized) return false;
   await appendAgentLog('pending_submit_finalized_from_search_return', {
     vacancyId: autoApplyPendingSubmit.item.vacancyId,
     status: autoApplyPendingSubmit.status || 'applied',
@@ -3333,6 +3667,8 @@ async function handleDryRun(limit) {
 async function applyToVacancy(item, counters, config = null) {
   const applyConfig = config || await getConfig();
   const aiEnabled = applyConfig.aiEnabled !== false;
+  let cancelledDirectNavigationForActiveForm = false;
+  let cancelledDirectNavigationHadStaleConfirmation = false;
 
   if (await stopIfRequested(counters)) return;
 
@@ -3351,12 +3687,52 @@ async function applyToVacancy(item, counters, config = null) {
     return completeHhDailyResponseLimit(item, counters, initialDailyLimitReason);
   }
 
-  if (item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
+  const destinationAttempt = item.navigationQueue?.responseAttempt;
+  if (
+    item.responseFormOpen &&
+    destinationAttempt?.kind === 'direct_response_navigation' &&
+    !isValidDirectNavigationAttempt(destinationAttempt, item.navigationQueue, item)
+  ) {
+    await appendSkippedResponse(
+      item,
+      counters,
+      'skipped_unverified_response_attempt',
+      'Пропущено: прямой отклик не принадлежит текущему запуску или устарел.'
+    );
+    return;
+  }
+
+  if (
+    item.responseFormOpen &&
+    destinationAttempt?.kind === 'direct_response_navigation' &&
+    isValidDirectNavigationAttempt(destinationAttempt, item.navigationQueue, item) &&
+    (
+      hasSubmitControl(document) ||
+      findQuestionFields(document).length > 0 ||
+      findQuestionControlGroups(document).length > 0 ||
+      Boolean(findTextarea(document))
+    )
+  ) {
+    cancelledDirectNavigationHadStaleConfirmation = RESPONSE_CONFIRMATION_PATTERN.test(textOf(document.body));
+    const cancelled = await cancelDirectNavigationAttempt(item.navigationQueue, 'active_response_form');
+    if (!cancelled) {
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_unverified_response_attempt',
+        'Пропущено: не удалось отменить прямую навигацию перед обработкой формы HH.'
+      );
+      return;
+    }
+    cancelledDirectNavigationForActiveForm = true;
+  }
+
+  if (!cancelledDirectNavigationForActiveForm && item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
     await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
 
-  if (isAlreadyAppliedForCurrentItem(item.card, item)) {
+  if (!cancelledDirectNavigationForActiveForm && isAlreadyAppliedForCurrentItem(item.card, item)) {
     await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
@@ -3369,15 +3745,25 @@ async function applyToVacancy(item, counters, config = null) {
     if (location.href === responseUrl) {
       return null;
     }
-    const navigationQueue = {
+    let navigationQueue = {
       ...item.navigationQueue,
       items: item.navigationQueue.items?.map((queueItem, index) => index === 0 ? { ...queueItem, responseUrl } : queueItem),
       active: true,
       index: 0,
-      counters: { ...counters },
-      responseAttempt: buildResponseAttempt(item, item.navigationQueue.sourceUrl || location.href)
+      counters: { ...counters }
     };
-    await saveQueue(navigationQueue);
+    const registered = await registerDirectNavigationAttempt(item, navigationQueue, responseUrl);
+    navigationQueue = registered.queue;
+    item.navigationQueue = navigationQueue;
+    if (!registered.attempt) {
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_direct_navigation_not_registered',
+        'Пропущено: прямая навигация не зарегистрирована владельцем запуска.'
+      );
+      return { navigated: false, registrationRejected: true };
+    }
     await setRunState({
       state: 'waiting_for_dialog',
       ...counters,
@@ -3499,7 +3885,7 @@ async function applyToVacancy(item, counters, config = null) {
     throw new Error('После нажатия обнаружена страница входа, captcha или антибот-проверка');
   }
 
-  if (isAlreadyAppliedForCurrentItem(root, item)) {
+  if (!cancelledDirectNavigationForActiveForm && isAlreadyAppliedForCurrentItem(root, item)) {
     await appendCurrentVacancyConfirmation(item, counters);
     return;
   }
@@ -3951,19 +4337,13 @@ async function applyToVacancy(item, counters, config = null) {
       return;
     }
 
-    const { ledger } = await recordDailyApplication(item, 'submitted', counters);
-    syncCountersFromLedger(counters, ledger);
-    await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
-    await clearPendingSubmit();
-    await appendResult({
-      index: item.index,
-      vacancyId: item.vacancyId,
-      title: item.title,
-      url: item.url,
+    await finalizePendingSubmitAtomically({
+      item,
+      counters,
       status: 'applied_test_assisted',
       coverLetterUsed,
       testDetected: true,
-      error: ''
+      throwOnFailure: true
     });
     closeDialog();
     return;
@@ -4068,6 +4448,21 @@ async function applyToVacancy(item, counters, config = null) {
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
   if (await stopIfRequested(counters)) return;
 
+  if (
+    cancelledDirectNavigationForActiveForm &&
+    cancelledDirectNavigationHadStaleConfirmation &&
+    (hasSubmitControl(getDialogRoot()) || hasSubmitControl(document))
+  ) {
+    await clearPendingSubmit();
+    await appendSkippedResponse(
+      item,
+      counters,
+      'skipped_submit_not_confirmed',
+      'HH response form stayed active after submit; response was not confirmed.'
+    );
+    return;
+  }
+
   const confirmed = await verifySubmitConfirmed({
     item,
     counters,
@@ -4082,19 +4477,13 @@ async function applyToVacancy(item, counters, config = null) {
     return;
   }
 
-  const { ledger } = await recordDailyApplication(item, 'submitted', counters);
-  syncCountersFromLedger(counters, ledger);
-  await setRunState({ state: 'applying', ...counters, currentAction: 'Отклик отправлен' });
-  await clearPendingSubmit();
-  await appendResult({
-    index: item.index,
-    vacancyId: item.vacancyId,
-    title: item.title,
-    url: item.url,
+  await finalizePendingSubmitAtomically({
+    item,
+    counters,
     status: 'applied',
     coverLetterUsed,
     testDetected: false,
-    error: ''
+    throwOnFailure: true
   });
 
   closeDialog();
@@ -4125,6 +4514,7 @@ function buildQueuedVacancyDetailItem(queueItem) {
     title,
     url: queueItem.url || location.href,
     responseUrl: queueItem.responseUrl || '',
+    targetResponseControlEnabledBefore: queueItem.targetResponseControlEnabledBefore === true,
     card: document,
     responseButton: findEnabledClickableByText(document, [/откликнуться/i]) || findClickableByText(document, [/откликнуться/i]),
     responseFormOpen: false,
@@ -4134,11 +4524,11 @@ function buildQueuedVacancyDetailItem(queueItem) {
 }
 
 async function saveQueue(queue) {
-  await storageSet({ autoApplyQueue: queue });
+  await writeOwnedAutoApplyState({ autoApplyQueue: queue });
 }
 
 async function saveSearchQueue(queue) {
-  await storageSet({ autoApplySearchQueue: queue });
+  await writeOwnedAutoApplyState({ autoApplySearchQueue: queue });
 }
 
 async function getAutoApplyQueueStatus() {
@@ -4150,6 +4540,63 @@ async function getAutoApplyQueueStatus() {
     hasResponseQueue,
     hasSearchQueue
   };
+}
+
+async function restoreDurableResponseAttemptQueue() {
+  if (!isVacancyDetailPage() && !/\/applicant\/vacancy_response/.test(location.pathname)) {
+    return false;
+  }
+  const vacancyId = getCurrentVacancyId();
+  if (!vacancyId) return false;
+  const response = await sendRuntimeCommand({
+    type: 'GET_AUTO_APPLY_RESPONSE_ATTEMPT',
+    vacancyId
+  });
+  const attempt = response?.status === 'ready' ? response.attempt : null;
+  const queue = attempt?.queue;
+  const queueItem = Array.isArray(queue?.items) ? queue.items[Number(queue.index) || 0] : null;
+  if (
+    !attempt ||
+    !queue ||
+    !queueItem ||
+    attempt.kind !== 'direct_response_navigation' ||
+    !attempt.runId ||
+    !attempt.ownerId ||
+    queue.active !== true ||
+    String(queue.runId || '') !== String(attempt.runId) ||
+    Number(queue.ownerId) !== Number(attempt.ownerId) ||
+    String(queue.sourceUrl || '') !== String(attempt.sourceUrl || '') ||
+    getVacancyDedupeKey(queueItem) !== vacancyId ||
+    getVacancyId(attempt.responseUrl || '') !== vacancyId
+  ) {
+    return false;
+  }
+  if (!await checkCurrentRunOwnership(attempt.runId, attempt.ownerId)) {
+    return false;
+  }
+  const stored = await storageGet(['autoApplyQueue'], { optional: true });
+  const currentQueue = stored.autoApplyQueue;
+  if (
+    currentQueue?.runId === attempt.runId &&
+    getVacancyDedupeKey(currentQueue.items?.[Number(currentQueue.index) || 0]) === vacancyId
+  ) {
+    return false;
+  }
+  activeRunId = attempt.runId;
+  activeRunOwnerId = Number(attempt.ownerId) || 0;
+  await saveQueue({
+    ...queue,
+    active: true,
+    runId: attempt.runId,
+    ownerId: attempt.ownerId,
+    responseAttempt: { ...attempt, durableRegistered: true }
+  });
+  await appendAgentLog('durable_response_attempt_queue_restored', {
+    runId: attempt.runId,
+    vacancyId,
+    sourceUrl: attempt.sourceUrl || ''
+  });
+  return true;
 }
 
 function getNextSearchPageUrl() {
@@ -4198,6 +4645,16 @@ async function continueQueuedAutoApply() {
     return false;
   }
   activeRunId = autoApplyQueue.runId || activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  activeRunOwnerId = Number(autoApplyQueue.ownerId) || activeRunOwnerId;
+  if (!await checkCurrentRunOwnership(activeRunId, activeRunOwnerId)) {
+    const resumed = await sendRuntimeCommand({
+      type: 'RESUME_AUTO_APPLY_RUN',
+      runId: activeRunId,
+      ownerId: activeRunOwnerId
+    }).catch(() => null);
+    if (resumed?.ok !== true || resumed?.resumed !== true || resumed?.owned !== true) return true;
+    activeRunOwnerId = Number(resumed.ownerId) || activeRunOwnerId;
+  }
   await claimStopBeforeSubmitForRun(activeRunId);
   if (stopRequested) {
     await markStopped(autoApplyQueue.counters || {});
@@ -4232,6 +4689,7 @@ async function continueQueuedAutoApply() {
         await saveSearchQueue({
           active: true,
           runId: autoApplyQueue.runId || activeRunId,
+          ownerId: autoApplyQueue.ownerId || activeRunOwnerId,
           limit: autoApplyQueue.limit || 20,
           counters,
           config: autoApplyQueue.config || null,
@@ -4316,6 +4774,7 @@ async function continueQueuedAutoApply() {
     await saveSearchQueue({
       active: true,
       runId: queue.runId,
+      ownerId: queue.ownerId || activeRunOwnerId,
       limit: queue.limit || 20,
       counters,
       config: queue.config,
@@ -4344,9 +4803,23 @@ async function continueQueuedAutoApply() {
     ...queue,
     index: nextIndex,
     counters,
-    responseAttempt: buildResponseAttempt(nextItem, queue.sourceUrl || location.href)
+    responseAttempt: null
   };
-  await saveQueue(nextQueue);
+  const registered = await registerDirectNavigationAttempt(
+    { ...nextItem, navigationQueue: nextQueue },
+    nextQueue,
+    nextItem.responseUrl
+  );
+  if (!registered.attempt) {
+    await saveQueue({ ...nextQueue, active: false });
+    await setRunState({
+      state: 'error',
+      ...counters,
+      lastError: 'Прямая навигация к следующему отклику не зарегистрирована.'
+    });
+    return true;
+  }
+  await saveQueue(registered.queue);
   await setRunState({ state: 'applying', ...counters, currentAction: 'Пауза перед следующим откликом', lastError: '' });
   const delayMs = randomDelay(queue.config?.delayMinMs, queue.config?.delayMaxMs);
   await sleep(delayMs);
@@ -4398,6 +4871,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       await saveSearchQueue({
         active: true,
         runId: activeRunId,
+        ownerId: activeRunOwnerId,
         limit,
         counters,
         config,
@@ -4429,6 +4903,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       item.navigationQueue = {
         active: true,
         runId: activeRunId,
+        ownerId: activeRunOwnerId,
         index: 0,
         items: [
           {
@@ -4437,6 +4912,8 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
             title: item.title,
             url: item.url,
             responseUrl: item.responseUrl || '',
+            targetResponseControlEnabledBefore: Boolean(item.responseButton && !isDisabled(item.responseButton)),
+            alreadyAppliedBefore: isAlreadyAppliedForCurrentItem(item.card, item),
             testDetected: item.testDetected
           }
         ],
@@ -4459,8 +4936,17 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     const appliedBeforeItem = counters.applied;
     try {
       if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
-        item.navigationQueue.responseAttempt = buildResponseAttempt(item, sourceUrl);
-        await saveQueue(item.navigationQueue);
+        const registered = await registerDirectNavigationAttempt(item, item.navigationQueue, item.responseUrl);
+        item.navigationQueue = registered.queue;
+        if (!registered.attempt) {
+          await appendSkippedResponse(
+            item,
+            counters,
+            'skipped_direct_navigation_not_registered',
+            'Пропущено: прямая навигация не зарегистрирована владельцем запуска.'
+          );
+          continue;
+        }
         await setRunState({
           state: 'waiting_for_dialog',
           ...counters,
@@ -4523,6 +5009,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         await saveSearchQueue({
           active: true,
           runId: activeRunId,
+          ownerId: activeRunOwnerId,
           limit,
           counters,
           config,
@@ -4557,6 +5044,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
       await saveSearchQueue({
         active: true,
         runId: activeRunId,
+        ownerId: activeRunOwnerId,
         limit,
         counters,
         config,
@@ -4597,6 +5085,16 @@ async function continueSearchAutoApply() {
     return false;
   }
   activeRunId = autoApplySearchQueue.runId || activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  activeRunOwnerId = Number(autoApplySearchQueue.ownerId) || activeRunOwnerId;
+  if (!await checkCurrentRunOwnership(activeRunId, activeRunOwnerId)) {
+    const resumed = await sendRuntimeCommand({
+      type: 'RESUME_AUTO_APPLY_RUN',
+      runId: activeRunId,
+      ownerId: activeRunOwnerId
+    }).catch(() => null);
+    if (resumed?.ok !== true || resumed?.resumed !== true || resumed?.owned !== true) return true;
+    activeRunOwnerId = Number(resumed.ownerId) || activeRunOwnerId;
+  }
   globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   if (['complete', 'dry_run_complete', 'stopped', 'idle', 'error'].includes(runState?.state)) {
     await saveSearchQueue({ active: false });
@@ -4703,8 +5201,24 @@ async function startRun(mode, limitOverride = null, options = {}) {
     skipped: 0,
     errors: 0
   };
+  const requestedRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  const ownership = await sendRuntimeCommand({ type: 'CLAIM_AUTO_APPLY_RUN', runId: requestedRunId });
+  if (ownership?.ok === true && ownership?.claimed === false) {
+    return {
+      ok: true,
+      alreadyRunning: true,
+      activeRunId: ownership.runId || '',
+      ownerId: ownership.ownerId || 0
+    };
+  }
+  if (ownership?.ok !== true || ownership?.claimed !== true || !ownership?.runId || !ownership?.ownerId) {
+    const error = new Error('Не удалось получить владение запуском откликов.');
+    error.code = 'HHJA_RUN_NOT_OWNED';
+    throw error;
+  }
+  activeRunId = ownership?.runId || requestedRunId;
+  activeRunOwnerId = Number(ownership?.ownerId) || 0;
   await clearStopRequestedFlag();
-  activeRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   await globalThis.HHJobAssistantLog?.reset?.('content', 'auto_apply_started', {
     mode,
     limit,
@@ -4716,7 +5230,7 @@ async function startRun(mode, limitOverride = null, options = {}) {
   if (mode === 'live') {
     await claimStopBeforeSubmitForRun(activeRunId);
   }
-  await storageSet({
+  await writeOwnedAutoApplyState({
     runResults: [],
     autoApplyQueue: { active: false },
     autoApplySearchQueue: { active: false },
@@ -5126,6 +5640,7 @@ async function initializeContentScript() {
   if (finalizedPendingSubmit) {
     return;
   }
+  await restoreDurableResponseAttemptQueue();
   const finalizedStoppedResponseAttempt = await finalizeConfirmedResponseAttemptForStop();
   if (finalizedStoppedResponseAttempt) {
     return;
@@ -5139,6 +5654,8 @@ async function initializeContentScript() {
 
 initializeContentScript().catch(async (error) => {
   const messageText = localizeError(error);
-  await storageSet({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }, { optional: true });
+  if (activeRunId && activeRunOwnerId) {
+    await writeOwnedAutoApplyState({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }).catch(() => {});
+  }
   await setRunState({ state: 'error', lastError: messageText });
 });
