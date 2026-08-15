@@ -3600,6 +3600,91 @@ test('auto apply uses expected salary for salary question when Groq key is missi
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
 });
 
+test('auto apply safely skips an English salary amount question when expected salary is empty', async () => {
+  const question = 'What are your realistic salary expectations for this role (net annual amount in KZT)?';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary: '',
+    groqResponse: { ok: true, text: '12 000 000 KZT net per year' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply safely skips a Russian salary question when expected salary is empty', async () => {
+  const question = 'Укажите ваши зарплатные ожидания';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary: '',
+    groqResponse: { ok: true, text: '350 000 рублей на руки' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply fills an exact configured KZT annual salary deterministically', async () => {
+  const question = 'What are your realistic salary expectations for this role (net annual amount in KZT)?';
+  const expectedSalary = '12 000 000 KZT net в год';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary,
+    groqResponse: { ok: true, text: 'Different AI salary answer' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, expectedSalary);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply rejects a nonnumeric configured answer for an explicit salary amount question', async () => {
+  const question = 'What are your realistic salary expectations for this role (net annual amount in KZT)?';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary: 'По договорённости',
+    groqResponse: { ok: true, text: '12 000 000 KZT net per year' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
 test('auto apply keeps cover fallback but never invents employer text when provider fails', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Опишите опыт управления тестированием',

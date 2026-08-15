@@ -1590,6 +1590,16 @@ function isSalaryQuestion(field) {
   return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
 }
 
+function salaryQuestionRequiresNumericAmount(field) {
+  const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
+  return (
+    isNumericOnlyQuestionField(field) ||
+    /сумм|размер|сколько|оклад|фиксированн|\bamount\b/i.test(text) ||
+    /рубл|тенге|₽|\bkzt\b|\brub\b|\busd\b|\beur\b|валют/i.test(text) ||
+    /\bannual\b|\bmonthly\b|\bnet\b|\bgross\b|\bper\s+(?:year|month|hour)\b|в\s+год|за\s+(?:месяц|год|час)|на\s+руки|до\s+вычета|после\s+вычета/i.test(text)
+  );
+}
+
 function isAgeQuestion(field) {
   const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
   return /(?:^|[^\p{L}\p{N}])(?:возраст|сколько\s+вам\s+лет|ваш\s+возраст|age)(?:[^\p{L}\p{N}]|$)/iu.test(text);
@@ -1629,8 +1639,10 @@ function getQuestionAnswerInvalidReason(answer, field) {
       return 'Сгенерированный ответ не похож на контакт для вопроса про мессенджер.';
     }
   }
-  if (isSalaryQuestion(field) && !/\d/.test(text) && !/по\s+договор[её]нности/i.test(text)) {
-    return 'Сгенерированный ответ не содержит сумму для вопроса про доход.';
+  if (isSalaryQuestion(field) && !/\d/.test(text)) {
+    if (salaryQuestionRequiresNumericAmount(field) || !/по\s+договор[её]нности/i.test(text)) {
+      return 'Ответ не содержит сумму для вопроса про доход.';
+    }
   }
   return '';
 }
@@ -2792,13 +2804,15 @@ async function getDeterministicStructuredAnswers(snapshot) {
       continue;
     }
     if (isSalaryQuestion(descriptor.field)) {
-      if (cleanText(expectedSalary)) {
-        answers.set(descriptor.id, { id: descriptor.id, answer: cleanText(expectedSalary), selectedOptions: [] });
-      } else if (isNumericOnlyQuestionField(descriptor.field) && descriptor.required) {
-        blockedReason = 'Пропущено: обязательное числовое поле зарплаты не заполнено в настройках.';
-        blockedStatus = 'skipped_required_numeric_salary_missing';
+      const configuredSalary = cleanText(expectedSalary);
+      if (!configuredSalary) {
+        blockedReason = 'Пропущено: зарплатные ожидания не заполнены в настройках.';
+        blockedStatus = 'skipped_required_salary_missing';
+      } else if (salaryQuestionRequiresNumericAmount(descriptor.field) && !/\d/.test(configuredSalary)) {
+        blockedReason = 'Пропущено: для вопроса о сумме зарплаты в настройках нужна точная сумма с цифрами.';
+        blockedStatus = 'skipped_required_salary_missing';
       } else {
-        answers.set(descriptor.id, { id: descriptor.id, answer: 'По договорённости', selectedOptions: [] });
+        answers.set(descriptor.id, { id: descriptor.id, answer: configuredSalary, selectedOptions: [] });
       }
       continue;
     }
