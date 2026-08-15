@@ -1590,6 +1590,67 @@ function isSalaryQuestion(field) {
   return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
 }
 
+function isCopyAnswersAcknowledgementLabel(value) {
+  return /ответил[аи]?[\s\S]*вопрос[\s\S]*скопировал[аи]?[\s\S]*сопроводительн(?:ое|ого)\s+письм/i.test(cleanText(value));
+}
+
+function getCopyAnswersAcknowledgementOption(descriptor) {
+  return descriptor?.group?.options?.find((option) => isCopyAnswersAcknowledgementLabel(option.label)) || null;
+}
+
+function isCopyAnswersAcknowledgementDescriptor(descriptor) {
+  return Boolean(getCopyAnswersAcknowledgementOption(descriptor));
+}
+
+function isSalaryPromptText(value) {
+  return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(cleanText(value));
+}
+
+function extractCopyAnswersPrompts(root, acknowledgementDescriptors) {
+  const acknowledgementLabels = new Set(
+    acknowledgementDescriptors
+      .flatMap((descriptor) => descriptor.group.options.map((option) => cleanText(option.label)))
+      .filter(isCopyAnswersAcknowledgementLabel)
+  );
+  return cleanText(getRootText(root))
+    .split('\n')
+    .map((line) => cleanText(line))
+    .filter((line) => {
+      if (line.length < 10 || line.length > 600) return false;
+      if (acknowledgementLabels.has(line) || isCopyAnswersAcknowledgementLabel(line)) return false;
+      if (/^(?:отклик(?:нуться|\s+на\s+вакансию)?|для\s+отклика|сопроводительное\s+письмо|писать\s+тут|отправить)$/i.test(line)) return false;
+      return (
+        /[?]$/.test(line) ||
+        /^(?:укажите|опишите|расскажите|напишите|какие|какой|какую|сколько|есть\s+ли|имеется\s+ли|был[аи]?\s+ли|были\s+ли|готовы|почему|для\s+(?:мужчин|женщин))(?:\s|$)/i.test(line) ||
+        isSalaryPromptText(line)
+      );
+    });
+}
+
+function getNumberedCoverLetterLines(value) {
+  const lines = cleanText(value).split('\n').map((line) => cleanText(line)).filter(Boolean);
+  const numbered = lines.map((line) => line.match(/^(\d+)[.)]\s+(.+)$/));
+  if (numbered.some((match) => !match)) return [];
+  return numbered.map((match) => ({ number: Number(match[1]), answer: cleanText(match[2]) }));
+}
+
+function getAcknowledgementVerificationError(value, context) {
+  const numberedLines = getNumberedCoverLetterLines(value);
+  if (
+    context.prompts.length === 0 ||
+    numberedLines.length < context.prompts.length ||
+    numberedLines.some((line, index) => line.number !== index + 1)
+  ) {
+    return 'Пропущено: сопроводительное письмо не содержит полный однозначный нумерованный ответ на вопросы работодателя.';
+  }
+  for (const promptIndex of context.salaryPromptIndexes) {
+    if (!cleanText(numberedLines[promptIndex]?.answer).includes(context.expectedSalary)) {
+      return 'Пропущено: точные зарплатные ожидания не подтверждены в соответствующем ответе сопроводительного письма.';
+    }
+  }
+  return '';
+}
+
 function salaryQuestionRequiresNumericAmount(field) {
   const text = cleanText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
   return (
@@ -1930,8 +1991,7 @@ function summarizeEmployerQuestionInputs(questionFields, questionControlGroups) 
   };
 }
 
-function buildQuestionAnswerAudit(questionFields, questionControlGroups, selectedChoices = { labels: [] }) {
-  const selectedLabels = new Set((selectedChoices?.labels || []).map((label) => cleanText(label)));
+function buildQuestionAnswerAudit(questionFields, questionControlGroups) {
   return {
     textAnswers: questionFields.map((field, index) => ({
       index: index + 1,
@@ -1943,7 +2003,7 @@ function buildQuestionAnswerAudit(questionFields, questionControlGroups, selecte
       type: group.type,
       question: cleanText(group.question || group.key || 'question text not found'),
       selectedOptions: group.options
-        .filter((option) => option.control?.checked || selectedLabels.has(cleanText(option.label)))
+        .filter((option) => Boolean(option.control?.checked))
         .map((option) => option.label)
     }))
   };
@@ -2489,13 +2549,21 @@ function validateFilledQuestionFields(questionFields, answers) {
   return missing;
 }
 
-function validateSelectedQuestionControls(groups) {
-  return groups
-    .map((group, index) => ({
-      index: index + 1,
-      selected: group.options.filter((option) => Boolean(option.control?.checked)).length
-    }))
-    .filter((group) => group.selected === 0)
+function validateSelectedQuestionControls(descriptors, answers) {
+  return descriptors
+    .map((descriptor, index) => {
+      const expected = (answers.get(descriptor.id)?.selectedOptions || []).map(cleanText).filter(Boolean);
+      const actual = descriptor.group.options
+        .filter((option) => Boolean(option.control?.checked))
+        .map((option) => cleanText(option.label))
+        .filter(Boolean);
+      const expectedSet = new Set(expected);
+      const actualSet = new Set(actual);
+      const exactSet = expectedSet.size === actualSet.size && [...expectedSet].every((label) => actualSet.has(label));
+      const validRadio = descriptor.inputType !== 'radio' || (actual.length === 1 && expected.length === 1);
+      return { index: Number(descriptor.legacyIndex || index + 1), verified: validRadio && exactSet };
+    })
+    .filter((group) => !group.verified)
     .map((group) => group.index);
 }
 
@@ -2826,6 +2894,7 @@ async function getDeterministicStructuredAnswers(snapshot) {
   }
 
   for (const descriptor of snapshot.choiceQuestions) {
+    if (isCopyAnswersAcknowledgementDescriptor(descriptor)) continue;
     const preferred = getPreferredChoiceOptions(descriptor.group, preferences).map((option) => cleanText(option.label));
     const onlyOption = descriptor.group.options.length === 1 ? cleanText(descriptor.group.options[0].label) : '';
     const selectedOptions = preferred.length > 0 ? preferred : [onlyOption].filter(Boolean);
@@ -3401,6 +3470,8 @@ async function applyToVacancy(item, counters, config = null) {
     let letter = '';
     const coverLetterRequested = Boolean(coverLetterTextarea && !cleanText(getFieldValue(coverLetterTextarea)));
     const initialDescriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
+    const initialAcknowledgements = questionSnapshot.choiceQuestions.filter(isCopyAnswersAcknowledgementDescriptor);
+    let acknowledgementContext = null;
 
     await appendAgentLog('question_context_extracted', {
       vacancyId: item.vacancyId,
@@ -3418,6 +3489,29 @@ async function applyToVacancy(item, counters, config = null) {
       questionIds: initialDescriptors.map((descriptor) => descriptor.id)
     });
 
+    if (initialAcknowledgements.length > 0) {
+      const prompts = extractCopyAnswersPrompts(root, initialAcknowledgements);
+      if (initialAcknowledgements.length !== 1 || !coverLetterTextarea || prompts.length === 0) {
+        await skipQuestionForm(
+          'skipped_acknowledgement_not_verified',
+          'Пропущено: подтверждение копирования ответов нельзя безопасно сопоставить с вопросами и сопроводительным письмом.'
+        );
+        return;
+      }
+      const salaryPromptIndexes = prompts
+        .map((prompt, index) => isSalaryPromptText(prompt) ? index : -1)
+        .filter((index) => index >= 0);
+      const expectedSalary = cleanText(await getExpectedSalary());
+      if (salaryPromptIndexes.length > 0 && (!expectedSalary || !/\d/.test(expectedSalary))) {
+        await skipQuestionForm(
+          'skipped_required_salary_missing',
+          'Пропущено: для подтверждения ответов нужна точная сумма зарплатных ожиданий из настроек.'
+        );
+        return;
+      }
+      acknowledgementContext = { prompts, salaryPromptIndexes, expectedSalary };
+    }
+
     let selectedChoices = { selected: 0, labels: [] };
     let resnapshotCount = 0;
     while (true) {
@@ -3431,7 +3525,9 @@ async function applyToVacancy(item, counters, config = null) {
       }
       structuredAnswers = new Map(deterministic.answers);
       const descriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
-      const aiDescriptors = descriptors.filter((descriptor) => !structuredAnswers.has(descriptor.id));
+      const aiDescriptors = descriptors.filter((descriptor) => (
+        !structuredAnswers.has(descriptor.id) && !isCopyAnswersAcknowledgementDescriptor(descriptor)
+      ));
       const requestCoverLetter = coverLetterRequested && !letter;
       const aiNeeded = aiDescriptors.length > 0 || requestCoverLetter;
 
@@ -3514,16 +3610,20 @@ async function applyToVacancy(item, counters, config = null) {
       }
 
       selectedChoices = { selected: 0, labels: [] };
-      if (questionSnapshot.choiceQuestions.length > 0) {
+      const fillableChoiceDescriptors = questionSnapshot.choiceQuestions.filter(
+        (descriptor) => !isCopyAnswersAcknowledgementDescriptor(descriptor)
+      );
+      if (fillableChoiceDescriptors.length > 0) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
         setBusyCursor(true);
         try {
-          selectedChoices = fillStructuredQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers);
+          selectedChoices = fillStructuredQuestionControls(fillableChoiceDescriptors, structuredAnswers);
         } finally {
           setBusyCursor(false);
         }
         const missingChoiceGroupIndexes = validateSelectedQuestionControls(
-          questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group)
+          fillableChoiceDescriptors,
+          structuredAnswers
         );
         if (missingChoiceGroupIndexes.length > 0) {
           const message = `Пропущено: безопасный вариант HH не найден (${missingChoiceGroupIndexes.join(', ')}).`;
@@ -3553,9 +3653,14 @@ async function applyToVacancy(item, counters, config = null) {
       });
     }
 
-    if (questionSnapshot.choiceQuestions.length > 0) {
-      const currentChoiceGroups = questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group);
-      const missingChoiceGroupIndexes = validateSelectedQuestionControls(currentChoiceGroups);
+    const currentFillableChoiceDescriptors = questionSnapshot.choiceQuestions.filter(
+      (descriptor) => !isCopyAnswersAcknowledgementDescriptor(descriptor)
+    );
+    if (currentFillableChoiceDescriptors.length > 0) {
+      const missingChoiceGroupIndexes = validateSelectedQuestionControls(
+        currentFillableChoiceDescriptors,
+        structuredAnswers
+      );
       if (missingChoiceGroupIndexes.length > 0) {
         const message = `Пропущено: ответы HH не сохранились после обновления формы (${missingChoiceGroupIndexes.join(', ')}).`;
         await skipQuestionForm('skipped_choice_fill_not_verified', message);
@@ -3597,13 +3702,16 @@ async function applyToVacancy(item, counters, config = null) {
       assistance,
       answers: buildQuestionAnswerAudit(
         questionSnapshot.textQuestions.map((descriptor) => descriptor.field),
-        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group),
-        selectedChoices
+        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group)
       )
     });
     if (coverLetterRequested) {
       const fallbackContext = [vacancyText, questionContext, assistance, letter].map(cleanText).filter(Boolean).join('\n');
-      const sanitizedLetter = await sanitizeCoverLetterDraft(letter, () => getFallbackCoverLetter(fallbackContext));
+      const sanitizedLetter = await sanitizeCoverLetterDraft(
+        letter,
+        () => getFallbackCoverLetter(fallbackContext),
+        { allowStructuredAnswers: Boolean(acknowledgementContext) }
+      );
       if (sanitizedLetter.fallbackUsed) {
         await recordLocalAiFallback('test_assist', sanitizedLetter.reason || 'invalid_cover_letter');
         await appendAgentLog('mandatory_cover_letter_fallback_after_bad_text', {
@@ -3612,6 +3720,13 @@ async function applyToVacancy(item, counters, config = null) {
           rejectedTextLength: cleanText(letter).length
         });
         letter = sanitizedLetter.text;
+      }
+      if (acknowledgementContext) {
+        const acknowledgementError = getAcknowledgementVerificationError(letter, acknowledgementContext);
+        if (acknowledgementError) {
+          await skipQuestionForm('skipped_acknowledgement_not_verified', acknowledgementError);
+          return;
+        }
       }
 
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю обязательное сопроводительное письмо' });
@@ -3634,11 +3749,63 @@ async function applyToVacancy(item, counters, config = null) {
         letterLength: cleanText(letter).length
       });
     }
+    if (acknowledgementContext) {
+      const acknowledgementError = getAcknowledgementVerificationError(
+        getFieldValue(coverLetterTextarea),
+        acknowledgementContext
+      );
+      if (acknowledgementError) {
+        await skipQuestionForm('skipped_acknowledgement_not_verified', acknowledgementError);
+        return;
+      }
+      let acknowledgementDescriptors = questionSnapshot.choiceQuestions.filter(isCopyAnswersAcknowledgementDescriptor);
+      for (const descriptor of acknowledgementDescriptors) {
+        const option = getCopyAnswersAcknowledgementOption(descriptor);
+        structuredAnswers.set(descriptor.id, {
+          id: descriptor.id,
+          answer: '',
+          selectedOptions: [cleanText(option.label)]
+        });
+      }
+      const acknowledgementSelections = fillStructuredQuestionControls(acknowledgementDescriptors, structuredAnswers);
+      selectedChoices.selected += acknowledgementSelections.selected;
+      selectedChoices.labels.push(...acknowledgementSelections.labels);
+      await sleep(POST_FILL_SETTLE_MS);
+      if (!refreshQuestionSnapshot(questionSnapshot)) {
+        await skipQuestionForm(
+          'skipped_choice_fill_not_verified',
+          'Пропущено: подтверждение копирования ответов изменилось после выбора.'
+        );
+        return;
+      }
+      acknowledgementDescriptors = questionSnapshot.choiceQuestions.filter(isCopyAnswersAcknowledgementDescriptor);
+      const acknowledgementMismatches = validateSelectedQuestionControls(
+        acknowledgementDescriptors,
+        structuredAnswers
+      );
+      if (acknowledgementDescriptors.length !== 1 || acknowledgementMismatches.length > 0) {
+        await skipQuestionForm(
+          'skipped_choice_fill_not_verified',
+          'Пропущено: подтверждение копирования ответов не сохранилось в форме HH.'
+        );
+        return;
+      }
+    }
+    const finalChoiceMismatches = validateSelectedQuestionControls(
+      questionSnapshot.choiceQuestions,
+      structuredAnswers
+    );
+    if (finalChoiceMismatches.length > 0) {
+      await skipQuestionForm(
+        'skipped_choice_fill_not_verified',
+        `Пропущено: точные выбранные ответы HH не подтверждены (${finalChoiceMismatches.join(', ')}).`
+      );
+      return;
+    }
     await recordPrivateQuestionAudit(item, {
       questions: buildQuestionAnswerAudit(
         questionSnapshot.textQuestions.map((descriptor) => descriptor.field),
-        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group),
-        selectedChoices
+        questionSnapshot.choiceQuestions.map((descriptor) => descriptor.group)
       ),
       coverLetter: coverLetterRequested ? cleanText(getFieldValue(coverLetterTextarea)) : ''
     });

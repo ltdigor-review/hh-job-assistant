@@ -58,6 +58,7 @@ async function runContentAutoApply({
   nextPageUrl = '',
   dailyLimit = 1,
   questionControls = [],
+  forcedCheckedChoiceKeysAfterChange = null,
   rerenderQuestionControlsOnChange = false,
   questionControlsAfterChange = null,
   questionControlsAfterChanges = [],
@@ -176,7 +177,14 @@ async function runContentAutoApply({
         value: item.value || item.label,
         attrs: { type: item.type, name: item.name || '', value: item.value || item.label },
         dispatch(event) {
-          if (event?.type !== 'change' || !rerenderQuestionControlsOnChange) return;
+          if (event?.type !== 'change') return;
+          if (Array.isArray(forcedCheckedChoiceKeysAfterChange)) {
+            const forcedKeys = new Set(forcedCheckedChoiceKeysAfterChange);
+            selectableControls.forEach((candidate) => {
+              candidate.input.checked = forcedKeys.has(`${candidate.name || ''}\n${candidate.label}`);
+            });
+          }
+          if (!rerenderQuestionControlsOnChange) return;
           const rerenderSequence = questionControlsAfterChanges.length > 0
             ? questionControlsAfterChanges
             : [questionControlsAfterChange || questionControls];
@@ -1971,6 +1979,61 @@ test('auto apply fills choice and text questions on open response form before su
     ['нет']
   );
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply audits only the actual checked option for alternating Yes/No radio groups', async () => {
+  const questionControls = Array.from({ length: 4 }, (_, index) => [
+    { type: 'radio', name: `audit_${index + 1}`, label: 'Да', value: `yes_${index + 1}` },
+    { type: 'radio', name: `audit_${index + 1}`, label: 'Нет', value: `no_${index + 1}` }
+  ]).flat();
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на четыре вопроса работодателя',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls,
+    initialLocalStore: { agentDebugLogsEnabled: true, agentDebugLog: [] },
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question, index) => ({
+        id: question.id,
+        answer: '',
+        selectedOptions: [index % 2 === 0 ? 'Да' : 'Нет']
+      })),
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да', 'Нет', 'Да', 'Нет']);
+  assert.deepEqual(
+    result.localStore.agentPrivateQuestionAudit.entries[0].questions.choiceAnswers.map((answer) => answer.selectedOptions),
+    [['Да'], ['Нет'], ['Да'], ['Нет']]
+  );
+});
+
+test('auto apply skips when the actual checked radio state differs from the intended exact option', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nГотовы приступить?',
+    hasTextarea: false,
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'radio', name: 'ready', label: 'Да', value: 'yes' },
+      { type: 'radio', name: 'ready', label: 'Нет', value: 'no' }
+    ],
+    forcedCheckedChoiceKeysAfterChange: ['ready\nДа', 'ready\nНет'],
+    groqResponse: (message) => ({
+      ok: true,
+      answers: [{ id: message.questions[0].id, answer: '', selectedOptions: ['Да'] }],
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, ['Да', 'Нет']);
+  assert.equal(result.appended.at(-1).status, 'skipped_choice_fill_not_verified');
 });
 
 test('auto apply does not count open response form submit without hh confirmation', async () => {
@@ -3813,7 +3876,7 @@ test('auto apply does not paste question protocol into mandatory cover letter', 
   assert.equal(result.appended.at(-1).coverLetterUsed, true);
 });
 
-test('auto apply fills live-style confirmation radio and mandatory cover letter', async () => {
+test('auto apply skips an acknowledgement when only a generic cover letter is available', async () => {
   const liveQuestionText = [
     'Отклик на вакансию',
     'Для отклика необходимо ответить на несколько вопросов работодателя',
@@ -3826,7 +3889,8 @@ test('auto apply fills live-style confirmation radio and mandatory cover letter'
   const result = await runContentAutoApply({
     dialogText: liveQuestionText,
     bodyText: liveQuestionText,
-    hasTextarea: true,
+    hasTextarea: false,
+    hasCoverLetterField: true,
     startOnResponseForm: true,
     validateRequiredBeforeSubmit: true,
     questionControls: [
@@ -3841,12 +3905,131 @@ test('auto apply fills live-style confirmation radio and mandatory cover letter'
   });
 
   assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.appended.at(-1).status, 'skipped_acknowledgement_not_verified');
+});
+
+test('auto apply verifies a numbered cover letter before selecting the copy-answers acknowledgement', async () => {
+  const promptLines = [
+    'Укажите функционал и период работы с АБС ЦФТ.',
+    'Укажите ожидания по окладу минимум и комфорт (gross, до вычета налога).',
+    'Для мужчин: У Вас есть военный билет или приписное?'
+  ];
+  const expectedSalary = '250 000 руб. gross';
+  const result = await runContentAutoApply({
+    dialogText: [
+      'Отклик на вакансию',
+      'Ответьте на вопросы ниже и скопируйте ответы в сопроводительное письмо.',
+      ...promptLines,
+      'Сопроводительное письмо обязательное для этой вакансии'
+    ].join('\n'),
+    bodyText: promptLines.join('\n'),
+    hasTextarea: false,
+    hasCoverLetterField: true,
+    startOnResponseForm: true,
+    validateRequiredBeforeSubmit: true,
+    expectedSalary,
+    questionControls: [{
+      type: 'radio',
+      name: 'copy_ack',
+      label: 'Да, я ответил на вопросы и скопировал ответы в сопроводительное письмо',
+      value: 'confirmed'
+    }],
+    groqResponse: {
+      ok: true,
+      answers: [],
+      coverLetter: [
+        '1. Работал с АБС ЦФТ пять лет: интеграции, сопровождение и развитие.',
+        `2. ${expectedSalary}.`,
+        '3. Военный билет имеется.'
+      ].join('\n')
+    }
+  });
+
   assert.equal(result.response.applied, 1);
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.checkedLabels, ['Да, я ответил на вопросы и скопировал ответы в сопроводительное письмо']);
+  assert.match(result.coverTextareaValue, /^1\..*\n2\..*250 000 руб\. gross.*\n3\./);
+  assert.equal(result.groqRequests.length, 1);
+  assert.deepEqual(result.groqRequests[0].questions, []);
   assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
+});
+
+test('auto apply skips a salary acknowledgement before provider use when expected salary is missing', async () => {
+  const formText = [
+    'Ответьте на вопросы ниже и скопируйте ответы в сопроводительное письмо.',
+    'Опишите релевантный опыт с банковскими системами.',
+    'Укажите ожидания по окладу минимум и комфорт (gross).',
+    'Сопроводительное письмо обязательное'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: formText,
+    bodyText: formText,
+    hasTextarea: false,
+    hasCoverLetterField: true,
+    startOnResponseForm: true,
+    expectedSalary: '',
+    questionControls: [{
+      type: 'radio',
+      name: 'copy_ack_missing_salary',
+      label: 'Да, я ответил на вопросы и скопировал ответы в сопроводительное письмо',
+      value: 'confirmed'
+    }],
+    groqResponse: {
+      ok: true,
+      answers: [],
+      coverLetter: '1. Опыт есть.\n2. 250 000 руб. gross.'
+    }
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.coverTextareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply skips an acknowledgement when the numbered cover letter is partial', async () => {
+  const expectedSalary = '250 000 руб. gross';
+  const formText = [
+    'Ответьте на вопросы ниже и скопируйте ответы в сопроводительное письмо.',
+    'Опишите релевантный опыт с банковскими системами.',
+    'Укажите ожидания по окладу минимум и комфорт (gross).',
+    'Для мужчин: У Вас есть военный билет или приписное?',
+    'Сопроводительное письмо обязательное'
+  ].join('\n');
+  const result = await runContentAutoApply({
+    dialogText: formText,
+    bodyText: formText,
+    hasTextarea: false,
+    hasCoverLetterField: true,
+    startOnResponseForm: true,
+    expectedSalary,
+    questionControls: [{
+      type: 'radio',
+      name: 'copy_ack_partial',
+      label: 'Да, я ответил на вопросы и скопировал ответы в сопроводительное письмо',
+      value: 'confirmed'
+    }],
+    groqResponse: {
+      ok: true,
+      answers: [],
+      coverLetter: `1. Работал с банковскими системами.\n2. ${expectedSalary}.`
+    }
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.coverTextareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'skipped_acknowledgement_not_verified');
 });
 
 test('auto apply records already confirmed response page without consuming new-submit quota', async () => {
