@@ -1601,7 +1601,7 @@ test('auto apply skips test vacancy when no fillable question fields are found',
   assert.match(result.appended.at(-1).error, /заполняемые поля HH не найдены/);
 });
 
-test('auto apply never invents an employer text answer when the provider is unavailable', async () => {
+test('auto apply never invents an unsupported employer fact when the provider is unavailable', async () => {
   const result = await runContentAutoApply({
     startOnResponseForm: true,
     hasQuestionField: true,
@@ -1612,9 +1612,9 @@ test('auto apply never invents an employer text answer when the provider is unav
   });
 
   assert.equal(result.submitClicks, 0);
-  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.groqRequests.length, 0);
   assert.equal(result.textareaValue, '');
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'skipped_unsupported_candidate_fact');
 });
 
 test('auto apply asks AI for a non-age employer question without exact candidate age', async () => {
@@ -2731,6 +2731,7 @@ test('auto apply keeps distinct valid answers for two employer questions', async
     hasQuestionField: true,
     questionFieldCount: 2,
     questionFieldLabels: ['Расскажите об опыте C/C++.', 'Оцените уровень английского языка.'],
+    initialLocalStore: { resumeProfileText: 'Разрабатывал системные компоненты на C/C++. Английский B2.' },
     groqResponse: {
       ok: true,
       text: [
@@ -2797,6 +2798,7 @@ test('auto apply rejects duplicate structured IDs and never pastes a raw respons
     hasQuestionField: true,
     questionFieldCount: 2,
     questionFieldLabels: ['Опишите опыт с Linux', 'Опишите опыт с сетями'],
+    initialLocalStore: { resumeProfileText: 'Работал с Linux и сетевой инфраструктурой.' },
     groqResponse: (message) => ({
       ok: true,
       answers: [
@@ -2824,6 +2826,7 @@ test('auto apply rejects missing and unknown structured IDs', async () => {
     hasQuestionField: true,
     questionFieldCount: 2,
     questionFieldLabels: ['Опишите опыт с Linux', 'Опишите опыт с сетями'],
+    initialLocalStore: { resumeProfileText: 'Работал с Linux и сетевой инфраструктурой.' },
     groqResponse: (message) => ({
       ok: true,
       answers: [
@@ -3049,6 +3052,9 @@ test('auto apply accepts one digit numeric answers for employer text questions',
       'В каком городе вы проживаете?',
       'Ваши пожелания по уровню з/п(минимум и комфорт)?'
     ],
+    initialLocalStore: {
+      resumeProfileText: '9 лет разрабатывает на Java, руководил командой из 5 разработчиков, проживает в Москве.'
+    },
     questionControls: [
       { type: 'radio', name: 'integration', label: 'Да', value: 'yes' },
       { type: 'radio', name: 'integration', label: 'Нет', value: 'no' },
@@ -3746,6 +3752,80 @@ test('auto apply rejects a nonnumeric configured answer for an explicit salary a
   assert.equal(result.textareaValue, '');
   assert.equal(result.groqRequests.length, 0);
   assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply detects split Russian salary wording across multiple text fields and skips before provider use', async () => {
+  const salaryQuestion = 'Какие ваши ожидания по заработной плате? Укажите сумму в месяц.';
+  const result = await runContentAutoApply({
+    dialogText: `${salaryQuestion}\nПочему вам интересна эта позиция?`,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    questionFieldLabels: [salaryQuestion, 'Почему вам интересна эта позиция?'],
+    expectedSalary: '',
+    groqResponse: { ok: true, text: 'Text question 1: 500000\nText question 2: Интересны задачи продукта.' }
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.textareaValues, ['', '']);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply fills split Russian salary wording exactly and sends only non-salary descriptors to provider', async () => {
+  const salaryQuestion = 'Какие ваши ожидания по заработной плате? Укажите сумму в месяц.';
+  const expectedSalary = '500 000 руб. gross в месяц';
+  const result = await runContentAutoApply({
+    dialogText: `${salaryQuestion}\nПочему вам интересна эта позиция?`,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    questionFieldLabels: [salaryQuestion, 'Почему вам интересна эта позиция?'],
+    expectedSalary,
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id,
+        answer: 'Интересны инженерные задачи и ответственность за результат.',
+        selectedOptions: []
+      })),
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.textareaValues, [expectedSalary, 'Интересны инженерные задачи и ответственность за результат.']);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.groqRequests[0].questions.length, 1);
+  assert.equal(result.groqRequests[0].questions[0].question, 'Почему вам интересна эта позиция?');
+});
+
+test('auto apply skips unsupported OEBS module experience without provider use or partial form submission', async () => {
+  const question = 'Расскажите об опыте работы с Oracle E-Business Suite (OEBS): с какими модулями вы работали и какие задачи решали?';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    initialLocalStore: {
+      resumeParsedText: 'Java, Spring Boot, PostgreSQL, Kafka. Разработка backend-сервисов.',
+      resumeProfileText: 'Java backend developer: Spring Boot, PostgreSQL, Kafka.'
+    },
+    groqResponse: { ok: true, text: 'Работал с модулями OEBS и решал задачи интеграции.' }
+  });
+
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_unsupported_candidate_fact');
 });
 
 test('auto apply keeps cover fallback but never invents employer text when provider fails', async () => {
@@ -6013,6 +6093,111 @@ test('auto apply counts a fresh direct-response queue landing on confirmation de
   assert.equal(navigations.at(-1), 'https://hh.ru/search/vacancy?text=java');
 });
 
+test('queued direct fallback preserves the current item until its result makes processed equal run results', async () => {
+  const source = await readContentScriptSource();
+  const navigations = [];
+  const localStore = { ...TEST_READY_CONFIG,
+    runState: { state: 'applying', found: 20, processed: 20, applied: 19, alreadyApplied: 0, skipped: 0, errors: 0 },
+    runResults: Array.from({ length: 19 }, (_, index) => ({
+      vacancyId: String(2000 + index),
+      status: 'applied'
+    })),
+    autoApplyQueue: {
+      active: true,
+      runId: 'fallback-run',
+      index: 0,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      limit: 100,
+      returnToSearch: true,
+      processedCounted: true,
+      items: [{
+        index: 20,
+        vacancyId: '136999001',
+        title: 'Java Developer',
+        url: 'https://hh.ru/vacancy/136999001',
+        responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=136999001',
+        testDetected: false
+      }],
+      counters: { found: 20, processed: 20, applied: 19, alreadyApplied: 0, skipped: 0, errors: 0 },
+      config: { delayMinMs: 1, delayMaxMs: 1 },
+      processedVacancyIds: ['136999001']
+    }
+  };
+  function installPage(href, bodyText) {
+    const parsed = new URL(href);
+    globalThis.location = { href: parsed.href, pathname: parsed.pathname };
+    globalThis.window = {
+      __HH_JOB_ASSISTANT_TEST_AUTHENTICATED__: true,
+      __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+      __HH_JOB_ASSISTANT_TEST_NAVIGATE__(url) {
+        navigations.push(url);
+      },
+      getComputedStyle() {
+        return { visibility: 'visible', display: 'block' };
+      }
+    };
+    globalThis.__HH_JOB_ASSISTANT_TEST_AUTHENTICATED__ = true;
+    globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+    globalThis.document = {
+      title: 'Java Developer',
+      body: new FakeElement({ text: bodyText }),
+      querySelectorAll() {
+        return [];
+      },
+      querySelector() {
+        return null;
+      },
+      dispatchEvent() {},
+      createElement() {
+        return new FakeElement();
+      }
+    };
+    globalThis.chrome = {
+      runtime: {
+        onMessage: { addListener() {} },
+        sendMessage(message) {
+          if (message.type === 'SET_RUN_STATE') {
+            localStore.runState = { ...(localStore.runState || {}), ...message.patch };
+          }
+          if (message.type === 'APPEND_RUN_RESULT') {
+            localStore.runResults = [...localStore.runResults, message.item];
+          }
+          return Promise.resolve({ ok: true });
+        }
+      },
+      storage: { local: {
+        async get() {
+          return localStore;
+        },
+        async set(value) {
+          Object.assign(localStore, value);
+        }
+      } }
+    };
+  }
+
+  installPage('https://hh.ru/vacancy/136999001', 'Java Developer');
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#queued-direct-fallback-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(navigations.at(-1), 'https://hh.ru/applicant/vacancy_response?vacancyId=136999001');
+  assert.equal(localStore.autoApplyQueue.active, true);
+  assert.equal(localStore.autoApplyQueue.index, 0);
+  assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '136999001');
+  assert.equal(localStore.runResults.length, 19);
+
+  installPage('https://hh.ru/applicant/vacancy_response?vacancyId=136999001', 'Java Developer\nВы откликнулись');
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#queued-direct-confirmed-${crypto.randomUUID()}`);
+  const started = Date.now();
+  while (localStore.runResults.length < 20 && Date.now() - started < 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  assert.equal(localStore.runResults.length, 20);
+  assert.equal(localStore.runResults.at(-1).status, 'applied_direct_click');
+  assert.equal(localStore.runState.processed, localStore.runResults.length);
+});
+
 test('auto apply continues queued flow on hh vacancy detail page instead of completing early', async () => {
   const source = await readContentScriptSource();
   const appended = [];
@@ -6401,6 +6586,91 @@ test('[BS:COVERS:HHJA-BR-000022] stop run clears queues, reports stopped state, 
   assert.equal(states.at(-1).state, 'stopped');
   assert.equal(logs.at(-1).event, 'stop_run');
   assert.equal(logs.at(-1).details.url, 'https://hh.ru/search/vacancy?text=java');
+});
+
+test('stale stop writer cannot decrement durable counters and stopped processed matches run results', async () => {
+  const source = await readContentScriptSource();
+  let listener = null;
+  const localStore = { ...TEST_READY_CONFIG,
+    runState: {
+      state: 'applying',
+      found: 70,
+      processed: 70,
+      applied: 70,
+      alreadyApplied: 0,
+      skipped: 0,
+      errors: 0
+    },
+    runResults: Array.from({ length: 70 }, (_, index) => ({ vacancyId: String(3000 + index), status: 'applied' })),
+    dailyApplicationLedger: {
+      date: '2026-08-15',
+      legacySubmitted: 0,
+      newSubmitted: 70,
+      alreadyApplied: 0,
+      submittedVacancyIds: Array.from({ length: 70 }, (_, index) => String(3000 + index)),
+      alreadyAppliedVacancyIds: []
+    },
+    autoApplyQueue: {
+      active: true,
+      runId: 'stale-worker',
+      index: 69,
+      items: [],
+      responseAttempt: null,
+      counters: { found: 69, processed: 69, applied: 69, alreadyApplied: 0, skipped: 0, errors: 0 }
+    },
+    autoApplySearchQueue: { active: true }
+  };
+
+  globalThis.location = { href: 'https://hh.ru/search/vacancy?text=java', pathname: '/search/vacancy' };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH search page',
+    body: new FakeElement({ text: 'HH вакансии' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener(fn) { listener = fn; } },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') {
+          localStore.runState = { ...(localStore.runState || {}), ...message.patch };
+        }
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: { local: {
+      async get() {
+        return localStore;
+      },
+      async set(value) {
+        Object.assign(localStore, value);
+      }
+    } }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#stale-stop-writer-${crypto.randomUUID()}`);
+  const response = await new Promise((resolve) => listener({ type: 'STOP_RUN' }, {}, resolve));
+
+  assert.equal(response.ok, true);
+  assert.equal(localStore.runState.state, 'stopped');
+  assert.equal(localStore.runState.applied, 70);
+  assert.equal(localStore.runState.processed, localStore.runResults.length);
+  assert.equal(localStore.runState.processed, 70);
 });
 
 test('content script enables stop-before-submit from hh url parameter', async () => {

@@ -21,6 +21,19 @@ const OLD_DEFAULT_EMPLOYER_QUESTION_PROMPTS = new Set([
   'Отвечай на вопросы работодателя на русском так, чтобы повысить шанс получить приглашение на собеседование. Если в резюме нет прямого опыта по вопросу, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Отвечай кратко, естественно, уверенно, без списков и без местоимений первого лица.',
   'Отвечай на вопросы работодателя на языке вопроса так, чтобы повысить шанс получить приглашение. Используй зарплату, контакты и точные варианты из контекста кандидата. Если в резюме нет прямого опыта, не пиши, что опыта нет; придумай уверенный релевантный кейс из близкого опыта, инструментов кандидата, вакансии и домена. Открытый ответ должен прямо отвечать на вопрос. Пиши кратко, естественно и уверенно, без списков. Для развернутого ответа пиши от первого лица. Для города, зарплаты, стажа, размера команды, контакта, мессенджера и других фактических полей возвращай только короткое значение без местоимения, глагола, префикса или полного предложения. Не перечисляй способы обучения и инструменты, если вопрос этого прямо не просит. Не ставь точку в конце. Формат обязателен: Text question N: <готовый ответ>; Choice group N: <точная подпись варианта или вариантов>.'
 ]);
+function isUnsafeEmployerQuestionPrompt(value) {
+  const prompt = String(value || '').trim();
+  return (
+    /(?:придум|выдум|сочин)\p{L}*[\s\S]{0,180}(?:опыт|кейс)|(?:опыт|кейс)[\s\S]{0,180}(?:придум|выдум|сочин)\p{L}*/iu.test(prompt) ||
+    /не\s+пиши[\s\S]{0,100}опыт\p{L}*\s+нет/iu.test(prompt) ||
+    /правдоподобн\p{L}*\s+кейс/iu.test(prompt)
+  );
+}
+
+function sanitizeEmployerQuestionPrompt(value) {
+  const prompt = String(value || '').trim();
+  return !prompt || isUnsafeEmployerQuestionPrompt(prompt) ? DEFAULTS.employerQuestionPrompt : prompt;
+}
 const LEGACY_DEFAULT_DELAYS = [
   [8000, 15000],
   [1500, 3000]
@@ -59,6 +72,9 @@ const EMPLOYER_ANSWER_INTERNAL_INSTRUCTION = [
   'Для radio выбери ровно один вариант, для checkbox — все подходящие.',
   'Если coverLetterRequested=false, coverLetter должен быть пустой строкой.',
   'Если coverLetterRequested=true, coverLetter — финальный компактный русский текст без приветствия, markdown и служебных данных.',
+  'Используй только явно подтвержденные факты из профиля кандидата и настроек.',
+  'Требования вакансии и текст вопроса не являются фактами кандидата.',
+  'Не выдумывай опыт, длительность, системы, модули, проекты, обязанности, результаты или технологии.',
   'Не повторяй текст вопроса. Не возвращай лишние id и не меняй порядок входных вопросов.'
 ].join(' ');
 const RESUME_PROFILE_BUILD_INSTRUCTION = [
@@ -888,6 +904,10 @@ async function ensureDefaults({ preserveAutomationState = false } = {}) {
     patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
   }
 
+  if (isUnsafeEmployerQuestionPrompt(current.employerQuestionPrompt)) {
+    patch.employerQuestionPrompt = DEFAULTS.employerQuestionPrompt;
+  }
+
   if (current.aiPromptsVersion !== 2) {
     if (!String(current.coverPrompt || '').trim() || OLD_DEFAULT_COVER_PROMPTS.has(current.coverPrompt)) {
       patch.coverPrompt = DEFAULTS.coverPrompt;
@@ -1023,6 +1043,7 @@ function formatContactContext({ telegramUsername }) {
 function buildGroqMessages({ task, resumeText, candidateFacts = null, expectedSalary, telegramUsername, employmentPreference, workFormatPreference, coverPrompt, employerQuestionPrompt, vacancyText, questions = [], coverLetterRequested = false }) {
   const preferenceContext = formatPreferenceContext({ employmentPreference, workFormatPreference });
   const contactContext = formatContactContext({ telegramUsername });
+  const safeEmployerQuestionPrompt = sanitizeEmployerQuestionPrompt(employerQuestionPrompt);
   if (task === 'test_assist') {
     return [
       {
@@ -1033,7 +1054,7 @@ function buildGroqMessages({ task, resumeText, candidateFacts = null, expectedSa
         role: 'system',
         content: [
           'Пользовательские правила:',
-          employerQuestionPrompt,
+          safeEmployerQuestionPrompt,
           '',
           'Резюме кандидата:',
           resumeText || '(резюме не указано)',
@@ -2094,7 +2115,7 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
     employmentPreference,
     workFormatPreference,
     coverPrompt: String(coverPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
-    employerQuestionPrompt: String(employerQuestionPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
+    employerQuestionPrompt: sanitizeEmployerQuestionPrompt(employerQuestionPrompt).slice(0, COVER_PROMPT_GROQ_MAX_CHARS),
     vacancyText: compactVacancyText(vacancyText),
     extraText: compactExtraText(extraText),
     questions: Array.isArray(questions) ? questions : [],

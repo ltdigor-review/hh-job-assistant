@@ -297,7 +297,7 @@ test('default prompts remain byte-for-byte versioned', async () => {
   vm.runInNewContext(defaultsSource, context);
   const hashes = {
     coverPrompt: '6710dd147e8f0d961e8bef10957425bef2467cfac527baa8ee7abce648e830c2',
-    employerQuestionPrompt: '003ccd18c6c9b15ad476086e6dc24466c31c9f482cdd8cd3d6f9d9759808bebe'
+    employerQuestionPrompt: 'efc193da1a53d1808cf96ac04e4d4ad2b423f4a41b0b898270a6a99e6187939c'
   };
   for (const [key, expectedHash] of Object.entries(hashes)) {
     assert.equal(createHash('sha256').update(context.globalThis.HHJA_DEFAULTS[key]).digest('hex'), expectedHash, key);
@@ -370,7 +370,7 @@ test('[BS:COVERS:HHJA-BR-000001] background initializes defaults and registers r
   assert.match(localData.coverPrompt, /пересказа вакансии или пересказа резюме/i);
   assert.match(localData.coverPrompt, /готов обсудить|масштабные проекты|инновации/i);
   assert.equal(localData.aiPromptsVersion, 2);
-  assert.match(localData.employerQuestionPrompt, /правдоподобный кейс/);
+  assert.match(localData.employerQuestionPrompt, /только явно подтвержденные факты/);
   assert.match(localData.employerQuestionPrompt, /Нельзя придумывать/);
   assert.match(localData.employerQuestionPrompt, /языке вопроса/);
   assert.match(localData.employerQuestionPrompt, /от первого лица/);
@@ -779,6 +779,15 @@ test('[BS:COVERS:HHJA-BR-000001] background repairs blank prompts and preserves 
 
   assert.match(localData.coverPrompt, /1-2 простых предложения/);
   assert.match(localData.employerQuestionPrompt, /вопросы работодателя/);
+
+  const unsafeStoredPrompt = 'Не пиши, что опыта нет: сочини релевантный опыт и выдумай кейс под вакансию.';
+  localData.employerQuestionPrompt = unsafeStoredPrompt;
+  localData.aiPromptsVersion = 2;
+  await onInstalled();
+
+  assert.notEqual(localData.employerQuestionPrompt, unsafeStoredPrompt);
+  assert.doesNotMatch(localData.employerQuestionPrompt, /сочини|выдумай|придумай/i);
+  assert.match(localData.employerQuestionPrompt, /только.*факт/i);
 });
 
 test('background clears stale current action when a run completes', async () => {
@@ -945,6 +954,7 @@ test('background response watchdog leaves active form processing alone', async (
 test('test assistance prompt includes resume, vacancy, question text, and expected salary', async () => {
   let listener = null;
   let requestBody = null;
+  const unsafeEmployerPrompt = 'Если прямого опыта нет, не пиши, что опыта нет; придумай уверенный релевантный кейс из требований вакансии.';
   const localData = {
     groqApiKey: 'gsk_test',
     groqModel: 'test-model',
@@ -1021,6 +1031,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${Date.now()}-${crypto.randomUUID()}`);
   await startDebugRun('test-assistance-log');
+  localData.employerQuestionPrompt = unsafeEmployerPrompt;
 
   const response = await new Promise((resolve) => {
     const stayedAsync = listener(
@@ -1055,9 +1066,9 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
   assert.match(userContent, /"coverLetterRequested":true/);
   const systemContents = requestBody.messages.filter((message) => message.role === 'system').map((message) => message.content);
   const systemContent = systemContents.join('\n');
-  assert.match(systemContent, /custom employer question prompt/);
-  assert.match(systemContent, /adjacent experience/);
-  assert.match(systemContent, /draft a relevant case/);
+  assert.doesNotMatch(systemContent, /придумай уверенный релевантный кейс/);
+  assert.match(systemContent, /требования вакансии.*не являются фактами кандидата/i);
+  assert.match(systemContent, /только.*подтвержд[её]нн.*факт/i);
   assert.match(systemContent, /Relevant profile with adjacent experience and delivery tools/);
   assert.match(systemContent, /250 000 руб\. на руки/);
   assert.match(systemContent, /Telegram: @candidate_tg/);
@@ -1073,13 +1084,13 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
     contentLength: message.content.length
   })));
   assert.equal(groqPayloadLog.details.componentLengths.resumeBrief, 'Relevant profile with adjacent experience and delivery tools'.length);
-  assert.equal(groqPayloadLog.details.componentLengths.employerQuestionPrompt, localData.employerQuestionPrompt.length);
+  assert.notEqual(groqPayloadLog.details.componentLengths.employerQuestionPrompt, unsafeEmployerPrompt.length);
   assert.equal(groqPayloadLog.details.componentLengths.vacancy, 'Вакансия: роль со смежными требованиями'.length);
   assert.equal(groqPayloadLog.details.resumeBriefVersion, 'resume-profile-v1');
   assert.equal(groqPayloadLog.details.requestBody, undefined);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Relevant profile with adjacent experience and delivery tools/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /250 000 руб\. на руки/);
-  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /custom employer question prompt/);
+  assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /придумай уверенный релевантный кейс/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Вакансия: роль со смежными требованиями/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /Какую зарплату ожидаете\?/);
   assert.doesNotMatch(JSON.stringify(groqPayloadLog.details), /gsk_test/);
@@ -1202,9 +1213,9 @@ test('default employer prompt allows adjacent experience but forbids invented fa
   assert.equal(response.ok, true);
   const systemContent = requestBody.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
-  assert.match(systemContent, /правдоподобный кейс/);
+  assert.match(systemContent, /только явно подтвержденные факты/);
   assert.match(systemContent, /Нельзя придумывать/);
-  assert.match(systemContent, /подтвержденный смежный опыт/);
+  assert.match(systemContent, /не являются фактами кандидата/);
   assert.match(systemContent, /языке вопроса/);
   assert.match(systemContent, /от первого лица/);
   assert.match(systemContent, /точное короткое значение/);

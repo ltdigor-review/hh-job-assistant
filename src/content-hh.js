@@ -76,6 +76,7 @@ const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
 const HH_DAILY_RESPONSE_LIMIT_ACTION = 'Исчерпан лимит в 200 откликов в день';
 const HH_DAILY_RESPONSE_LIMIT_MESSAGE = 'HH временно не дает отправлять новые отклики.';
 const RESPONSE_CONFIRMATION_PATTERN = /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен|резюме\s+(?:доставлено|отправлено)/i;
+const SALARY_QUESTION_PATTERN = /зарплат|заработн\p{L}*\s+плат\p{L}*|доход|компенсац|оклад|gross|salary|income/iu;
 const {
   cleanText,
   sanitizeGeneratedText,
@@ -682,7 +683,13 @@ async function finalizeConfirmedResponseAttemptForStop(counters = {}, queueOverr
 }
 
 async function markStopped(counters = {}, { discardPendingSubmit = false } = {}) {
-  const { autoApplyQueue = {} } = await storageGet(['autoApplyQueue']);
+  const stoppedSnapshot = await storageGet([
+    'autoApplyQueue',
+    'runState',
+    'runResults',
+    DAILY_APPLICATION_LEDGER_KEY
+  ]);
+  const autoApplyQueue = stoppedSnapshot.autoApplyQueue || {};
   const responseAttemptConsumed = Array.isArray(autoApplyQueue.items) && autoApplyQueue.responseAttempt === null;
   const finalizedCounters = discardPendingSubmit
     ? null
@@ -701,6 +708,21 @@ async function markStopped(counters = {}, { discardPendingSubmit = false } = {})
         Number(autoApplyQueue.counters?.[key]) || 0
       );
     }
+  }
+  const durableRunState = stoppedSnapshot.runState || {};
+  const durableLedger = stoppedSnapshot[DAILY_APPLICATION_LEDGER_KEY] || {};
+  for (const key of ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']) {
+    stoppedCounters[key] = Math.max(
+      Number(stoppedCounters[key]) || 0,
+      Number(durableRunState[key]) || 0,
+      Number(autoApplyQueue.counters?.[key]) || 0
+    );
+  }
+  stoppedCounters.applied = Math.max(stoppedCounters.applied, Number(durableLedger.newSubmitted) || 0);
+  stoppedCounters.alreadyApplied = Math.max(stoppedCounters.alreadyApplied, Number(durableLedger.alreadyApplied) || 0);
+  if (Array.isArray(stoppedSnapshot.runResults)) {
+    stoppedCounters.processed = stoppedSnapshot.runResults.length;
+    stoppedCounters.found = Math.max(stoppedCounters.found, stoppedCounters.processed);
   }
   if (!finalizedCounters && discardPendingSubmit) {
     await clearPendingSubmit();
@@ -1554,6 +1576,10 @@ function getFieldQuestionText(field) {
   return cleanText(field?.__hhjaQuestionText || getMeaningfulQuestionText(field));
 }
 
+function isSalaryText(value) {
+  return SALARY_QUESTION_PATTERN.test(cleanText(value));
+}
+
 function extractVisibleQuestionLabels(text, { textOnly = false } = {}) {
   const lines = cleanText(text)
     .split('\n')
@@ -1564,12 +1590,13 @@ function extractVisibleQuestionLabels(text, { textOnly = false } = {}) {
     if (line.length < 12 || line.length > 500) continue;
     if (/^(?:да|нет|ecom|\/ecom|отправить|откликнуться|писать тут)$/i.test(line)) continue;
     if (/task_\d+/i.test(line)) continue;
-    const isTextFieldLabel = /укажите|напишите|опишите|расскажите|зарплат|доход|оклад|gross|телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line);
+    const isTextFieldLabel = /укажите|напишите|опишите|расскажите|телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line) || isSalaryText(line);
     if (textOnly && !isTextFieldLabel) continue;
     if (
       /[?]$/.test(line) ||
       /^(?:укажите|расскажите|опишите|напишите|какие|какой|какую|сколько|готовы|есть ли|имеется ли|на какой|почему|были ли|был ли)\b/i.test(line) ||
-      /зарплат|доход|оклад|gross|телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line)
+      /телеграм|telegram|мессендж|messenger|ник для связи|контакт/i.test(line) ||
+      isSalaryText(line)
     ) {
       if (!labels.includes(line)) labels.push(line);
     }
@@ -1587,7 +1614,7 @@ function isContactQuestion(field) {
 }
 
 function isSalaryQuestion(field) {
-  return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
+  return isSalaryText(`${getFieldQuestionText(field)}\n${getFieldMarker(field)}`);
 }
 
 function isCopyAnswersAcknowledgementLabel(value) {
@@ -1603,7 +1630,7 @@ function isCopyAnswersAcknowledgementDescriptor(descriptor) {
 }
 
 function isSalaryPromptText(value) {
-  return /зарплат|доход|компенсац|оклад|gross|salary|income/i.test(cleanText(value));
+  return isSalaryText(value);
 }
 
 function extractCopyAnswersPrompts(root, acknowledgementDescriptors) {
@@ -1666,10 +1693,37 @@ function isAgeQuestion(field) {
   return /(?:^|[^\p{L}\p{N}])(?:возраст|сколько\s+вам\s+лет|ваш\s+возраст|age)(?:[^\p{L}\p{N}]|$)/iu.test(text);
 }
 
+function getUnsupportedCandidateFactReason(field, resumeSource) {
+  const question = cleanText(getFieldQuestionText(field));
+  if (!/(?:опыт|работал|работали|стаж|сколько\s+лет|как\s+долго|модул|какие\s+задачи|experience|worked|years?\s+of|modules?)/i.test(question)) {
+    return '';
+  }
+  const normalizedResume = cleanText(resumeSource).toLowerCase().replace(/ё/g, 'е');
+  const requiredAcronyms = [...question.matchAll(/\b[A-Z][A-Z0-9-]{2,}\b/g)].map((match) => match[0].toLowerCase());
+  if (requiredAcronyms.some((term) => !normalizedResume.includes(term))) {
+    return 'Пропущено: в резюме или профиле нет явного подтверждения запрошенной системы.';
+  }
+  const ignoredLatinTerms = new Set([
+    'and', 'are', 'business', 'did', 'experience', 'for', 'have', 'how', 'modules', 'role', 'suite', 'tasks', 'the', 'what', 'which', 'with', 'work', 'worked', 'years'
+  ]);
+  const namedTerms = [...question.matchAll(/[a-z][a-z0-9+#.-]{2,}/gi)]
+    .map((match) => match[0].toLowerCase())
+    .filter((term) => !ignoredLatinTerms.has(term));
+  if (namedTerms.length > 0 && !namedTerms.some((term) => normalizedResume.includes(term))) {
+    return 'Пропущено: в резюме или профиле нет явного подтверждения запрошенного опыта или системы.';
+  }
+  if (/модул|modules?/i.test(question) && !/модул|modules?/i.test(normalizedResume)) {
+    return 'Пропущено: в резюме или профиле нет явного подтверждения работы с запрошенными модулями.';
+  }
+  if (/сколько\s+лет|как\s+долго|стаж|years?\s+of/i.test(question) && !/\d+\s*(?:лет|год|года|years?)/i.test(normalizedResume)) {
+    return 'Пропущено: точная длительность опыта не подтверждена резюме или профилем.';
+  }
+  return '';
+}
+
 function allowsShortNumericQuestionAnswer(field) {
-  return /сколько|количеств|число|лет|год|разработчик|команд|зарплат|доход|компенсац|оклад|gross|salary|income/i.test(
-    `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`
-  );
+  const text = `${getFieldQuestionText(field)}\n${getFieldMarker(field)}`;
+  return /сколько|количеств|число|лет|год|разработчик|команд/i.test(text) || isSalaryText(text);
 }
 
 function extractContactFromText(text) {
@@ -1711,7 +1765,10 @@ function getQuestionAnswerInvalidReason(answer, field) {
 function findCoverLetterTextarea(root = getDialogRoot()) {
   const fields = [...root.querySelectorAll('textarea,input:not([type="hidden"]),[contenteditable="true"],[role="textbox"]')]
     .filter(isVisible)
-    .filter((field) => !/task_|question|answer|вопрос|ответ|писать тут|зарплат|доход/i.test(getFieldMarker(field)));
+    .filter((field) => {
+      const marker = getFieldMarker(field);
+      return !/task_|question|answer|вопрос|ответ|писать тут/i.test(marker) && !isSalaryText(marker);
+    });
   const marked = fields.find((field) => /letter|cover|сопровод/i.test(getFieldMarker(field)));
   if (marked) return marked;
   const rootText = getRootText(root);
@@ -1733,7 +1790,7 @@ function findQuestionFields(root = getDialogRoot()) {
     .filter((field) => {
       const marker = getFieldMarker(field);
       if (/letter|cover|сопровод/i.test(marker)) return false;
-      return /task_|question|answer|вопрос|ответ|писать тут|зарплат|доход/i.test(marker);
+      return /task_|question|answer|вопрос|ответ|писать тут/i.test(marker) || isSalaryText(marker);
     });
 }
 
@@ -2847,20 +2904,27 @@ async function getDeterministicStructuredAnswers(snapshot) {
     telegramUsername = '',
     resumeText = '',
     resumeParsedText = '',
+    resumeProfileText = '',
     resumeCache = null,
     resumeCandidateFacts = null
   } = await storageGet(
-    ['expectedSalary', 'telegramUsername', 'resumeText', 'resumeParsedText', 'resumeCache', 'resumeCandidateFacts'],
+    ['expectedSalary', 'telegramUsername', 'resumeText', 'resumeParsedText', 'resumeProfileText', 'resumeCache', 'resumeCandidateFacts'],
     { optional: true }
   );
   const preferences = await getQuestionPreferences();
-  const resumeSource = [resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
+  const resumeSource = [resumeProfileText, resumeParsedText, resumeText, resumeCache?.text].filter(Boolean).join('\n');
   const contact = cleanText(telegramUsername) || extractContactFromText(resumeSource);
   const answers = new Map();
   let blockedReason = '';
   let blockedStatus = '';
 
   for (const descriptor of snapshot.textQuestions) {
+    const unsupportedFactReason = getUnsupportedCandidateFactReason(descriptor.field, resumeSource);
+    if (unsupportedFactReason) {
+      blockedReason = unsupportedFactReason;
+      blockedStatus = 'skipped_unsupported_candidate_fact';
+      continue;
+    }
     if (isAgeQuestion(descriptor.field)) {
       const age = Number(resumeCandidateFacts?.age);
       if (Number.isInteger(age) && age >= 18 && age <= 80) {
@@ -4192,6 +4256,9 @@ async function continueQueuedAutoApply() {
   try {
     const outcome = await applyToVacancy(item, counters, queueConfig);
     if (outcome?.terminal) {
+      return true;
+    }
+    if (outcome?.navigated) {
       return true;
     }
   } catch (error) {
