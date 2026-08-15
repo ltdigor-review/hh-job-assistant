@@ -8,7 +8,7 @@
   const DEFAULT_RETENTION = 5;
   const MIN_RETENTION = 1;
   const MAX_RETENTION = 20;
-  const MAX_ENTRIES = 1000;
+  const MAX_ENTRIES = 4000;
   const FORMAT_VERSION = 2;
 
   const sanitize = typeof global.HHJA_LOG_SANITIZE?.sanitize === 'function'

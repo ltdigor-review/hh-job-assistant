@@ -71,6 +71,7 @@ async function runContentAutoApply({
   initialLocalStore = null,
   cardTitle = 'Java Developer',
   cardText = 'Java Developer\nООО Test\nОткликнуться',
+  additionalCardIds = [],
   sendMessageAfterImport = true,
   trustedShortcutEvents = [],
   beforeTrustedShortcutEvents = null,
@@ -83,6 +84,7 @@ async function runContentAutoApply({
   const groqRequests = [];
   const runtimeMessages = [];
   let submitClicks = 0;
+  const responseClicksByVacancyId = {};
   let followupClicks = 0;
   let navigateUrl = '';
   let listener = null;
@@ -308,6 +310,7 @@ async function runContentAutoApply({
     href: responseHref,
     attrs: responseAttrs,
     click() {
+      responseClicksByVacancyId['123'] = (responseClicksByVacancyId['123'] || 0) + 1;
       if (bodyTextAfterResponseClick && bodyNode) {
         bodyNode.innerText = bodyTextAfterResponseClick;
         bodyNode.textContent = bodyTextAfterResponseClick;
@@ -378,6 +381,36 @@ async function runContentAutoApply({
   });
   responseButton.parentElement = card;
   titleLink.parentElement = card;
+  const additionalCards = additionalCardIds.map((rawVacancyId) => {
+    const vacancyId = String(rawVacancyId);
+    let extraCard = null;
+    const extraResponseButton = new FakeElement({
+      text: 'Откликнуться',
+      click() {
+        responseClicksByVacancyId[vacancyId] = (responseClicksByVacancyId[vacancyId] || 0) + 1;
+        openResponseDialog();
+      }
+    });
+    const extraTitleLink = new FakeElement({
+      text: `Java Developer ${vacancyId}`,
+      href: `https://hh.ru/vacancy/${vacancyId}`
+    });
+    extraCard = new FakeElement({
+      text: `Java Developer ${vacancyId}\nООО Test\nОткликнуться`,
+      selectorMap: {
+        '[data-qa="serp-item__title"]': [extraTitleLink],
+        'a[href*="/vacancy/"]': [extraTitleLink],
+        '[data-qa="vacancy-serp__vacancy_response"]': [extraResponseButton],
+        '[data-qa="vacancy-response-link-top"]': [],
+        '[data-qa="vacancy-response-link-bottom"]': [],
+        'a[href*="vacancy_response"]': [],
+        button: [extraResponseButton]
+      }
+    });
+    extraResponseButton.parentElement = extraCard;
+    extraTitleLink.parentElement = extraCard;
+    return extraCard;
+  });
 
   globalThis.location = startOnResponseForm
     ? {
@@ -424,7 +457,7 @@ async function runContentAutoApply({
       if (selector.includes(',')) {
         return selector.split(',').flatMap((part) => this.querySelectorAll(part.trim()));
       }
-      if (selector === '[data-qa="vacancy-serp__vacancy"]') return currentResponseForm || startOnResponseForm || !exactCardSelectorMatches ? [] : [card];
+      if (selector === '[data-qa="vacancy-serp__vacancy"]') return currentResponseForm || startOnResponseForm || !exactCardSelectorMatches ? [] : [card, ...additionalCards];
       if (selector === '[data-qa="serp-item"]') return [];
       if (selector === '[data-qa*="vacancy-serp"]') {
         if (currentResponseForm || startOnResponseForm) return [];
@@ -595,6 +628,7 @@ async function runContentAutoApply({
     groqRequests,
     runtimeMessages,
     submitClicks,
+    responseClicksByVacancyId,
     followupClicks,
     textareaValue: textarea.value,
     textareaValues: questionTextareas.map((field) => field.value),
@@ -4158,6 +4192,156 @@ test('[BS:COVERS:HHJA-BR-000034] auto apply resumes the Moscow-day new-submit le
   assert.equal(result.submitClicks, 1);
   assert.equal(result.localStore.dailyApplicationLedger.newSubmitted, 2);
   assert.deepEqual(result.localStore.dailyApplicationLedger.submittedVacancyIds, ['999', '123']);
+});
+
+test('auto apply excludes all current Moscow-day submitted and already-applied vacancies before counting work', async () => {
+  const now = new Date();
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    additionalCardIds: ['124'],
+    dailyLimit: 2,
+    initialLocalStore: {
+      dailyApplicationLedger: {
+        date: today,
+        legacySubmitted: 0,
+        newSubmitted: 1,
+        alreadyApplied: 1,
+        submittedVacancyIds: ['123'],
+        alreadyAppliedVacancyIds: ['124'],
+        hhDailyLimitReached: false,
+        updatedAt: now.toISOString()
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.found, 0);
+  assert.equal(result.response.processed, 0);
+  assert.deepEqual(result.responseClicksByVacancyId, {});
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.appended, []);
+});
+
+test('auto apply processes only the fresh vacancy when one search page mixes a daily duplicate and a fresh card', async () => {
+  const now = new Date();
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    additionalCardIds: ['124'],
+    dailyLimit: 2,
+    initialLocalStore: {
+      dailyApplicationLedger: {
+        date: today,
+        legacySubmitted: 0,
+        newSubmitted: 1,
+        alreadyApplied: 0,
+        submittedVacancyIds: ['123'],
+        alreadyAppliedVacancyIds: [],
+        hhDailyLimitReached: false,
+        updatedAt: now.toISOString()
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.found, 1);
+  assert.equal(result.response.processed, 1);
+  assert.deepEqual(result.responseClicksByVacancyId, { '124': 1 });
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.appended.map((item) => item.vacancyId), ['124']);
+});
+
+test('queued current-day duplicate is terminally skipped without clicking or reclassifying it as already applied', async () => {
+  const now = new Date();
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(now);
+  const result = await runContentAutoApply({
+    startOnResponseForm: true,
+    bodyText: 'Вы откликнулись',
+    hasTextarea: false,
+    sendMessageAfterImport: false,
+    initialLocalStore: {
+      runState: { state: 'applying', found: 1, processed: 1, applied: 0, alreadyApplied: 1, skipped: 0, errors: 0 },
+      dailyApplicationLedger: {
+        date: today,
+        legacySubmitted: 0,
+        newSubmitted: 0,
+        alreadyApplied: 1,
+        submittedVacancyIds: [],
+        alreadyAppliedVacancyIds: ['123'],
+        hhDailyLimitReached: false,
+        updatedAt: now.toISOString()
+      },
+      autoApplyQueue: {
+        active: true,
+        runId: 'daily-duplicate-run',
+        index: 0,
+        sourceUrl: '',
+        limit: 2,
+        processedCounted: true,
+        processedVacancyIds: ['123'],
+        items: [{
+          index: 1,
+          vacancyId: '123',
+          title: 'Java Developer',
+          url: 'https://hh.ru/vacancy/123',
+          responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123',
+          testDetected: false
+        }],
+        counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 1, skipped: 0, errors: 0 },
+        config: { ...TEST_READY_CONFIG, delayMinMs: 1, delayMaxMs: 1 }
+      }
+    }
+  });
+
+  assert.equal(result.submitClicks, 0);
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_daily_duplicate']);
+  assert.equal(result.states.at(-1).processed, result.appended.length);
+  assert.equal(result.localStore.dailyApplicationLedger.newSubmitted, 0);
+  assert.equal(result.localStore.dailyApplicationLedger.alreadyApplied, 1);
+});
+
+test('auto apply does not carry daily vacancy dedupe into a new Moscow date', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Откликнуться',
+    hasTextarea: false,
+    dailyLimit: 1,
+    initialLocalStore: {
+      dailyApplicationLedger: {
+        date: '2000-01-01',
+        legacySubmitted: 0,
+        newSubmitted: 1,
+        alreadyApplied: 0,
+        submittedVacancyIds: ['123'],
+        alreadyAppliedVacancyIds: [],
+        hhDailyLimitReached: false,
+        updatedAt: '2000-01-01T00:00:00.000Z'
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.processed, 1);
+  assert.equal(result.submitClicks, 1);
+  assert.deepEqual(result.appended.map((item) => item.status), ['applied']);
+  assert.deepEqual(result.localStore.dailyApplicationLedger.submittedVacancyIds, ['123']);
 });
 
 test('[BS:COVERS:HHJA-BR-000020] daily 200 run applies heterogeneous completable vacancies without resume-match filtering', async () => {

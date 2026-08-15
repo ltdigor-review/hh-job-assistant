@@ -202,6 +202,20 @@ async function getDailyApplicationLedger() {
   return normalizeDailyApplicationLedger(stored?.[DAILY_APPLICATION_LEDGER_KEY]);
 }
 
+function getDailyProcessedVacancyIds(ledger) {
+  return serializeProcessedVacancyIds([
+    ...(ledger?.submittedVacancyIds || []),
+    ...(ledger?.alreadyAppliedVacancyIds || [])
+  ]);
+}
+
+async function isDailyVacancyDuplicate(item) {
+  const vacancyId = getVacancyDedupeKey(item);
+  if (!vacancyId) return false;
+  const ledger = await getDailyApplicationLedger();
+  return getDailyProcessedVacancyIds(ledger).includes(vacancyId);
+}
+
 async function recordDailyApplication(item, kind, counters = null) {
   const ledger = await getDailyApplicationLedger();
   const counterBaseline = Math.max(0, Number(counters?.applied) || 0);
@@ -3322,6 +3336,16 @@ async function applyToVacancy(item, counters, config = null) {
 
   if (await stopIfRequested(counters)) return;
 
+  if (await isDailyVacancyDuplicate(item)) {
+    await appendSkippedResponse(
+      item,
+      counters,
+      'skipped_daily_duplicate',
+      'Пропущено: вакансия уже учтена в дневном журнале откликов.'
+    );
+    return;
+  }
+
   const initialDailyLimitReason = detectHhDailyResponseLimit(document);
   if (initialDailyLimitReason) {
     return completeHhDailyResponseLimit(item, counters, initialDailyLimitReason);
@@ -4718,7 +4742,12 @@ async function startRun(mode, limitOverride = null, options = {}) {
     return handleDryRun(limit);
   }
   await ensureLiveAutomationSettings(config);
-  return handleAutoApply(limit, initialCounters, [], { maxProcessed });
+  return handleAutoApply(
+    limit,
+    initialCounters,
+    getDailyProcessedVacancyIds(dailyLedger),
+    { maxProcessed }
+  );
 }
 
 async function startRunSingleFlight(mode, limitOverride = null, options = {}) {

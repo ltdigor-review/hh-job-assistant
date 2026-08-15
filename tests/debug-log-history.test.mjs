@@ -249,6 +249,70 @@ test('[BS:COVERS:HHJA-BR-000038] debug history is opt-in, retains N runs, and do
   }
 });
 
+test('debug history retains a realistic 200-vacancy run and still truncates true overflow', async () => {
+  const storage = createStorage({
+    agentDebugLogsEnabled: true,
+    agentDebugRetentionCount: 2
+  });
+  const logger = await loadLogger(storage);
+  const realisticEvents = [
+    'run_state',
+    'response_form_direct_open',
+    'question_form_detected',
+    'provider_request_started',
+    'provider_request_completed',
+    'question_answers_generated',
+    'question_answers_validated',
+    'question_answers_applied',
+    'cover_letter_generated',
+    'cover_letter_applied',
+    'pending_submit_saved',
+    'submit_clicked',
+    'submit_confirmation_started',
+    'submit_confirmation_detected',
+    'daily_ledger_updated',
+    'run_result',
+    'queue_advanced',
+    'search_return_started'
+  ];
+
+  try {
+    await logger.reset('content', 'auto_apply_started', { runId: 'capacity-200', mode: 'live' });
+    for (let index = 0; index < 200; index += 1) {
+      for (const event of realisticEvents) {
+        await logger.append('content', event, {
+          vacancyId: String(100000 + index),
+          status: event === 'run_result' ? 'applied' : 'ok',
+          processed: index + 1
+        });
+      }
+    }
+    await logger.append('background', 'run_state', { state: 'complete', processed: 200, applied: 200 });
+
+    const artifact = await logger.getArtifact('capacity-200');
+    const lines = artifact.text.trim().split('\n').map((line) => JSON.parse(line));
+    const header = lines[0];
+    const events = lines.slice(1);
+    assert.equal(header.details.truncated, false);
+    assert.equal(header.details.droppedEntries, 0);
+    assert.equal(events[0].event, 'auto_apply_started');
+    assert.equal(events.filter((entry) => entry.event === 'run_result').length, 200);
+    assert.equal(events.at(-1).event, 'run_state');
+    assert.equal(events.at(-1).details.state, 'complete');
+
+    await logger.reset('content', 'auto_apply_started', { runId: 'capacity-overflow', mode: 'live' });
+    for (let index = 0; index < logger.MAX_ENTRIES + 5; index += 1) {
+      await logger.append('content', 'overflow_event', { processed: index + 1 });
+    }
+    const overflowArtifact = await logger.getArtifact('capacity-overflow');
+    const overflowHeader = JSON.parse(overflowArtifact.text.split('\n')[0]);
+    assert.equal(overflowHeader.details.truncated, true);
+    assert.equal(overflowHeader.details.droppedEntries, 6);
+  } finally {
+    cleanupLogger();
+  }
+});
+
 test('[BS:COVERS:HHJA-BR-000039] stored and exported debug history anonymizes personal text and secrets', async () => {
   const storage = createStorage({
     agentDebugLogsEnabled: true,
