@@ -1080,7 +1080,14 @@ async function registerAutoApplyResponseAttempt(message, sender) {
       attempt.alreadyAppliedBefore === false &&
       isFreshTimestamp(attempt.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)
     );
-    if (!valid) return { ok: true, registered: false, reason: 'invalid_attempt_provenance' };
+    if (!valid) {
+      return {
+        ok: true,
+        registered: false,
+        stage: 'attempt_validation',
+        reason: 'invalid_attempt_provenance'
+      };
+    }
     const key = responseAttemptStorageKey(runId, vacancyId, ownerId);
     const attempts = { ...(ownership[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}) };
     const registeredAt = nowIso();
@@ -1270,6 +1277,9 @@ async function finalizeAutoApplyResponseAttempt(message, sender) {
         ? { autoApplyPendingSubmit: null }
         : {})
     });
+    if (!resultExists) {
+      await appendAgentLog('run_result', result);
+    }
     return { ok: true, finalized: true, status: 'finalized', attempt: attempts[key], ledger, counters, result };
   });
 }

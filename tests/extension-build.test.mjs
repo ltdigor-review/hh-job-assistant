@@ -926,6 +926,26 @@ test('background owns one auto-apply run and keeps direct-navigation provenance 
     targetResponseControlEnabledBefore: true,
     alreadyAppliedBefore: false
   };
+  const invalidRegistration = await send({
+    type: 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT',
+    runId: 'run-a',
+    attempt,
+    item: { vacancyId: 'wrong-vacancy' },
+    queue: {
+      active: true,
+      runId: 'run-a',
+      ownerId: 11,
+      sourceUrl: attempt.sourceUrl,
+      index: 0,
+      items: [{ vacancyId: 'wrong-vacancy' }]
+    }
+  }, 11);
+  assert.deepEqual(invalidRegistration, {
+    ok: true,
+    registered: false,
+    stage: 'attempt_validation',
+    reason: 'invalid_attempt_provenance'
+  });
   const registered = await send({
     type: 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT',
     runId: 'run-a',
@@ -1003,6 +1023,8 @@ test('background owns one auto-apply run and keeps direct-navigation provenance 
     testDetected: false,
     error: ''
   };
+  localData.agentDebugLogsEnabled = true;
+  await startDebugRun('direct-finalize-debug');
   const firstFinalize = await send({
     type: 'FINALIZE_AUTO_APPLY_RESPONSE_ATTEMPT',
     runId: 'run-a',
@@ -1021,6 +1043,11 @@ test('background owns one auto-apply run and keeps direct-navigation provenance 
   assert.equal(secondFinalize.alreadyFinalized, true);
   assert.equal(localData.runResults.filter((item) => item.vacancyId === '123').length, 1);
   assert.deepEqual(localData.dailyApplicationLedger.submittedVacancyIds, ['123']);
+  const directFinalizeResultLogs = debugEntries(localData).filter((entry) => (
+    entry.event === 'run_result' && entry.details?.vacancyId === '123'
+  ));
+  assert.equal(directFinalizeResultLogs.length, 1);
+  assert.equal(directFinalizeResultLogs[0].details.status, 'applied_direct_navigation');
 
   localData.autoApplyPendingSubmit = {
     runId: 'run-a',

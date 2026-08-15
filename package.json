@@ -1,6 +1,6 @@
 {
   "name": "hh-job-assistant",
-  "version": "0.1.272",
+  "version": "0.1.274",
   "private": true,
   "type": "module",
   "scripts": {

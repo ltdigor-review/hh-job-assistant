@@ -183,7 +183,11 @@ async function registerDirectNavigationAttempt(item, queue, responseUrl) {
   ) {
     const nextQueue = { ...queue, responseAttempt: null };
     await saveQueue(nextQueue);
-    return { queue: nextQueue, attempt: null };
+    return {
+      queue: nextQueue,
+      attempt: null,
+      rejection: { stage: 'local_provenance_validation', reason: 'invalid_attempt_provenance' }
+    };
   }
   const queueWithAttempt = { ...queue, responseAttempt: attempt };
   const response = await sendRuntimeCommand({
@@ -196,12 +200,41 @@ async function registerDirectNavigationAttempt(item, queue, responseUrl) {
   if (response?.ok !== true || response?.registered !== true) {
     const nextQueue = { ...queue, responseAttempt: null };
     await saveQueue(nextQueue);
-    return { queue: nextQueue, attempt: null };
+    return {
+      queue: nextQueue,
+      attempt: null,
+      rejection: {
+        stage: cleanText(response?.stage || 'background_registration'),
+        reason: cleanText(response?.reason || (response?.ok === true ? 'registration_rejected' : 'registration_failed'))
+      }
+    };
   }
   const registeredAttempt = { ...attempt, durableRegistered: true };
   const nextQueue = { ...queueWithAttempt, responseAttempt: registeredAttempt };
   await saveQueue(nextQueue);
-  return { queue: nextQueue, attempt: registeredAttempt };
+  return { queue: nextQueue, attempt: registeredAttempt, rejection: null };
+}
+
+async function appendDirectNavigationRegistrationSkip(item, counters, queue, rejection = {}) {
+  const stage = cleanText(rejection.stage || 'background_registration');
+  const reason = cleanText(rejection.reason || 'registration_rejected');
+  const error = `Пропущено: прямая навигация не зарегистрирована владельцем запуска (${stage}: ${reason}).`;
+  await appendSkippedResponse(item, counters, 'skipped_direct_navigation_not_registered', error);
+  const inactiveQueue = {
+    ...queue,
+    active: false,
+    responseAttempt: null,
+    counters: { ...counters },
+    directNavigationRejection: { stage, reason }
+  };
+  item.navigationQueue = inactiveQueue;
+  await saveQueue(inactiveQueue);
+  await appendAgentLog('direct_navigation_registration_rejected', {
+    vacancyId: getVacancyDedupeKey(item),
+    stage,
+    reason
+  });
+  return { navigated: false, registrationRejected: true, stage, reason };
 }
 
 async function cancelDirectNavigationAttempt(queue, reason) {
@@ -2237,6 +2270,19 @@ function hasSubmitControl(root = getDialogRoot()) {
   return queryAll(HH_SELECTORS.submitButtons, root).some((button) => SUBMIT_ACTION_PATTERN.test(textOf(button)));
 }
 
+function hasActiveEmployerResponseForm(root = getDialogRoot()) {
+  const scope = root !== document ? root : isResponseFormPage() ? document : null;
+  return Boolean(
+    scope &&
+    (
+      hasSubmitControl(scope) ||
+      findQuestionFields(scope).length > 0 ||
+      findQuestionControlGroups(scope).length > 0 ||
+      findTextarea(scope)
+    )
+  );
+}
+
 function detectBlockedResponseReason(root = getDialogRoot()) {
   const text = textOf(root) || textOf(root?.body) || textOf(document.body);
   if (/поменяйте видимость резюме|видно компаниям-клиентам headhunter/i.test(text)) {
@@ -3671,6 +3717,7 @@ async function applyToVacancy(item, counters, config = null) {
   const aiEnabled = applyConfig.aiEnabled !== false;
   let cancelledDirectNavigationForActiveForm = false;
   let cancelledDirectNavigationHadStaleConfirmation = false;
+  let preservedDirectNavigationAttempt = null;
 
   if (await stopIfRequested(counters)) return;
 
@@ -3690,6 +3737,22 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   const destinationAttempt = item.navigationQueue?.responseAttempt;
+  if (destinationAttempt?.kind === 'direct_response_navigation') {
+    if (
+      !isMatchingResponseAttemptDestination(item, destinationAttempt) ||
+      !isValidDirectNavigationAttempt(destinationAttempt, item.navigationQueue, item)
+    ) {
+      await cancelDirectNavigationAttempt(item.navigationQueue, 'invalid_response_destination').catch(() => false);
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_unverified_response_attempt',
+        'Пропущено: прямая навигация не принадлежит текущему запуску, не совпадает с вакансией или устарела.'
+      );
+      return;
+    }
+    preservedDirectNavigationAttempt = destinationAttempt;
+  }
   if (
     item.responseFormOpen &&
     destinationAttempt?.kind === 'direct_response_navigation' &&
@@ -3727,6 +3790,7 @@ async function applyToVacancy(item, counters, config = null) {
       return;
     }
     cancelledDirectNavigationForActiveForm = true;
+    preservedDirectNavigationAttempt = null;
   }
 
   if (!cancelledDirectNavigationForActiveForm && item.responseFormOpen && isAlreadyAppliedForCurrentItem(document, item)) {
@@ -3758,13 +3822,12 @@ async function applyToVacancy(item, counters, config = null) {
     navigationQueue = registered.queue;
     item.navigationQueue = navigationQueue;
     if (!registered.attempt) {
-      await appendSkippedResponse(
+      return appendDirectNavigationRegistrationSkip(
         item,
         counters,
-        'skipped_direct_navigation_not_registered',
-        'Пропущено: прямая навигация не зарегистрирована владельцем запуска.'
+        navigationQueue,
+        registered.rejection
       );
-      return { navigated: false, registrationRejected: true };
     }
     await setRunState({
       state: 'waiting_for_dialog',
@@ -3840,7 +3903,7 @@ async function applyToVacancy(item, counters, config = null) {
     beforeText = textOf(document.body);
     beforeUrl = location.href;
     if (item.navigationQueue) {
-      item.navigationQueue.responseAttempt = buildResponseAttempt(
+      item.navigationQueue.responseAttempt = preservedDirectNavigationAttempt || buildResponseAttempt(
         item,
         item.navigationQueue.sourceUrl || location.href
       );
@@ -3862,13 +3925,37 @@ async function applyToVacancy(item, counters, config = null) {
       root = await waitForNavigationQueueSettle(beforeUrl, root);
     }
     if (await stopIfRequested(counters)) return;
-    if (item.navigationQueue && location.href === beforeUrl && !isResponseFormPage()) {
+    if (
+      item.navigationQueue &&
+      location.href === beforeUrl &&
+      !isResponseFormPage() &&
+      !preservedDirectNavigationAttempt
+    ) {
       await saveQueue({ active: false });
     }
     await setRunState({ state: 'applying', ...counters, currentAction: `Проверяю форму отклика: ${item.title || item.vacancyId || 'вакансия'}` });
     await sleep(700);
     if (await stopIfRequested(counters)) return;
     root = await confirmInitialFollowupIfNeeded(root, beforeText, counters);
+  }
+
+  if (
+    preservedDirectNavigationAttempt &&
+    hasActiveEmployerResponseForm(root)
+  ) {
+    cancelledDirectNavigationHadStaleConfirmation = RESPONSE_CONFIRMATION_PATTERN.test(textOf(document.body));
+    const cancelled = await cancelDirectNavigationAttempt(item.navigationQueue, 'active_response_form_after_detail_click');
+    if (!cancelled) {
+      await appendSkippedResponse(
+        item,
+        counters,
+        'skipped_unverified_response_attempt',
+        'Пропущено: не удалось отменить прямую навигацию перед обработкой формы HH.'
+      );
+      return;
+    }
+    cancelledDirectNavigationForActiveForm = true;
+    preservedDirectNavigationAttempt = null;
   }
 
   if (await stopIfRequested(counters)) return;
@@ -3879,7 +3966,23 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   if (!item.responseFormOpen && root === document && !isResponseFormPage() && hasNewResponseSuccessText(beforeText, document, item)) {
-    await appendDirectClickResponse(item, counters, { testDetected: item.testDetected });
+    if (preservedDirectNavigationAttempt) {
+      const itemVacancyId = getVacancyDedupeKey(item);
+      item.responseButton = queryAll(HH_SELECTORS.responseButtons.filter((selector) => selector !== 'button'), document)
+        .find((control) => !isDisabled(control) && getVacancyId(control.href || '') === itemVacancyId) || null;
+      if (isConfirmedResponseAttemptDestination(item, preservedDirectNavigationAttempt)) {
+        await appendCurrentVacancyConfirmation(item, counters, { testDetected: item.testDetected });
+      } else {
+        await appendSkippedResponse(
+          item,
+          counters,
+          'skipped_unverified_response_attempt',
+          'Пропущено: после прямого перехода не найдено подтверждение отклика в области текущей вакансии.'
+        );
+      }
+    } else {
+      await appendDirectClickResponse(item, counters, { testDetected: item.testDetected });
+    }
     return;
   }
 
@@ -4747,6 +4850,11 @@ async function continueQueuedAutoApply() {
     }
   } catch (error) {
     const message = localizeError(error);
+    await appendAgentLog('auto_apply_item_error', {
+      vacancyId: item.vacancyId,
+      code: cleanText(error?.code || ''),
+      message: cleanText(error instanceof Error ? error.message : String(error))
+    });
     counters.errors += 1;
     await appendResult({
       index: item.index,
@@ -4941,11 +5049,11 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         const registered = await registerDirectNavigationAttempt(item, item.navigationQueue, item.responseUrl);
         item.navigationQueue = registered.queue;
         if (!registered.attempt) {
-          await appendSkippedResponse(
+          await appendDirectNavigationRegistrationSkip(
             item,
             counters,
-            'skipped_direct_navigation_not_registered',
-            'Пропущено: прямая навигация не зарегистрирована владельцем запуска.'
+            registered.queue,
+            registered.rejection
           );
           continue;
         }
