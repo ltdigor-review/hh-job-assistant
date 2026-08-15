@@ -3931,6 +3931,75 @@ test('auto apply safely skips a Russian salary question when expected salary is 
   assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
 });
 
+test('auto apply treats the live HH job-offer amount wording as salary and skips before provider use when expected salary is empty', async () => {
+  const question = 'На какую сумму вы готовы рассматривать предложения о работе?';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary: '',
+    groqResponse: { ok: true, text: 'Не указал' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 0);
+  assert.equal(result.response.skipped, 1);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'skipped_required_salary_missing');
+});
+
+test('auto apply fills the live HH job-offer amount wording deterministically from configured salary', async () => {
+  const question = 'На какую сумму вы готовы рассматривать предложения о работе?';
+  const expectedSalary = '450 000 руб. на руки';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary,
+    groqResponse: { ok: true, text: 'Не использовать ответ модели' }
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, expectedSalary);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
+test('auto apply does not treat a sale-equipment amount question as salary', async () => {
+  const question = 'Какую сумму скидки на продажу оборудования вы рекомендуете клиенту?';
+  const answer = 'Размер скидки определяю по маржинальности сделки и условиям контракта.';
+  const result = await runContentAutoApply({
+    dialogText: question,
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: question,
+    expectedSalary: '',
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map(({ id }) => ({ id, answer, selectedOptions: [] })),
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.textareaValue, answer);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
+});
+
 test('auto apply fills an exact configured KZT annual salary deterministically', async () => {
   const question = 'What are your realistic salary expectations for this role (net annual amount in KZT)?';
   const expectedSalary = '12 000 000 KZT net в год';

@@ -77,6 +77,7 @@ const HH_DAILY_RESPONSE_LIMIT_ACTION = 'Исчерпан лимит в 200 от�
 const HH_DAILY_RESPONSE_LIMIT_MESSAGE = 'HH временно не дает отправлять новые отклики.';
 const RESPONSE_CONFIRMATION_PATTERN = /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен|резюме\s+(?:доставлено|отправлено)/i;
 const SALARY_QUESTION_PATTERN = /зарплат|заработн\p{L}*\s+плат\p{L}*|доход|компенсац|оклад|gross|salary|income/iu;
+const SALARY_JOB_OFFER_AMOUNT_PATTERN = /(?:^|[^\p{L}\p{N}_])(?:на\s+)?какую\s+сумм\p{L}*[\s\S]{0,120}предложени\p{L}*\s+о\s+работе(?:$|[^\p{L}\p{N}_])/iu;
 const {
   cleanText,
   sanitizeGeneratedText,
@@ -1731,7 +1732,8 @@ function getFieldQuestionText(field) {
 }
 
 function isSalaryText(value) {
-  return SALARY_QUESTION_PATTERN.test(cleanText(value));
+  const text = cleanText(value);
+  return SALARY_QUESTION_PATTERN.test(text) || SALARY_JOB_OFFER_AMOUNT_PATTERN.test(text);
 }
 
 function extractVisibleQuestionLabels(text, { textOnly = false } = {}) {
