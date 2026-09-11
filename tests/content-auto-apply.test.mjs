@@ -1306,6 +1306,8 @@ test('[BS:COVERS:HHJA-BR-000017] live start fails closed when the refreshed sett
 
   assert.equal(result.response.ok, false);
   assert.match(result.response.error, /Автоматические отклики заблокированы/);
+  assert.match(result.response.error, /не удалось собрать профиль из резюме/i);
+  assert.match(result.response.error, /Заполнить промпт с резюме/);
   assert.deepEqual(result.appended, []);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.navigateUrl, '');

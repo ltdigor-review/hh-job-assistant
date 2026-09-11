@@ -5446,10 +5446,13 @@ function throwAutomationAuditNotReady(response) {
   const issues = Array.isArray(audit?.issues)
     ? audit.issues.filter((issue) => typeof issue === 'string' && issue.trim())
     : [];
+  const profileBlocked = issues.includes('resumeProfileAvailable') || issues.includes('resumeProfileFresh');
   const error = new Error(
-    audit && audit.ready === false
-      ? `Автоматические отклики заблокированы: проверка настроек не пройдена${issues.length ? ` (${issues.join(', ')})` : ''}.`
-      : 'Автоматические отклики заблокированы: проверка настроек недоступна.'
+    profileBlocked
+      ? 'Автоматические отклики заблокированы: не удалось собрать профиль из резюме. Откройте «Настройки» → «Промпт с резюме» и нажмите «Заполнить промпт с резюме». Если ошибка повторяется, переключите AI-провайдер на Qwen и нажмите «Проверить провайдера».'
+      : audit && audit.ready === false
+        ? `Автоматические отклики заблокированы: проверка настроек не пройдена${issues.length ? ` (${issues.join(', ')})` : ''}.`
+        : 'Автоматические отклики заблокированы: проверка настроек недоступна.'
   );
   error.code = 'HHJA_CONFIG_NOT_READY';
   error.readiness = { missing: issues.map((code) => ({ code, label: code })) };
