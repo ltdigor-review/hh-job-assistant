@@ -451,6 +451,35 @@
         </div>
       </div>
 
+      <h2>Ежедневные отклики</h2>
+      <label class="checkbox" for="scheduledAutoApplyEnabled">
+        <input id="scheduledAutoApplyEnabled" type="checkbox">
+        Запускать отклики автоматически каждый день
+      </label>
+      <p class="hint">Используется сохранённая ссылка поиска без изменения её фильтров. Для scheduled-запуска пауза фиксирована в диапазоне 3–5 секунд.</p>
+
+      <label for="scheduledAutoApplyFilterUrl">Ссылка на поиск вакансий HH</label>
+      <input id="scheduledAutoApplyFilterUrl" type="url" placeholder="https://hh.ru/search/vacancy?..." autocomplete="off">
+
+      <div class="row">
+        <div>
+          <label for="scheduledAutoApplyTimeMsk">Время запуска, МСК</label>
+          <input id="scheduledAutoApplyTimeMsk" type="time">
+        </div>
+        <div>
+          <label for="scheduledAutoApplyLateWindowMinutes">Допустимое опоздание, мин</label>
+          <input id="scheduledAutoApplyLateWindowMinutes" type="number" min="0" max="720" step="1">
+        </div>
+        <div>
+          <label for="scheduledAutoApplyMaxRepairAttempts">Попыток ремонта</label>
+          <input id="scheduledAutoApplyMaxRepairAttempts" type="number" min="1" max="10" step="1">
+        </div>
+        <div>
+          <label for="scheduledAutoApplyRepairCutoffMsk">Ремонт до, МСК</label>
+          <input id="scheduledAutoApplyRepairCutoffMsk" type="time">
+        </div>
+      </div>
+
       <h2>AI-провайдер</h2>
       <label class="checkbox" for="aiEnabled">
         <input id="aiEnabled" type="checkbox">

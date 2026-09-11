@@ -66,6 +66,8 @@ const AUTOMATION_START_DIGEST_KEY = 'automationStartDigest';
 const HHJA_STATUS_PARAM = 'hhjaStatus';
 const HHJA_STATUS_PANEL_ID = 'hh-job-assistant-status-panel';
 const HHJA_STATUS_CONTENT_ID = 'hh-job-assistant-status-content';
+const HHJA_STATUS_REVIEW_BUTTON_ID = 'hh-job-assistant-status-review';
+const HHJA_STATUS_REPAIR_PAUSE_BUTTON_ID = 'hh-job-assistant-status-repair-pause';
 const STATUS_PANEL_MESSAGE_TIMEOUT_MS = 5000;
 const PRIVATE_QUESTION_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PRIVATE_QUESTION_AUDIT_MAX_ENTRIES = 200;
@@ -105,6 +107,9 @@ let extensionContextInvalidated = false;
 let actionOverlay = null;
 let startRunPromise = null;
 let activeRunEntryKind = '';
+let activeScheduledSessionId = '';
+let activeScheduledDateMsk = '';
+let latestSafeStatusSnapshot = null;
 let automationStartDigestWrite = Promise.resolve();
 let responseAttemptStopFinalizationPromise = null;
 
@@ -628,7 +633,8 @@ async function setStopRequested(reason = 'user_stop') {
   setBusyCursor(false);
   await storageSet({
     autoApplyStopRequested: true,
-    autoApplyStopRequestedAt: new Date().toISOString()
+    autoApplyStopRequestedAt: new Date().toISOString(),
+    autoApplyStopReason: reason
   }, { optional: true });
 }
 
@@ -637,16 +643,20 @@ async function clearStopRequestedFlag() {
   stopReason = '';
   await storageSet({
     autoApplyStopRequested: false,
-    autoApplyStopRequestedAt: ''
+    autoApplyStopRequestedAt: '',
+    autoApplyStopReason: ''
   }, { optional: true });
 }
 
 async function syncStopRequestedFromStorage() {
   if (stopRequested) return true;
-  const { autoApplyStopRequested = false } = await storageGet(['autoApplyStopRequested'], { optional: true });
+  const { autoApplyStopRequested = false, autoApplyStopReason = '' } = await storageGet([
+    'autoApplyStopRequested',
+    'autoApplyStopReason'
+  ], { optional: true });
   if (autoApplyStopRequested === true) {
     stopRequested = true;
-    stopReason = 'user_stop';
+    stopReason = autoApplyStopReason === 'repair_pending' ? 'repair_pending' : 'user_stop';
     setBusyCursor(false);
     return true;
   }
@@ -918,6 +928,10 @@ async function markStopped(counters = {}, { discardPendingSubmit = false } = {})
 
 async function stopIfRequested(counters = {}) {
   if (!(await syncStopRequestedFromStorage())) return false;
+  if (stopReason === 'repair_pending') {
+    closeDialog();
+    return true;
+  }
   await markStopped(counters);
   closeDialog();
   return true;
@@ -1078,6 +1092,12 @@ function normalizeSafeStatusSnapshot(snapshot) {
   const startDigest = snapshot.startDigest && typeof snapshot.startDigest === 'object'
     ? snapshot.startDigest
     : {};
+  const schedule = snapshot.schedule && typeof snapshot.schedule === 'object'
+    ? snapshot.schedule
+    : {};
+  const scheduledSession = snapshot.scheduledSession && typeof snapshot.scheduledSession === 'object'
+    ? snapshot.scheduledSession
+    : {};
   const safeRunStates = new Set([
     'idle',
     'scanning',
@@ -1125,6 +1145,15 @@ function normalizeSafeStatusSnapshot(snapshot) {
     'audit_not_ready'
   ]);
   const manifestVersion = String(snapshot.manifestVersion || '');
+  const scheduleTime = /^\d{2}:\d{2}$/.test(String(schedule.timeMsk || '')) ? schedule.timeMsk : '—';
+  const repairCutoffMsk = /^\d{2}:\d{2}$/.test(String(schedule.repairCutoffMsk || ''))
+    ? schedule.repairCutoffMsk
+    : '—';
+  const safeScheduledStates = new Set(['none', 'starting', 'running', 'repair_pending', 'complete', 'blocked', 'error']);
+  const safeScheduledTerminalStates = new Set(['complete', 'blocked', 'error']);
+  const safeReviewOutcomes = new Set(['', 'passed', 'blocked']);
+  const rawSessionId = String(scheduledSession.sessionId || '');
+  const safeScheduledState = safeScheduledStates.has(scheduledSession.state) ? scheduledSession.state : 'error';
   return {
     manifestVersion: /^\d+(?:\.\d+){0,3}$/.test(manifestVersion) ? manifestVersion : '—',
     dailyLedger: {
@@ -1165,6 +1194,35 @@ function normalizeSafeStatusSnapshot(snapshot) {
       conflicts: safeStatusNumber(startDigest.conflicts),
       lastEvent: safeDigestEvents.has(startDigest.lastEvent) ? startDigest.lastEvent : 'none',
       updatedAt: safeStatusTimestamp(startDigest.updatedAt)
+    },
+    schedule: {
+      enabled: schedule.enabled === true,
+      timeMsk: scheduleTime,
+      lateWindowMinutes: safeStatusNumber(schedule.lateWindowMinutes),
+      maxRepairAttempts: safeStatusNumber(schedule.maxRepairAttempts),
+      repairCutoffMsk,
+      filterConfigured: schedule.filterConfigured === true,
+      nextAlarmAt: safeStatusTimestamp(schedule.nextAlarmAt),
+      reviewGateBlocked: schedule.reviewGateBlocked === true
+    },
+    scheduledSession: {
+      present: scheduledSession.present === true,
+      sessionId: /^[A-Za-z0-9:._-]{1,200}$/.test(rawSessionId) ? rawSessionId : '',
+      dateMsk: safeStatusDate(scheduledSession.dateMsk),
+      state: safeScheduledState,
+      extensionVersion: /^\d+(?:\.\d+){0,3}$/.test(String(scheduledSession.extensionVersion || ''))
+        ? scheduledSession.extensionVersion
+        : '—',
+      startedAt: safeStatusTimestamp(scheduledSession.startedAt),
+      updatedAt: safeStatusTimestamp(scheduledSession.updatedAt),
+      finishedAt: safeStatusTimestamp(scheduledSession.finishedAt),
+      repairAttempts: safeStatusNumber(scheduledSession.repairAttempts),
+      stopReason: String(scheduledSession.stopReason || '').slice(0, 80),
+      reviewRequired: scheduledSession.reviewRequired === true,
+      reviewPending: safeScheduledTerminalStates.has(safeScheduledState) && scheduledSession.reviewPending === true,
+      reviewOutcome: safeReviewOutcomes.has(scheduledSession.reviewOutcome) ? scheduledSession.reviewOutcome : '',
+      reviewIssueCount: safeStatusNumber(scheduledSession.reviewIssueCount),
+      reviewedAt: safeStatusTimestamp(scheduledSession.reviewedAt)
     }
   };
 }
@@ -1217,7 +1275,52 @@ function getOrCreateStatusPanel() {
   refresh.addEventListener('click', () => {
     refreshStatusPanel().catch(() => {});
   });
-  panel.append(heading, content, refresh);
+  const repairPause = document.createElement('button');
+  repairPause.setAttribute('id', HHJA_STATUS_REPAIR_PAUSE_BUTTON_ID);
+  repairPause.setAttribute('type', 'button');
+  repairPause.setAttribute('data-qa', 'hhja-status-repair-pause');
+  repairPause.textContent = 'Приостановить для исправления';
+  repairPause.hidden = true;
+  repairPause.style.cssText = 'margin:8px 0 0 8px';
+  repairPause.addEventListener('click', async () => {
+    const session = latestSafeStatusSnapshot?.scheduledSession;
+    if (session?.state !== 'running' || !isSafeStatusPanelContext()) return;
+    repairPause.disabled = true;
+    try {
+      await sendRuntimeMessage({
+        type: 'REQUEST_SCHEDULED_REPAIR_PAUSE',
+        authenticated: true
+      }, { timeoutMs: STATUS_PANEL_MESSAGE_TIMEOUT_MS });
+      await refreshStatusPanel({ runPreflight: false });
+    } finally {
+      repairPause.disabled = false;
+    }
+  });
+  const acknowledge = document.createElement('button');
+  acknowledge.setAttribute('id', HHJA_STATUS_REVIEW_BUTTON_ID);
+  acknowledge.setAttribute('type', 'button');
+  acknowledge.setAttribute('data-qa', 'hhja-status-review');
+  acknowledge.textContent = 'Подтвердить проверку запуска';
+  acknowledge.hidden = true;
+  acknowledge.style.cssText = 'margin:8px 0 0 8px';
+  acknowledge.addEventListener('click', async () => {
+    const session = latestSafeStatusSnapshot?.scheduledSession;
+    if (!session?.reviewPending || !session.sessionId || !isSafeStatusPanelContext()) return;
+    acknowledge.disabled = true;
+    try {
+      await sendRuntimeMessage({
+        type: 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW',
+        sessionId: session.sessionId,
+        outcome: 'passed',
+        issues: [],
+        authenticated: true
+      }, { timeoutMs: STATUS_PANEL_MESSAGE_TIMEOUT_MS });
+      await refreshStatusPanel({ runPreflight: false });
+    } finally {
+      acknowledge.disabled = false;
+    }
+  });
+  panel.append(heading, content, refresh, repairPause, acknowledge);
   document.body.append(panel);
   return panel;
 }
@@ -1229,9 +1332,12 @@ function renderSafeStatusPanel(snapshot) {
   content.replaceChildren?.();
 
   if (!snapshot) {
+    latestSafeStatusSnapshot = null;
     appendStatusPanelLine(content, 'Статус: недоступен. Автоматизация не запускалась.');
     return true;
   }
+
+  latestSafeStatusSnapshot = snapshot;
 
   const ledger = snapshot.dailyLedger;
   const audit = snapshot.automationAudit;
@@ -1243,6 +1349,16 @@ function renderSafeStatusPanel(snapshot) {
   appendStatusPanelLine(content, `Стоп перед отправкой: ${snapshot.stopBeforeSubmit.state}`);
   appendStatusPanelLine(content, `Запуск: ${run.state}; найдено ${run.found}; обработано ${run.processed}; отправлено ${run.applied}; уже откликались ${run.alreadyApplied}; пропущено ${run.skipped}; ошибок ${run.errors}; обновлено ${run.updatedAt}`);
   appendStatusPanelLine(content, `Дайджест входа: запусков ${digest.starts}; продолжений ${digest.continues}; запусков shortcut ${digest.shortcutStarts}; продолжений shortcut ${digest.shortcutContinues}; дублей ${digest.duplicates}; конфликтов ${digest.conflicts}; последнее ${digest.lastEvent}; обновлено ${digest.updatedAt}`);
+  const schedule = snapshot.schedule;
+  const session = snapshot.scheduledSession;
+  appendStatusPanelLine(content, `Расписание: ${schedule.enabled ? 'включено' : 'выключено'}; ${schedule.timeMsk} МСК; поздний запуск ${schedule.lateWindowMinutes} мин; следующий ${schedule.nextAlarmAt}; фильтр ${schedule.filterConfigured ? 'настроен' : 'не настроен'}; review gate ${schedule.reviewGateBlocked ? 'закрыт' : 'открыт'}`);
+  appendStatusPanelLine(content, session.present
+    ? `Последняя сессия: ${session.dateMsk}; ${session.state}; версия ${session.extensionVersion}; ремонтов ${session.repairAttempts}; причина ${session.stopReason || 'нет'}; проверка ${session.reviewPending ? 'требуется' : session.reviewOutcome || 'не требуется'}`
+    : 'Последняя scheduled-сессия: отсутствует');
+  const acknowledge = document.getElementById?.(HHJA_STATUS_REVIEW_BUTTON_ID);
+  if (acknowledge) acknowledge.hidden = !(session.reviewPending && session.sessionId);
+  const repairPause = document.getElementById?.(HHJA_STATUS_REPAIR_PAUSE_BUTTON_ID);
+  if (repairPause) repairPause.hidden = session.state !== 'running';
   return true;
 }
 
@@ -2294,6 +2410,19 @@ function detectBlockedResponseReason(root = getDialogRoot()) {
   return '';
 }
 
+function detectBlockedResponseReasonForCurrentItem(root, item) {
+  if (
+    root === document &&
+    (
+      (item?.responseButton && !isDisabled(item.responseButton)) ||
+      hasActiveResponseControl(document, item)
+    )
+  ) {
+    return '';
+  }
+  return detectBlockedResponseReason(root);
+}
+
 function isHhDailyResponseLimitText(text) {
   return /в\s+течение\s+24\s+час(?:ов|а)?.{0,160}не\s+более\s+200\s+откликов|исчерпали\s+лимит\s+откликов/i.test(cleanText(text));
 }
@@ -2919,7 +3048,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
       await isStructurelessCurrentDetailConfirmedByPendingSubmit(item) ||
       detectHhDailyResponseLimit(root) ||
       detectHhDailyResponseLimit(document) ||
-      detectBlockedResponseReason(root) ||
+      detectBlockedResponseReasonForCurrentItem(root, item) ||
       findFollowupConfirmButton(root) ||
       (!hasSubmitControl(root) && !hasSubmitControl(document))
     ) {
@@ -2941,7 +3070,7 @@ async function verifySubmitConfirmed({ item, counters, status, coverLetterUsed, 
     return completeHhDailyResponseLimit(item, counters, dailyLimitReason);
   }
 
-  const blockedReason = detectBlockedResponseReason(root);
+  const blockedReason = detectBlockedResponseReasonForCurrentItem(root, item);
   if (blockedReason) {
     await clearPendingSubmit();
     await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
@@ -3638,6 +3767,9 @@ async function waitForDialogOrChange(previousText, timeoutMs = 7000) {
     if (detectHhDailyResponseLimit(root) || detectHhDailyResponseLimit(document)) {
       return root;
     }
+    if (findFollowupConfirmButton(document)) {
+      return document;
+    }
     const currentText = getRootText(root);
     if (root !== document && currentText) return root;
     if (
@@ -3864,7 +3996,7 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   if (!item.responseButton) {
-    const blockedReason = detectBlockedResponseReason(document);
+    const blockedReason = detectBlockedResponseReasonForCurrentItem(document, item);
     if (blockedReason) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
     } else {
@@ -3995,7 +4127,7 @@ async function applyToVacancy(item, counters, config = null) {
     return;
   }
 
-  const blockedReason = detectBlockedResponseReason(root);
+  const blockedReason = detectBlockedResponseReasonForCurrentItem(root, item);
   if (blockedReason) {
     await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
     return;
@@ -4395,7 +4527,7 @@ async function applyToVacancy(item, counters, config = null) {
         await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed, testDetected: true });
         return;
       }
-      const blockedReason = detectBlockedResponseReason(root);
+      const blockedReason = detectBlockedResponseReasonForCurrentItem(root, item);
       if (blockedReason) {
         await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
         return;
@@ -4520,7 +4652,7 @@ async function applyToVacancy(item, counters, config = null) {
       await appendCurrentVacancyConfirmation(item, counters, { coverLetterUsed, testDetected: false });
       return;
     }
-    const blockedReason = detectBlockedResponseReason(root);
+    const blockedReason = detectBlockedResponseReasonForCurrentItem(root, item);
     if (blockedReason) {
       await appendSkippedResponse(item, counters, 'skipped_response_unavailable', blockedReason);
       return;
@@ -4628,12 +4760,40 @@ function buildQueuedVacancyDetailItem(queueItem) {
   };
 }
 
+function withScheduledQueueMetadata(queue) {
+  if (!queue?.active) return queue;
+  const scheduledSessionId = String(queue.scheduledSessionId || activeScheduledSessionId || '');
+  const scheduledDateMsk = String(queue.scheduledDateMsk || activeScheduledDateMsk || '');
+  return scheduledSessionId && scheduledDateMsk
+    ? { ...queue, scheduledSessionId, scheduledDateMsk }
+    : queue;
+}
+
+function adoptScheduledQueueMetadata(queue) {
+  if (!queue?.scheduledSessionId || !queue?.scheduledDateMsk) return false;
+  activeScheduledSessionId = String(queue.scheduledSessionId);
+  activeScheduledDateMsk = String(queue.scheduledDateMsk);
+  return true;
+}
+
 async function saveQueue(queue) {
-  await writeOwnedAutoApplyState({ autoApplyQueue: queue });
+  await writeOwnedAutoApplyState({ autoApplyQueue: withScheduledQueueMetadata(queue) });
 }
 
 async function saveSearchQueue(queue) {
-  await writeOwnedAutoApplyState({ autoApplySearchQueue: queue });
+  await writeOwnedAutoApplyState({ autoApplySearchQueue: withScheduledQueueMetadata(queue) });
+}
+
+async function authorizeScheduledQueueContinuation(queue) {
+  if (!adoptScheduledQueueMetadata(queue)) return true;
+  const response = await sendRuntimeCommand({
+    type: 'AUTHORIZE_SCHEDULED_CONTINUATION',
+    sessionId: activeScheduledSessionId,
+    dateMsk: activeScheduledDateMsk,
+    runId: queue.runId,
+    ownerId: queue.ownerId
+  }).catch(() => null);
+  return response?.ok === true && response?.authorized === true;
 }
 
 async function getAutoApplyQueueStatus() {
@@ -4745,6 +4905,13 @@ async function continueQueuedAutoApply() {
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
     return false;
   }
+  if (!await authorizeScheduledQueueContinuation(autoApplyQueue)) {
+    await appendAgentLog('scheduled_queue_continuation_denied', {
+      kind: 'response',
+      runId: autoApplyQueue.runId || ''
+    });
+    return true;
+  }
   globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
   if (isResumePage()) {
     return false;
@@ -4785,7 +4952,7 @@ async function continueQueuedAutoApply() {
         autoApplyQueue.limit || 20,
         counters,
         autoApplyQueue.processedVacancyIds || [],
-        { maxProcessed: autoApplyQueue.maxProcessed || null }
+        { maxProcessed: autoApplyQueue.maxProcessed || null, configOverride: autoApplyQueue.config || null }
       );
       return true;
     }
@@ -4949,7 +5116,7 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
   }
   requireAuthenticatedHhPage();
 
-  const config = await getConfig();
+  const config = options.configOverride || await getConfig();
   const maxProcessed = normalizeMaxProcessed(options.maxProcessed);
   const counters = existingCounters || {
     found: 0,
@@ -5169,6 +5336,10 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     }
   }
 
+  if (stopRequested && stopReason === 'repair_pending') {
+    return { ok: true, ...counters, repairPending: true };
+  }
+
   await saveSearchQueue({ active: false });
   const finalState = stopRequested && stopReason === 'test_detected' ? 'paused' : stopRequested ? 'stopped' : 'complete';
   await setRunState({
@@ -5193,6 +5364,13 @@ async function continueSearchAutoApply() {
   const { autoApplySearchQueue, runState } = await storageGet(['autoApplySearchQueue', 'runState']);
   if (!autoApplySearchQueue?.active) {
     return false;
+  }
+  if (!await authorizeScheduledQueueContinuation(autoApplySearchQueue)) {
+    await appendAgentLog('scheduled_queue_continuation_denied', {
+      kind: 'search',
+      runId: autoApplySearchQueue.runId || ''
+    });
+    return true;
   }
   activeRunId = autoApplySearchQueue.runId || activeRunId || `${Date.now()}:${Math.random().toString(16).slice(2)}`;
   activeRunOwnerId = Number(autoApplySearchQueue.ownerId) || activeRunOwnerId;
@@ -5230,7 +5408,7 @@ async function continueSearchAutoApply() {
       autoApplySearchQueue.limit || 20,
       autoApplySearchQueue.counters || null,
       autoApplySearchQueue.processedVacancyIds || [],
-      { maxProcessed: autoApplySearchQueue.maxProcessed || null }
+      { maxProcessed: autoApplySearchQueue.maxProcessed || null, configOverride: autoApplySearchQueue.config || null }
     );
     return true;
   } catch (error) {
@@ -5297,7 +5475,14 @@ async function ensureLiveAutomationSettings(config) {
 }
 
 async function startRun(mode, limitOverride = null, options = {}) {
-  const config = await getConfig();
+  const storedConfig = await getConfig();
+  const scheduledEntry = options.entrySource === 'scheduled';
+  const config = scheduledEntry ? {
+    ...storedConfig,
+    delayMinMs: Math.max(3000, Math.min(Number(options.delayMinMs) || 3000, 5000)),
+    delayMaxMs: Math.max(3000, Math.min(Number(options.delayMaxMs) || 5000, 5000))
+  } : storedConfig;
+  if (config.delayMaxMs < config.delayMinMs) config.delayMaxMs = config.delayMinMs;
   globalThis.HHJA_CONFIG_READINESS.assertReady(config);
   const limitSource = limitOverride == null ? config.dailyLimit : limitOverride;
   const limit = Math.max(1, Math.min(Number(limitSource) || 20, 200));
@@ -5312,7 +5497,22 @@ async function startRun(mode, limitOverride = null, options = {}) {
     errors: 0
   };
   const requestedRunId = `${Date.now()}:${Math.random().toString(16).slice(2)}`;
-  const ownership = await sendRuntimeCommand({ type: 'CLAIM_AUTO_APPLY_RUN', runId: requestedRunId });
+  if (scheduledEntry) {
+    activeScheduledSessionId = String(options.scheduledSessionId || '');
+    activeScheduledDateMsk = String(options.scheduledDateMsk || '');
+  } else {
+    activeScheduledSessionId = '';
+    activeScheduledDateMsk = '';
+  }
+  const ownership = await sendRuntimeCommand({
+    type: 'CLAIM_AUTO_APPLY_RUN',
+    runId: requestedRunId,
+    entrySource: options.entrySource || 'runtime',
+    ...(scheduledEntry ? {
+      scheduledSessionId: activeScheduledSessionId,
+      scheduledDateMsk: activeScheduledDateMsk
+    } : {})
+  });
   if (ownership?.ok === true && ownership?.claimed === false) {
     return {
       ok: true,
@@ -5335,6 +5535,9 @@ async function startRun(mode, limitOverride = null, options = {}) {
     limitOverride: limitOverride == null ? null : limit,
     maxProcessed,
     runId: activeRunId,
+    entrySource: options.entrySource || 'runtime',
+    scheduledSessionId: activeScheduledSessionId,
+    scheduledDateMsk: activeScheduledDateMsk,
     url: location.href
   });
   if (mode === 'live') {
@@ -5370,7 +5573,7 @@ async function startRun(mode, limitOverride = null, options = {}) {
     limit,
     initialCounters,
     getDailyProcessedVacancyIds(dailyLedger),
-    { maxProcessed }
+    { maxProcessed, configOverride: config }
   );
 }
 
@@ -5437,6 +5640,33 @@ async function continueRunSingleFlight(options = {}) {
       activeRunEntryKind = '';
     }
   }
+}
+
+async function pauseScheduledRunForRepair() {
+  if (!activeScheduledSessionId || !activeScheduledDateMsk || !activeRunId || !activeRunOwnerId) {
+    return { ok: false, checkpointed: false, reason: 'scheduled_run_not_active' };
+  }
+  const { runState = {} } = await storageGet(['runState'], { optional: true });
+  const counters = Object.fromEntries(['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']
+    .map((key) => [key, Number(runState[key]) || 0]));
+  const response = await sendRuntimeCommand({
+    type: 'CHECKPOINT_SCHEDULED_REPAIR',
+    sessionId: activeScheduledSessionId,
+    dateMsk: activeScheduledDateMsk,
+    runId: activeRunId,
+    ownerId: activeRunOwnerId,
+    counters
+  });
+  if (response?.ok === true && response?.checkpointed === true) {
+    stopRequested = true;
+    stopReason = 'repair_pending';
+    setBusyCursor(false);
+    await appendAgentLog('scheduled_repair_checkpointed', {
+      sessionId: activeScheduledSessionId,
+      runId: activeRunId
+    });
+  }
+  return response || { ok: false, checkpointed: false, reason: 'checkpoint_unavailable' };
 }
 
 function isTrustedAutoApplyShortcut(event) {
@@ -5684,8 +5914,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           entrySource: 'runtime'
         }));
         break;
+      case 'START_SCHEDULED_AUTO_APPLY':
+        sendResponse(await startRunSingleFlight('live', message.limitOverride ?? 200, {
+          entrySource: 'scheduled',
+          scheduledSessionId: message.sessionId,
+          scheduledDateMsk: message.dateMsk,
+          delayMinMs: message.delayMinMs,
+          delayMaxMs: message.delayMaxMs
+        }));
+        break;
       case 'CONTINUE_AUTO_APPLY':
         sendResponse(await continueRunSingleFlight({ entrySource: 'runtime' }));
+        break;
+      case 'CONTINUE_SCHEDULED_AUTO_APPLY':
+        activeScheduledSessionId = String(message.sessionId || '');
+        activeScheduledDateMsk = String(message.dateMsk || '');
+        sendResponse(await continueRunSingleFlight({ entrySource: 'scheduled' }));
+        break;
+      case 'PAUSE_SCHEDULED_AUTO_APPLY_FOR_REPAIR':
+        sendResponse(await pauseScheduledRunForRepair());
         break;
       case 'STOP_RUN':
         await setStopRequested('user_stop');
@@ -5699,6 +5946,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })().catch(async (error) => {
     const messageText = localizeError(error);
     if (error?.code === 'HHJA_CONFIG_NOT_READY') {
+      if (activeRunId && activeRunOwnerId) {
+        await appendAgentLog('auto_apply_start_blocked', {
+          type: message?.type || '',
+          error: messageText,
+          url: location.href
+        });
+        await setRunState({
+          state: 'error',
+          currentAction: 'Автоматические отклики заблокированы',
+          lastError: messageText
+        });
+      }
       sendResponse({ ok: false, error: error.message, missing: error.readiness?.missing || [] });
       return;
     }

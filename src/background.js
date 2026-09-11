@@ -103,6 +103,28 @@ const AUTO_APPLY_RUN_LEASE_KEY = 'autoApplyRunLease';
 const AUTO_APPLY_RESPONSE_ATTEMPTS_KEY = 'autoApplyResponseAttempts';
 const AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS = 5 * 60 * 1000;
 const AUTO_APPLY_ORPHAN_CLAIM_GRACE_MS = 30 * 1000;
+const SCHEDULED_AUTO_APPLY_ALARM = 'hh-job-assistant-daily-auto-apply';
+const SCHEDULED_AUTO_APPLY_SESSION_KEY = 'scheduledAutoApplySession';
+const SCHEDULED_AUTO_APPLY_LIMIT = 200;
+const SCHEDULED_AUTO_APPLY_DELAY_MIN_MS = 3000;
+const SCHEDULED_AUTO_APPLY_DELAY_MAX_MS = 5000;
+const SCHEDULED_AUTO_APPLY_SETTING_KEYS = Object.freeze([
+  'scheduledAutoApplyEnabled',
+  'scheduledAutoApplyTimeMsk',
+  'scheduledAutoApplyLateWindowMinutes',
+  'scheduledAutoApplyFilterUrl',
+  'scheduledAutoApplyMaxRepairAttempts',
+  'scheduledAutoApplyRepairCutoffMsk'
+]);
+const SCHEDULED_AUTO_APPLY_SESSION_STATES = new Set([
+  'starting',
+  'running',
+  'repair_pending',
+  'complete',
+  'blocked',
+  'error'
+]);
+const SCHEDULED_AUTO_APPLY_TERMINAL_STATES = new Set(['complete', 'blocked', 'error']);
 const SAFE_STATUS_RUN_STATES = new Set([
   'idle',
   'scanning',
@@ -157,6 +179,123 @@ const AUTOMATION_STATE_DEFAULT_KEYS = new Set([
 let resumeProfileRefreshPromise = null;
 let groqHttpQueue = Promise.resolve();
 let autoApplyOwnershipQueue = Promise.resolve();
+
+function schedulerNowMs() {
+  const override = Number(globalThis.__HH_JOB_ASSISTANT_TEST_NOW_MS__);
+  return Number.isFinite(override) ? override : Date.now();
+}
+
+function parseClockTime(value, fallback = '') {
+  const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+  if (!match) return fallback ? parseClockTime(fallback) : null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+    ? { hour, minute, text: `${match[1]}:${match[2]}` }
+    : (fallback ? parseClockTime(fallback) : null);
+}
+
+function getMoscowDateParts(nowMs = schedulerNowMs()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(nowMs));
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    year: Number(byType.year),
+    month: Number(byType.month),
+    day: Number(byType.day),
+    dateMsk: `${byType.year}-${byType.month}-${byType.day}`
+  };
+}
+
+function moscowDateTimeMs(dateParts, clock) {
+  return Date.UTC(
+    dateParts.year,
+    dateParts.month - 1,
+    dateParts.day,
+    clock.hour - 3,
+    clock.minute,
+    0,
+    0
+  );
+}
+
+function nextMoscowDateParts(dateParts) {
+  const middayUtc = Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day + 1, 9, 0, 0, 0);
+  return getMoscowDateParts(middayUtc);
+}
+
+function getScheduleDecision(nowMs = schedulerNowMs(), settings = {}) {
+  const dateParts = getMoscowDateParts(nowMs);
+  const scheduleClock = parseClockTime(settings.timeMsk, DEFAULTS.scheduledAutoApplyTimeMsk);
+  const cutoffClock = parseClockTime(settings.repairCutoffMsk, DEFAULTS.scheduledAutoApplyRepairCutoffMsk);
+  const rawLateWindowMinutes = Number(settings.lateWindowMinutes);
+  const lateWindowMinutes = Math.max(0, Math.min(
+    Number.isFinite(rawLateWindowMinutes) ? rawLateWindowMinutes : DEFAULTS.scheduledAutoApplyLateWindowMinutes,
+    12 * 60
+  ));
+  const scheduledAt = moscowDateTimeMs(dateParts, scheduleClock);
+  const lateUntil = scheduledAt + lateWindowMinutes * 60 * 1000;
+  const cutoffAt = moscowDateTimeMs(dateParts, cutoffClock) + 60 * 1000 - 1;
+  const tomorrowAt = moscowDateTimeMs(nextMoscowDateParts(dateParts), scheduleClock);
+  return {
+    dateMsk: dateParts.dateMsk,
+    scheduledAt,
+    lateUntil,
+    cutoffAt,
+    tomorrowAt,
+    catchUp: nowMs >= scheduledAt && nowMs <= lateUntil,
+    beforeRepairCutoff: nowMs <= cutoffAt,
+    nextAt: nowMs < scheduledAt ? scheduledAt : tomorrowAt
+  };
+}
+
+function normalizeScheduledFilterUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      !(url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) ||
+      url.pathname !== '/search/vacancy' ||
+      !url.search
+    ) return '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function compareVersions(left, right) {
+  const normalize = (value) => String(value || '').split('.').map((part) => Number(part) || 0);
+  const a = normalize(left);
+  const b = normalize(right);
+  const length = Math.max(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) > (b[index] || 0) ? 1 : -1;
+  }
+  return 0;
+}
+
+if (globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__ === true) {
+  globalThis.HHJA_SCHEDULE_TEST_API = {
+    getScheduleDecision,
+    normalizeScheduledFilterUrl,
+    compareVersions,
+    recreateScheduledAutoApplyAlarm,
+    runScheduledAutoApply,
+    acknowledgeScheduledSessionReview,
+    authorizeScheduledContinuation,
+    checkpointScheduledRepair,
+    reserveScheduledRepairResume,
+    resumeScheduledRepair,
+    resumeScheduledRepairAfterExtensionUpdate
+  };
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -754,6 +893,7 @@ async function claimAutoApplyRun(message, sender) {
     const stored = await storageGet([
       AUTO_APPLY_RUN_LEASE_KEY,
       AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
       'autoApplyPendingSubmit',
       'autoApplyQueue',
       'autoApplySearchQueue',
@@ -761,6 +901,25 @@ async function claimAutoApplyRun(message, sender) {
       'runResults'
     ]);
     const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    const scheduledEntry = message?.entrySource === 'scheduled';
+    const scheduledSession = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    if (scheduledEntry) {
+      const scheduledSessionId = String(message?.scheduledSessionId || '');
+      const scheduledDateMsk = String(message?.scheduledDateMsk || '');
+      const senderFilterUrl = normalizeScheduledFilterUrl(sender?.tab?.url);
+      if (
+        !scheduledSessionId ||
+        !scheduledDateMsk ||
+        scheduledSession?.sessionId !== scheduledSessionId ||
+        scheduledSession?.dateMsk !== scheduledDateMsk ||
+        scheduledSession?.state !== 'starting' ||
+        scheduledDateMsk !== getMoscowDateParts(schedulerNowMs()).dateMsk ||
+        !senderFilterUrl ||
+        senderFilterUrl !== normalizeScheduledFilterUrl(scheduledSession.filterUrl)
+      ) {
+        return { ok: false, claimed: false, owned: false, reason: 'scheduled_start_not_authorized' };
+      }
+    }
     const leaseRunId = normalizeRunId(lease?.runId);
     const leaseOwnerId = normalizeRunOwnerId(lease?.ownerId);
     const runState = stored.runState || {};
@@ -867,7 +1026,11 @@ async function claimAutoApplyRun(message, sender) {
       runId: requestedRunId,
       ownerId,
       claimedAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(scheduledEntry ? {
+        scheduledSessionId: scheduledSession.sessionId,
+        scheduledDateMsk: scheduledSession.dateMsk
+      } : {})
     };
     const nextRunState = {
       ...DEFAULTS.runState,
@@ -891,8 +1054,19 @@ async function claimAutoApplyRun(message, sender) {
         return [key, attempt];
       }))
       : null;
+    const nextScheduledSession = scheduledEntry ? {
+      ...scheduledSession,
+      runId: requestedRunId,
+      ownerId,
+      state: 'running',
+      startedAt: scheduledSession.startedAt || now,
+      updatedAt: now,
+      extensionVersion: getSafeManifestVersion(),
+      reviewRequired: true
+    } : null;
     await storageSet({
       [AUTO_APPLY_RUN_LEASE_KEY]: nextLease,
+      ...(nextScheduledSession ? { [SCHEDULED_AUTO_APPLY_SESSION_KEY]: nextScheduledSession } : {}),
       ...(nextAttempts ? { [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: nextAttempts } : {}),
       runState: nextRunState,
       runResults: [],
@@ -943,7 +1117,8 @@ async function resumeAutoApplyRun(message, sender) {
     const stored = await storageGet([
       AUTO_APPLY_RUN_LEASE_KEY,
       'autoApplyQueue',
-      'autoApplySearchQueue'
+      'autoApplySearchQueue',
+      SCHEDULED_AUTO_APPLY_SESSION_KEY
     ]);
     const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
     if (lease?.active === true) {
@@ -957,6 +1132,17 @@ async function resumeAutoApplyRun(message, sender) {
       normalizeRunOwnerId(queue.ownerId) === ownerId &&
       (!expectedOwnerId || expectedOwnerId === ownerId)
     ));
+    if (queueProof?.scheduledSessionId) {
+      const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+      if (
+        session?.state !== 'running' ||
+        session.sessionId !== queueProof.scheduledSessionId ||
+        session.dateMsk !== queueProof.scheduledDateMsk ||
+        session.dateMsk !== getMoscowDateParts(schedulerNowMs()).dateMsk ||
+        normalizeRunId(session.runId) !== runId ||
+        normalizeRunOwnerId(session.ownerId) !== ownerId
+      ) return { ok: true, resumed: false, owned: false, reason: 'scheduled_continuation_not_authorized' };
+    }
     if (!runId || !ownerId || !queueProof) {
       return { ok: true, resumed: false, owned: false };
     }
@@ -1367,65 +1553,205 @@ async function finalizeAutoApplyPendingSubmit(message, sender) {
   });
 }
 
-async function releaseAutoApplyRunLeaseIfTerminal(message, sender) {
+async function guardScheduledTerminalTransition(message, lease) {
+  const state = String(message?.patch?.state || '');
+  if (!['complete', 'idle', 'dry_run_complete', 'stopped', 'paused', 'error'].includes(state)) {
+    return { allowed: true };
+  }
+  const stored = await storageGet([
+    SCHEDULED_AUTO_APPLY_SESSION_KEY,
+    AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+    'autoApplyPendingSubmit',
+    'autoApplyQueue',
+    'autoApplySearchQueue',
+    'runState',
+    'runResults'
+  ]);
+  const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+  const runId = normalizeRunId(lease?.runId);
+  const ownerId = normalizeRunOwnerId(lease?.ownerId);
+  if (
+    session?.state !== 'running' ||
+    normalizeRunId(session.runId) !== runId ||
+    normalizeRunOwnerId(session.ownerId) !== ownerId
+  ) return { allowed: true };
+
+  const belongsToOwnedRun = (value) => {
+    const valueRunId = normalizeRunId(value?.runId);
+    const valueOwnerId = normalizeRunOwnerId(value?.ownerId);
+    return (!valueRunId && !valueOwnerId) || (valueRunId === runId && valueOwnerId === ownerId);
+  };
+  const pendingSubmit = Boolean(
+    stored.autoApplyPendingSubmit?.item && belongsToOwnedRun(stored.autoApplyPendingSubmit)
+  );
+  const unresolvedAttempt = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).some((attempt) => (
+    !attempt?.finalizedAt && !attempt?.cancelledAt && belongsToOwnedRun(attempt)
+  ));
+  const activeQueue = [stored.autoApplyQueue, stored.autoApplySearchQueue].some((queue) => (
+    queue?.active === true && (
+      belongsToOwnedRun(queue) || String(queue.scheduledSessionId || '') === String(session.sessionId || '')
+    )
+  ));
+  const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+  const processedSource = Object.hasOwn(message?.patch || {}, 'processed')
+    ? message.patch.processed
+    : stored.runState?.processed;
+  const processedNumber = Number(processedSource);
+  const processed = Number.isFinite(processedNumber) && processedNumber >= 0
+    ? Math.floor(processedNumber)
+    : 0;
+  const counterMismatch = processed !== runResults.length;
+  if (!pendingSubmit && !unresolvedAttempt && !activeQueue && !counterMismatch) {
+    return { allowed: true };
+  }
+
+  const reason = pendingSubmit
+    ? 'unresolved_submit'
+    : unresolvedAttempt
+      ? 'unresolved_response_attempt'
+      : activeQueue
+        ? 'active_saved_queue'
+        : 'counter_result_mismatch';
+  if (!pendingSubmit && !unresolvedAttempt && !activeQueue) {
+    await terminalizeScheduledRepairSession({ ...stored, [AUTO_APPLY_RUN_LEASE_KEY]: lease }, session, reason);
+    return { allowed: false, terminalDeferred: true, reason };
+  }
+
+  const timestamp = new Date(schedulerNowMs()).toISOString();
+  const reviewIssues = [...new Set([
+    ...(Array.isArray(session.reviewIssues) ? session.reviewIssues : []),
+    reason
+  ])].slice(0, 20);
+  await storageSet({
+    autoApplyStopRequested: true,
+    autoApplyStopRequestedAt: timestamp,
+    autoApplyStopReason: 'repair_pending',
+    runState: {
+      ...DEFAULTS.runState,
+      ...(stored.runState || {}),
+      state: 'paused',
+      runId,
+      ownerId,
+      processed: runResults.length,
+      currentAction: 'Приостановлено: терминальное состояние не подтверждено',
+      lastError: reason,
+      updatedAt: timestamp
+    },
+    [AUTO_APPLY_RUN_LEASE_KEY]: {
+      ...lease,
+      scheduledRepairPending: true,
+      updatedAt: timestamp
+    },
+    [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+      ...session,
+      state: 'repair_pending',
+      repairFromVersion: getSafeManifestVersion(),
+      stopReason: 'repair_pending',
+      reviewIssues,
+      updatedAt: timestamp,
+      reviewRequired: true
+    }
+  });
+  return { allowed: false, terminalDeferred: true, reason };
+}
+
+async function syncScheduledSessionForTerminalRun(message, lease) {
   const state = String(message?.patch?.state || '');
   if (!['complete', 'idle', 'dry_run_complete', 'stopped', 'paused', 'error'].includes(state)) return;
-  await enqueueAutoApplyOwnership(async () => {
-    const runId = normalizeRunId(message?.runId);
-    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
-    const stored = await storageGet([
-      AUTO_APPLY_RUN_LEASE_KEY,
-      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
-      'autoApplyPendingSubmit'
-    ]);
-    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
-    if (normalizeRunId(lease?.runId) !== runId || normalizeRunOwnerId(lease?.ownerId) !== ownerId) return;
-    const ownedUnresolvedAttempts = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).filter((attempt) => (
+  const stored = await storageGet([SCHEDULED_AUTO_APPLY_SESSION_KEY, 'autoApplyStopReason']);
+  const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+  if (
+    !session ||
+    normalizeRunId(session.runId) !== normalizeRunId(lease?.runId) ||
+    normalizeRunOwnerId(session.ownerId) !== normalizeRunOwnerId(lease?.ownerId)
+  ) return;
+  if (session.state === 'repair_pending') return;
+  const timestamp = new Date(schedulerNowMs()).toISOString();
+  const sessionState = ['complete', 'dry_run_complete'].includes(state)
+    ? 'complete'
+    : state === 'error'
+      ? 'error'
+      : 'blocked';
+  await storageSet({
+    [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+      ...session,
+      state: sessionState,
+      stopReason: sessionState === 'complete'
+        ? ''
+        : String(stored.autoApplyStopReason || message?.patch?.lastError || state).slice(0, 80),
+      updatedAt: timestamp,
+      finishedAt: timestamp,
+      reviewRequired: true
+    }
+  });
+}
+
+async function releaseAutoApplyRunLeaseIfTerminalUnlocked(message, sender) {
+  const state = String(message?.patch?.state || '');
+  if (!['complete', 'idle', 'dry_run_complete', 'stopped', 'paused', 'error'].includes(state)) return;
+  const runId = normalizeRunId(message?.runId);
+  const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+  const stored = await storageGet([
+    AUTO_APPLY_RUN_LEASE_KEY,
+    AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+    'autoApplyPendingSubmit',
+    SCHEDULED_AUTO_APPLY_SESSION_KEY
+  ]);
+  const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+  if (normalizeRunId(lease?.runId) !== runId || normalizeRunOwnerId(lease?.ownerId) !== ownerId) return;
+  const scheduledSession = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+  if (
+    state === 'paused' &&
+    scheduledSession?.state === 'repair_pending' &&
+    normalizeRunId(scheduledSession.runId) === runId &&
+    normalizeRunOwnerId(scheduledSession.ownerId) === ownerId
+  ) return;
+  const ownedUnresolvedAttempts = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).filter((attempt) => (
+    normalizeRunId(attempt?.runId) === runId &&
+    normalizeRunOwnerId(attempt?.ownerId) === ownerId &&
+    !attempt?.finalizedAt &&
+    !attempt?.cancelledAt
+  ));
+  const hasFreshUnresolvedAttempt = ownedUnresolvedAttempts.some((attempt) => (
+    isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)
+  ));
+  const senderUrl = String(sender?.tab?.url || '');
+  const senderVacancyId = getVacancyIdFromUrl(senderUrl);
+  const hasStaleAttemptAtMatchingDestination = ownedUnresolvedAttempts.some((attempt) => {
+    if (isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) return false;
+    const attemptVacancyId = String(attempt?.vacancyId || '');
+    const isMatchingVacancyDestination = senderVacancyId && senderVacancyId === attemptVacancyId &&
+      (isHhResponseFormUrl(senderUrl) || isHhVacancyDetailUrl(senderUrl));
+    return senderUrl === String(attempt?.responseUrl || '') || isMatchingVacancyDestination;
+  });
+  const hasOwnedPendingSubmit = normalizeRunId(stored.autoApplyPendingSubmit?.runId) === runId &&
+    normalizeRunOwnerId(stored.autoApplyPendingSubmit?.ownerId) === ownerId;
+  if (
+    ['stopped', 'paused'].includes(state) &&
+    (hasFreshUnresolvedAttempt || hasStaleAttemptAtMatchingDestination || hasOwnedPendingSubmit)
+  ) {
+    return;
+  }
+  const releasedAt = nowIso();
+  const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
+    if (
       normalizeRunId(attempt?.runId) === runId &&
       normalizeRunOwnerId(attempt?.ownerId) === ownerId &&
       !attempt?.finalizedAt &&
       !attempt?.cancelledAt
-    ));
-    const hasFreshUnresolvedAttempt = ownedUnresolvedAttempts.some((attempt) => (
-      isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)
-    ));
-    const senderUrl = String(sender?.tab?.url || '');
-    const senderVacancyId = getVacancyIdFromUrl(senderUrl);
-    const hasStaleAttemptAtMatchingDestination = ownedUnresolvedAttempts.some((attempt) => {
-      if (isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) return false;
-      const attemptVacancyId = String(attempt?.vacancyId || '');
-      const isMatchingVacancyDestination = senderVacancyId && senderVacancyId === attemptVacancyId &&
-        (isHhResponseFormUrl(senderUrl) || isHhVacancyDetailUrl(senderUrl));
-      return senderUrl === String(attempt?.responseUrl || '') || isMatchingVacancyDestination;
-    });
-    const hasOwnedPendingSubmit = normalizeRunId(stored.autoApplyPendingSubmit?.runId) === runId &&
-      normalizeRunOwnerId(stored.autoApplyPendingSubmit?.ownerId) === ownerId;
-    if (
-      ['stopped', 'paused'].includes(state) &&
-      (hasFreshUnresolvedAttempt || hasStaleAttemptAtMatchingDestination || hasOwnedPendingSubmit)
     ) {
-      return;
+      return [key, { ...attempt, cancelledAt: releasedAt, cancelReason: `run_${state}` }];
     }
-    const releasedAt = nowIso();
-    const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
-      if (
-        normalizeRunId(attempt?.runId) === runId &&
-        !attempt?.finalizedAt &&
-        !attempt?.cancelledAt
-      ) {
-        return [key, { ...attempt, cancelledAt: releasedAt, cancelReason: `run_${state}` }];
-      }
-      return [key, attempt];
-    }));
-    await storageSet({
-      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
-      [AUTO_APPLY_RUN_LEASE_KEY]: {
-        ...lease,
-        active: false,
-        updatedAt: releasedAt,
-        releasedState: state
-      }
-    });
+    return [key, attempt];
+  }));
+  await storageSet({
+    [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+    [AUTO_APPLY_RUN_LEASE_KEY]: {
+      ...lease,
+      active: false,
+      updatedAt: releasedAt,
+      releasedState: state
+    }
   });
 }
 
@@ -1445,7 +1771,7 @@ function safeStatusCount(value) {
 }
 
 function safeStatusTimestamp(value) {
-  const timestamp = Date.parse(String(value || ''));
+  const timestamp = typeof value === 'number' ? value : Date.parse(String(value || ''));
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
 }
 
@@ -1551,6 +1877,90 @@ function buildSafeStartDigest(value) {
   };
 }
 
+function buildSafeScheduledSession(value) {
+  if (!value || typeof value !== 'object') {
+    return {
+      present: false,
+      sessionId: '',
+      dateMsk: '',
+      state: 'none',
+      extensionVersion: '',
+      startedAt: '',
+      updatedAt: '',
+      finishedAt: '',
+      repairAttempts: 0,
+      stopReason: '',
+      reviewRequired: false,
+      reviewPending: false,
+      reviewOutcome: '',
+      reviewIssueCount: 0,
+      reviewedAt: ''
+    };
+  }
+  const rawSessionId = String(value.sessionId || '');
+  const state = SCHEDULED_AUTO_APPLY_SESSION_STATES.has(value.state) ? value.state : 'error';
+  const safeStopReasons = new Set([
+    '',
+    'user_stop',
+    'repair_pending',
+    'daily_limit_reached',
+    'authentication_required',
+    'parallel_run_conflict',
+    'scheduled_start_rejected',
+    'audit_not_ready',
+    'missing_checkpoint',
+    'max_repair_attempts',
+    'repair_cutoff',
+    'version_not_advanced',
+    'unresolved_submit',
+    'unresolved_response_attempt',
+    'active_saved_queue',
+    'counter_result_mismatch',
+    'owner_missing'
+  ]);
+  const stopReason = safeStopReasons.has(value.stopReason) ? value.stopReason : (value.stopReason ? 'other' : '');
+  const reviewOutcome = ['passed', 'blocked'].includes(value.reviewOutcome) ? value.reviewOutcome : '';
+  const reviewedAt = safeStatusTimestamp(value.reviewedAt);
+  return {
+    present: true,
+    sessionId: /^[A-Za-z0-9:._-]{1,200}$/.test(rawSessionId) ? rawSessionId : '',
+    dateMsk: /^\d{4}-\d{2}-\d{2}$/.test(String(value.dateMsk || '')) ? value.dateMsk : '',
+    state,
+    extensionVersion: /^\d+(?:\.\d+){0,3}$/.test(String(value.extensionVersion || '')) ? value.extensionVersion : '',
+    startedAt: safeStatusTimestamp(value.startedAt),
+    updatedAt: safeStatusTimestamp(value.updatedAt),
+    finishedAt: safeStatusTimestamp(value.finishedAt),
+    repairAttempts: Math.min(safeStatusCount(value.repairAttempts), 10),
+    stopReason,
+    reviewRequired: value.reviewRequired === true,
+    reviewPending: SCHEDULED_AUTO_APPLY_TERMINAL_STATES.has(state) && value.reviewRequired === true && !reviewedAt,
+    reviewOutcome,
+    reviewIssueCount: Math.min(Array.isArray(value.reviewIssues) ? value.reviewIssues.length : 0, 100),
+    reviewedAt
+  };
+}
+
+async function buildSafeScheduledStatus(value, session) {
+  const settings = scheduledSettings(value);
+  let nextAlarmAt = '';
+  try {
+    const alarm = await chrome.alarms?.get?.(SCHEDULED_AUTO_APPLY_ALARM);
+    nextAlarmAt = safeStatusTimestamp(alarm?.scheduledTime);
+  } catch {
+    nextAlarmAt = '';
+  }
+  return {
+    enabled: settings.enabled,
+    timeMsk: settings.timeMsk,
+    lateWindowMinutes: settings.lateWindowMinutes,
+    maxRepairAttempts: settings.maxRepairAttempts,
+    repairCutoffMsk: settings.repairCutoffMsk,
+    filterConfigured: Boolean(settings.filterUrl),
+    nextAlarmAt,
+    reviewGateBlocked: isPendingScheduledReview(session)
+  };
+}
+
 function getSafeManifestVersion() {
   try {
     const version = String(chrome.runtime?.getManifest?.().version || '');
@@ -1566,7 +1976,9 @@ async function buildSafeStatusSnapshot() {
     'automationSettingsAudit',
     'autoApplyStopBeforeSubmit',
     'runState',
-    AUTOMATION_START_DIGEST_KEY
+    AUTOMATION_START_DIGEST_KEY,
+    ...SCHEDULED_AUTO_APPLY_SETTING_KEYS,
+    SCHEDULED_AUTO_APPLY_SESSION_KEY
   ]);
   return {
     manifestVersion: getSafeManifestVersion(),
@@ -1577,7 +1989,9 @@ async function buildSafeStatusSnapshot() {
       state.runState
     ),
     runState: buildSafeRunState(state.runState),
-    startDigest: buildSafeStartDigest(state[AUTOMATION_START_DIGEST_KEY])
+    startDigest: buildSafeStartDigest(state[AUTOMATION_START_DIGEST_KEY]),
+    schedule: await buildSafeScheduledStatus(state, state[SCHEDULED_AUTO_APPLY_SESSION_KEY]),
+    scheduledSession: buildSafeScheduledSession(state[SCHEDULED_AUTO_APPLY_SESSION_KEY])
   };
 }
 
@@ -3647,6 +4061,668 @@ async function scheduleResponseNavigationWatchdog(tabId, url) {
   }, getResponseNavigationWatchdogMs());
 }
 
+function scheduledSettings(value = {}) {
+  const rawLateWindowMinutes = Number(value.scheduledAutoApplyLateWindowMinutes);
+  return {
+    enabled: value.scheduledAutoApplyEnabled === true,
+    timeMsk: parseClockTime(value.scheduledAutoApplyTimeMsk, DEFAULTS.scheduledAutoApplyTimeMsk).text,
+    lateWindowMinutes: Math.max(0, Math.min(
+      Number.isFinite(rawLateWindowMinutes) ? rawLateWindowMinutes : DEFAULTS.scheduledAutoApplyLateWindowMinutes,
+      12 * 60
+    )),
+    filterUrl: normalizeScheduledFilterUrl(value.scheduledAutoApplyFilterUrl),
+    maxRepairAttempts: Math.max(1, Math.min(
+      Number(value.scheduledAutoApplyMaxRepairAttempts) || DEFAULTS.scheduledAutoApplyMaxRepairAttempts,
+      10
+    )),
+    repairCutoffMsk: parseClockTime(
+      value.scheduledAutoApplyRepairCutoffMsk,
+      DEFAULTS.scheduledAutoApplyRepairCutoffMsk
+    ).text
+  };
+}
+
+function isPendingScheduledReview(session) {
+  return Boolean(
+    session &&
+    session.reviewRequired === true &&
+    !safeStatusTimestamp(session.reviewedAt)
+  );
+}
+
+function newScheduledSession({ dateMsk, filterUrl }) {
+  const timestamp = new Date(schedulerNowMs()).toISOString();
+  return {
+    sessionId: `scheduled:${dateMsk}:${crypto.randomUUID()}`,
+    dateMsk,
+    runId: '',
+    ownerId: 0,
+    filterUrl,
+    extensionVersion: getSafeManifestVersion(),
+    state: 'starting',
+    startedAt: '',
+    updatedAt: timestamp,
+    finishedAt: '',
+    repairAttempts: 0,
+    repairFromVersion: '',
+    stopReason: '',
+    reviewRequired: false,
+    reviewOutcome: '',
+    reviewIssues: [],
+    reviewedAt: ''
+  };
+}
+
+async function recreateScheduledAutoApplyAlarm({ catchUp = false, reason = 'settings' } = {}) {
+  if (!chrome.alarms?.create) return { scheduled: false, reason: 'alarms_unavailable' };
+  const values = await storageGet(SCHEDULED_AUTO_APPLY_SETTING_KEYS);
+  const settings = scheduledSettings(values);
+  await chrome.alarms.clear?.(SCHEDULED_AUTO_APPLY_ALARM);
+  if (!settings.enabled) {
+    await appendAgentLog('scheduled_auto_apply_alarm_disabled', { reason });
+    return { scheduled: false, reason: 'disabled' };
+  }
+  if (!settings.filterUrl) {
+    await appendAgentLog('scheduled_auto_apply_alarm_blocked', { reason: 'invalid_filter_url' });
+    return { scheduled: false, reason: 'invalid_filter_url' };
+  }
+  const nowMs = schedulerNowMs();
+  const decision = getScheduleDecision(nowMs, settings);
+  const missed = catchUp && nowMs > decision.lateUntil;
+  if (missed) {
+    await appendAgentLog('scheduled_auto_apply_missed', {
+      reason: 'late_start_window',
+      dateMsk: decision.dateMsk,
+      lateUntil: new Date(decision.lateUntil).toISOString()
+    });
+  }
+  const when = catchUp && decision.catchUp ? nowMs + 250 : decision.nextAt;
+  chrome.alarms.create(SCHEDULED_AUTO_APPLY_ALARM, { when });
+  await appendAgentLog('scheduled_auto_apply_alarm_created', {
+    reason,
+    catchUp: catchUp && decision.catchUp,
+    when: new Date(when).toISOString(),
+    dateMsk: decision.dateMsk
+  });
+  return { scheduled: true, when, catchUp: catchUp && decision.catchUp, missed };
+}
+
+async function queryHhTabs() {
+  if (!chrome.tabs?.query) return [];
+  return chrome.tabs.query({ url: ['https://hh.ru/*', 'https://*.hh.ru/*'] }).catch(() => []);
+}
+
+async function getSafeContentStatus(tabId) {
+  try {
+    const status = await chrome.tabs.sendMessage(tabId, { type: 'GET_CONTENT_STATUS' });
+    return status?.ok === true && status.authenticated === true && status.unsafe !== true ? status : null;
+  } catch {
+    return null;
+  }
+}
+
+async function selectAuthenticatedScheduledTab(filterUrl) {
+  const tabs = await queryHhTabs();
+  for (const tab of tabs) {
+    if (
+      !tab?.id ||
+      !isSafeHhStatusUrl(tab.url) ||
+      normalizeScheduledFilterUrl(tab.url) !== filterUrl
+    ) continue;
+    const status = await getSafeContentStatus(tab.id);
+    if (status) return { tab, exact: true };
+  }
+  if (chrome.tabs?.create) {
+    const created = await chrome.tabs.create({ url: filterUrl, active: false }).catch(() => null);
+    if (created?.id) {
+      try {
+        await waitForTabReady(created.id);
+        const status = await getSafeContentStatus(created.id);
+        if (status) return { tab: { ...created, url: filterUrl }, exact: true, created: true };
+      } catch {
+        // The newly created tab is removed below when authentication cannot be proven.
+      }
+      if (chrome.tabs.remove) await chrome.tabs.remove(created.id).catch(() => {});
+    }
+  }
+  return null;
+}
+
+function unresolvedResponseAttempts(value) {
+  return Object.values(value || {}).filter((attempt) => !attempt?.finalizedAt && !attempt?.cancelledAt);
+}
+
+async function reserveScheduledAutoApplyStart() {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      ...SCHEDULED_AUTO_APPLY_SETTING_KEYS,
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      DAILY_APPLICATION_LEDGER_KEY,
+      'automationSettingsAudit',
+      AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyPendingSubmit',
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue'
+    ]);
+    const settings = scheduledSettings(stored);
+    const nowMs = schedulerNowMs();
+    const decision = getScheduleDecision(nowMs, settings);
+    if (!settings.enabled) return { ok: false, reason: 'disabled' };
+    if (!settings.filterUrl) return { ok: false, reason: 'invalid_filter_url' };
+    if (!decision.catchUp) return { ok: false, reason: 'missed_start_window' };
+    const previous = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    if (previous?.dateMsk === decision.dateMsk) return { ok: false, reason: 'already_attempted_today' };
+    if (isPendingScheduledReview(previous)) return { ok: false, reason: 'previous_review_required' };
+    const ledger = normalizeDailyApplicationLedgerForMutation(
+      stored[DAILY_APPLICATION_LEDGER_KEY],
+      new Date(nowMs)
+    );
+    if (ledger.hhDailyLimitReached || ledger.newSubmitted >= SCHEDULED_AUTO_APPLY_LIMIT) {
+      return { ok: false, reason: 'daily_limit_reached' };
+    }
+    if (buildSafeAutomationAudit(stored.automationSettingsAudit).ready !== true) {
+      return { ok: false, reason: 'audit_not_ready' };
+    }
+    if (stored[AUTO_APPLY_RUN_LEASE_KEY]?.active === true) {
+      return { ok: false, reason: 'active_run' };
+    }
+    if (stored.autoApplyQueue?.active === true || stored.autoApplySearchQueue?.active === true) {
+      return { ok: false, reason: 'active_saved_queue' };
+    }
+    if (stored.autoApplyPendingSubmit?.item) return { ok: false, reason: 'pending_submit' };
+    if (unresolvedResponseAttempts(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]).length > 0) {
+      return { ok: false, reason: 'unresolved_response_attempt' };
+    }
+    const selected = await selectAuthenticatedScheduledTab(settings.filterUrl);
+    if (!selected) return { ok: false, reason: 'authentication_required' };
+    const session = newScheduledSession({ dateMsk: decision.dateMsk, filterUrl: settings.filterUrl });
+    await storageSet({ [SCHEDULED_AUTO_APPLY_SESSION_KEY]: session });
+    return {
+      ok: true,
+      session,
+      settings,
+      tab: selected.tab,
+      exact: selected.exact,
+      created: selected.created === true
+    };
+  });
+}
+
+async function updateScheduledSession(sessionId, updater) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([SCHEDULED_AUTO_APPLY_SESSION_KEY]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    if (!session || session.sessionId !== sessionId) return null;
+    const next = updater({ ...session });
+    if (!next) return session;
+    next.updatedAt = new Date(schedulerNowMs()).toISOString();
+    await storageSet({ [SCHEDULED_AUTO_APPLY_SESSION_KEY]: next });
+    return next;
+  });
+}
+
+async function runScheduledAutoApply() {
+  await ensureDefaults({ preserveAutomationState: true });
+  const reservation = await reserveScheduledAutoApplyStart();
+  if (!reservation.ok) {
+    await appendAgentLog('scheduled_auto_apply_skipped', { reason: reservation.reason });
+    return reservation;
+  }
+  const { session, tab, created } = reservation;
+  try {
+    const status = await waitForContentStatus(tab.id);
+    if (status.authenticated !== true || status.unsafe === true) {
+      throw new Error('authentication_required');
+    }
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: 'START_SCHEDULED_AUTO_APPLY',
+      sessionId: session.sessionId,
+      dateMsk: session.dateMsk,
+      limitOverride: SCHEDULED_AUTO_APPLY_LIMIT,
+      delayMinMs: SCHEDULED_AUTO_APPLY_DELAY_MIN_MS,
+      delayMaxMs: SCHEDULED_AUTO_APPLY_DELAY_MAX_MS
+    });
+    if (response?.ok !== true || response?.alreadyRunning === true) {
+      throw new Error(response?.alreadyRunning ? 'parallel_run_conflict' : 'scheduled_start_rejected');
+    }
+    await appendAgentLog('scheduled_auto_apply_started', {
+      sessionId: session.sessionId,
+      dateMsk: session.dateMsk,
+      tabId: tab.id
+    });
+    return { ok: true, sessionId: session.sessionId, runId: response.activeRunId || '' };
+  } catch (error) {
+    await updateScheduledSession(session.sessionId, (current) => ({
+      ...current,
+      state: 'error',
+      stopReason: String(error?.message || error || 'scheduled_start_error').slice(0, 80),
+      finishedAt: new Date(schedulerNowMs()).toISOString(),
+      reviewRequired: true
+    }));
+    if (created && tab?.id && chrome.tabs.remove) {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+    await appendAgentLog('scheduled_auto_apply_error', {
+      sessionId: session.sessionId,
+      error: localizeError(error)
+    });
+    return { ok: false, reason: String(error?.message || 'scheduled_start_error') };
+  }
+}
+
+async function acknowledgeScheduledSessionReview(message, sender) {
+  if (!isSafeHhStatusUrl(sender?.tab?.url) || message?.authenticated !== true) {
+    return { ok: false, acknowledged: false, reason: 'authenticated_safe_status_required' };
+  }
+  return enqueueAutoApplyOwnership(async () => {
+    const { [SCHEDULED_AUTO_APPLY_SESSION_KEY]: session } = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY
+    ]);
+    const sessionId = String(message?.sessionId || '');
+    const outcome = String(message?.outcome || '');
+    if (!session || session.sessionId !== sessionId) {
+      return { ok: false, acknowledged: false, reason: 'session_mismatch' };
+    }
+    if (!SCHEDULED_AUTO_APPLY_TERMINAL_STATES.has(session.state)) {
+      return { ok: false, acknowledged: false, reason: 'session_not_terminal' };
+    }
+    if (!['passed', 'blocked'].includes(outcome)) {
+      return { ok: false, acknowledged: false, reason: 'invalid_outcome' };
+    }
+    if (safeStatusTimestamp(session.reviewedAt)) {
+      return { ok: true, acknowledged: true, alreadyAcknowledged: true };
+    }
+    const issues = [...new Set((Array.isArray(message?.issues) ? message.issues : [])
+      .map((issue) => String(issue || '').trim().slice(0, 80))
+      .filter(Boolean))].slice(0, 20);
+    const reviewedAt = new Date(schedulerNowMs()).toISOString();
+    await storageSet({
+      [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+        ...session,
+        ...(outcome === 'blocked' ? { state: 'blocked' } : {}),
+        reviewOutcome: outcome,
+        reviewIssues: issues,
+        reviewedAt,
+        updatedAt: reviewedAt
+      }
+    });
+    return { ok: true, acknowledged: true, alreadyAcknowledged: false };
+  });
+}
+
+async function requestScheduledRepairPause(message, sender) {
+  if (!isSafeHhStatusUrl(sender?.tab?.url) || message?.authenticated !== true) {
+    return { ok: false, checkpointed: false, reason: 'authenticated_safe_status_required' };
+  }
+  const reservation = await enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY
+    ]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (session?.state !== 'running') return { ok: false, reason: 'scheduled_run_not_running' };
+    if (
+      lease?.active !== true ||
+      normalizeRunId(lease.runId) !== normalizeRunId(session.runId) ||
+      normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(session.ownerId)
+    ) return { ok: false, reason: 'scheduled_run_not_owned' };
+    return { ok: true, ownerId: normalizeRunOwnerId(session.ownerId) };
+  });
+  if (!reservation.ok || !reservation.ownerId) {
+    return { ok: false, checkpointed: false, reason: reservation.reason || 'owner_missing' };
+  }
+  try {
+    const response = await chrome.tabs.sendMessage(reservation.ownerId, {
+      type: 'PAUSE_SCHEDULED_AUTO_APPLY_FOR_REPAIR'
+    });
+    return response?.ok === true && response?.checkpointed === true
+      ? { ok: true, checkpointed: true }
+      : { ok: false, checkpointed: false, reason: response?.reason || 'repair_pause_rejected' };
+  } catch {
+    return { ok: false, checkpointed: false, reason: 'repair_pause_unreachable' };
+  }
+}
+
+function scheduledQueueProof(stored, session) {
+  return [stored.autoApplyQueue, stored.autoApplySearchQueue].find((queue) => (
+    queue?.active === true &&
+    String(queue.scheduledSessionId || '') === String(session?.sessionId || '') &&
+    String(queue.scheduledDateMsk || '') === String(session?.dateMsk || '') &&
+    normalizeRunId(queue.runId) === normalizeRunId(session?.runId) &&
+    normalizeRunOwnerId(queue.ownerId) === normalizeRunOwnerId(session?.ownerId)
+  ));
+}
+
+async function authorizeScheduledContinuation(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue'
+    ]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const allowed = Boolean(
+      session?.state === 'running' &&
+      session.sessionId === String(message?.sessionId || '') &&
+      session.dateMsk === String(message?.dateMsk || '') &&
+      session.dateMsk === getMoscowDateParts(schedulerNowMs()).dateMsk &&
+      normalizeRunId(session.runId) === normalizeRunId(message?.runId) &&
+      normalizeRunOwnerId(session.ownerId) === ownerId &&
+      stored[AUTO_APPLY_RUN_LEASE_KEY]?.active === true &&
+      normalizeRunId(stored[AUTO_APPLY_RUN_LEASE_KEY].runId) === normalizeRunId(session.runId) &&
+      normalizeRunOwnerId(stored[AUTO_APPLY_RUN_LEASE_KEY].ownerId) === ownerId &&
+      scheduledQueueProof(stored, session)
+    );
+    return { ok: true, authorized: allowed };
+  });
+}
+
+async function checkpointScheduledRepair(message, sender) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const ownerId = normalizeRunOwnerId(sender?.tab?.id);
+    const runId = normalizeRunId(message?.runId);
+    if (
+      session?.state !== 'running' ||
+      session.sessionId !== String(message?.sessionId || '') ||
+      normalizeRunId(session.runId) !== runId ||
+      normalizeRunOwnerId(session.ownerId) !== ownerId ||
+      stored[AUTO_APPLY_RUN_LEASE_KEY]?.active !== true ||
+      normalizeRunId(stored[AUTO_APPLY_RUN_LEASE_KEY]?.runId) !== runId ||
+      normalizeRunOwnerId(stored[AUTO_APPLY_RUN_LEASE_KEY]?.ownerId) !== ownerId
+    ) return { ok: false, checkpointed: false, reason: 'scheduled_run_not_owned' };
+    if (stored.autoApplyPendingSubmit?.item) {
+      return { ok: false, checkpointed: false, reason: 'unresolved_submit' };
+    }
+    if (unresolvedResponseAttempts(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]).length > 0) {
+      return { ok: false, checkpointed: false, reason: 'unresolved_response_attempt' };
+    }
+    const proof = scheduledQueueProof(stored, session);
+    const timestamp = new Date(schedulerNowMs()).toISOString();
+    if (!proof) {
+      await terminalizeScheduledRepairSession(stored, session, 'missing_checkpoint');
+      return { ok: false, checkpointed: false, reason: 'missing_checkpoint' };
+    }
+    const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+    const safeCounters = Object.fromEntries(
+      ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']
+        .filter((key) => Object.hasOwn(message?.counters || {}, key))
+        .map((key) => [key, safeStatusCount(message.counters[key])])
+    );
+    const nextRunState = {
+      ...DEFAULTS.runState,
+      ...(stored.runState || {}),
+      ...safeCounters,
+      state: 'paused',
+      runId,
+      ownerId,
+      processed: runResults.length,
+      currentAction: 'Приостановлено для исправления',
+      lastError: '',
+      updatedAt: timestamp
+    };
+    await storageSet({
+      autoApplyStopRequested: true,
+      autoApplyStopRequestedAt: timestamp,
+      autoApplyStopReason: 'repair_pending',
+      runState: nextRunState,
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...stored[AUTO_APPLY_RUN_LEASE_KEY],
+        updatedAt: timestamp,
+        scheduledRepairPending: true
+      },
+      [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+        ...session,
+        state: 'repair_pending',
+        repairFromVersion: getSafeManifestVersion(),
+        stopReason: 'repair_pending',
+        updatedAt: timestamp
+      }
+    });
+    return { ok: true, checkpointed: true };
+  });
+}
+
+async function terminalizeScheduledRepairSession(stored, session, reason) {
+  const timestamp = new Date(schedulerNowMs()).toISOString();
+  const runId = normalizeRunId(session.runId);
+  const ownerId = normalizeRunOwnerId(session.ownerId);
+  const matchesOwnedRun = (value) => (
+    normalizeRunId(value?.runId) === runId &&
+    normalizeRunOwnerId(value?.ownerId) === ownerId
+  );
+  const deactivateOwnedQueue = (queue) => (
+    queue && matchesOwnedRun(queue)
+      ? { ...queue, active: false, terminalReason: reason, updatedAt: timestamp }
+      : (queue || { active: false })
+  );
+  const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+  const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+  const ownsRunState = !stored.runState?.runId || matchesOwnedRun(stored.runState);
+  await storageSet({
+    autoApplyStopRequested: true,
+    autoApplyStopRequestedAt: timestamp,
+    autoApplyStopReason: reason,
+    autoApplyQueue: deactivateOwnedQueue(stored.autoApplyQueue),
+    autoApplySearchQueue: deactivateOwnedQueue(stored.autoApplySearchQueue),
+    ...(matchesOwnedRun(lease) ? {
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...lease,
+        active: false,
+        scheduledRepairPending: false,
+        updatedAt: timestamp,
+        releasedState: 'blocked',
+        releaseReason: reason
+      }
+    } : {}),
+    ...(ownsRunState ? {
+      runState: {
+        ...DEFAULTS.runState,
+        ...(stored.runState || {}),
+        state: 'stopped',
+        runId,
+        ownerId,
+        processed: runResults.length,
+        currentAction: 'Scheduled-сессия заблокирована',
+        lastError: reason,
+        updatedAt: timestamp
+      }
+    } : {}),
+    [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+      ...session,
+      state: 'blocked',
+      stopReason: reason,
+      finishedAt: timestamp,
+      updatedAt: timestamp,
+      continuationAuthorizedAt: '',
+      continuationAuthorizedVersion: '',
+      reviewRequired: true
+    }
+  });
+  return { ok: false, reason };
+}
+
+async function reserveScheduledRepairResume({ preReloadOnly = false } = {}) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      ...SCHEDULED_AUTO_APPLY_SETTING_KEYS,
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'automationSettingsAudit',
+      'runState',
+      'runResults'
+    ]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    if (session?.state !== 'repair_pending') return { ok: false, reason: 'no_repair_pending' };
+    const settings = scheduledSettings(stored);
+    const decision = getScheduleDecision(schedulerNowMs(), settings);
+    const version = getSafeManifestVersion();
+    const permanentBlock = (reason) => terminalizeScheduledRepairSession(stored, session, reason);
+    if (stored.autoApplyPendingSubmit?.item) return { ok: false, reason: 'unresolved_submit' };
+    if (unresolvedResponseAttempts(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]).length > 0) {
+      return { ok: false, reason: 'unresolved_response_attempt' };
+    }
+    if (session.dateMsk !== decision.dateMsk) return permanentBlock('date_mismatch');
+    if (!decision.beforeRepairCutoff) return permanentBlock('repair_cutoff');
+    if ((Number(session.repairAttempts) || 0) >= settings.maxRepairAttempts) {
+      return permanentBlock('max_repair_attempts');
+    }
+    if (compareVersions(version, session.repairFromVersion) <= 0) {
+      return { ok: false, reason: 'version_not_advanced' };
+    }
+    if (buildSafeAutomationAudit(stored.automationSettingsAudit).ready !== true) {
+      return { ok: false, reason: 'audit_not_ready' };
+    }
+    const proof = scheduledQueueProof(stored, session);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (
+      !proof ||
+      lease?.active !== true ||
+      normalizeRunId(lease.runId) !== normalizeRunId(session.runId) ||
+      normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(session.ownerId)
+    ) return permanentBlock('missing_checkpoint');
+    const tab = await chrome.tabs.get(normalizeRunOwnerId(session.ownerId)).catch(() => null);
+    if (!tab) return { ok: false, reason: 'owner_missing' };
+    if (preReloadOnly) {
+      return {
+        ok: true,
+        preReloadOnly: true,
+        tabId: tab.id,
+        sessionId: session.sessionId,
+        dateMsk: session.dateMsk,
+        runId: session.runId
+      };
+    }
+    if (!await getSafeContentStatus(tab.id)) return { ok: false, reason: 'owner_missing' };
+    const timestamp = new Date(schedulerNowMs()).toISOString();
+    await storageSet({
+      autoApplyStopRequested: false,
+      autoApplyStopRequestedAt: '',
+      autoApplyStopReason: '',
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...lease,
+        scheduledRepairPending: false,
+        updatedAt: timestamp
+      },
+      [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+        ...session,
+        state: 'running',
+        extensionVersion: version,
+        repairAttempts: (Number(session.repairAttempts) || 0) + 1,
+        stopReason: '',
+        updatedAt: timestamp,
+        continuationAuthorizedAt: timestamp,
+        continuationAuthorizedVersion: version
+      }
+    });
+    return { ok: true, tabId: tab.id, sessionId: session.sessionId, dateMsk: session.dateMsk, runId: session.runId };
+  });
+}
+
+async function rollbackScheduledRepairContinuation(reservation) {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    if (
+      session?.state !== 'running' ||
+      session.sessionId !== reservation.sessionId ||
+      session.dateMsk !== reservation.dateMsk ||
+      normalizeRunId(session.runId) !== normalizeRunId(reservation.runId) ||
+      normalizeRunOwnerId(session.ownerId) !== normalizeRunOwnerId(reservation.tabId) ||
+      lease?.active !== true ||
+      normalizeRunId(lease.runId) !== normalizeRunId(reservation.runId) ||
+      normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(reservation.tabId)
+    ) return { rolledBack: false, reason: 'resume_state_changed' };
+    const timestamp = new Date(schedulerNowMs()).toISOString();
+    const checkpointProven = Boolean(scheduledQueueProof(stored, session));
+    if (!checkpointProven) {
+      await terminalizeScheduledRepairSession(stored, session, 'missing_checkpoint');
+      return { rolledBack: true, checkpointProven: false, terminal: true };
+    }
+    await storageSet({
+      autoApplyStopRequested: true,
+      autoApplyStopRequestedAt: timestamp,
+      autoApplyStopReason: 'repair_pending',
+      [AUTO_APPLY_RUN_LEASE_KEY]: {
+        ...lease,
+        updatedAt: timestamp,
+        scheduledRepairPending: true
+      },
+      [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+        ...session,
+        state: 'repair_pending',
+        stopReason: 'repair_pending',
+        updatedAt: timestamp,
+        continuationAuthorizedAt: '',
+        continuationAuthorizedVersion: '',
+        reviewRequired: true
+      }
+    });
+    return { rolledBack: true, checkpointProven };
+  });
+}
+
+async function resumeScheduledRepair() {
+  const reservation = await reserveScheduledRepairResume();
+  if (!reservation.ok) return reservation;
+  try {
+    const response = await chrome.tabs.sendMessage(reservation.tabId, {
+      type: 'CONTINUE_SCHEDULED_AUTO_APPLY',
+      sessionId: reservation.sessionId,
+      dateMsk: reservation.dateMsk,
+      runId: reservation.runId
+    });
+    if (response?.ok === true) return { ok: true, resumed: true };
+    await rollbackScheduledRepairContinuation(reservation);
+    return { ok: false, reason: 'continue_rejected' };
+  } catch {
+    await rollbackScheduledRepairContinuation(reservation);
+    return { ok: false, reason: 'continue_unreachable' };
+  }
+}
+
+async function resumeScheduledRepairAfterExtensionUpdate() {
+  const preflight = await reserveScheduledRepairResume({ preReloadOnly: true });
+  if (!preflight.ok) return preflight;
+  const ownerId = normalizeRunOwnerId(preflight.tabId);
+  if (chrome.tabs.reload) {
+    try {
+      await chrome.tabs.reload(ownerId);
+      await waitForTabReady(ownerId);
+      await waitForContentStatus(ownerId);
+    } catch {
+      return { ok: false, reason: 'owner_reload_failed' };
+    }
+  }
+  return resumeScheduledRepair();
+}
+
 async function startAutoApplyFromActiveTab() {
   globalThis.HHJA_CONFIG_READINESS.assertReady(await storageGet([
     'aiEnabled',
@@ -3667,20 +4743,44 @@ async function startAutoApplyFromActiveTab() {
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
+  await recreateScheduledAutoApplyAlarm({ catchUp: false, reason: 'installed' });
+  await resumeScheduledRepairAfterExtensionUpdate();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureDefaults();
   await restoreResponseNavigationWatchdogAlarm();
+  await recreateScheduledAutoApplyAlarm({ catchUp: true, reason: 'startup' });
+  await resumeScheduledRepair();
 });
 
 chrome.alarms?.onAlarm?.addListener?.((alarm) => {
-  if (alarm?.name !== RESPONSE_NAVIGATION_WATCHDOG_ALARM) return;
-  handleResponseNavigationWatchdogAlarm().catch((error) => {
-    appendAgentLog('response_navigation_watchdog_error', {
-      alarm: alarm.name,
-      error: localizeError(error)
-    }).catch(() => {});
+  if (alarm?.name === RESPONSE_NAVIGATION_WATCHDOG_ALARM) {
+    handleResponseNavigationWatchdogAlarm().catch((error) => {
+      appendAgentLog('response_navigation_watchdog_error', {
+        alarm: alarm.name,
+        error: localizeError(error)
+      }).catch(() => {});
+    });
+    return;
+  }
+  if (alarm?.name === SCHEDULED_AUTO_APPLY_ALARM) {
+    (async () => {
+      await recreateScheduledAutoApplyAlarm({ catchUp: false, reason: 'alarm_fired' });
+      await runScheduledAutoApply();
+    })().catch((error) => {
+      appendAgentLog('scheduled_auto_apply_error', {
+        alarm: alarm.name,
+        error: localizeError(error)
+      }).catch(() => {});
+    });
+  }
+});
+
+chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
+  if (areaName !== 'local' || !SCHEDULED_AUTO_APPLY_SETTING_KEYS.some((key) => Object.hasOwn(changes || {}, key))) return;
+  recreateScheduledAutoApplyAlarm({ catchUp: false, reason: 'settings_changed' }).catch((error) => {
+    appendAgentLog('scheduled_auto_apply_alarm_error', { error: localizeError(error) }).catch(() => {});
   });
 });
 
@@ -3770,6 +4870,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     await ensureDefaults();
 
     switch (message?.type) {
+      case 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW': {
+        sendResponse(await acknowledgeScheduledSessionReview(message, sender));
+        break;
+      }
+      case 'REQUEST_SCHEDULED_REPAIR_PAUSE': {
+        sendResponse(await requestScheduledRepairPause(message, sender));
+        break;
+      }
+      case 'AUTHORIZE_SCHEDULED_CONTINUATION': {
+        sendResponse(await authorizeScheduledContinuation(message, sender));
+        break;
+      }
+      case 'CHECKPOINT_SCHEDULED_REPAIR': {
+        sendResponse(await checkpointScheduledRepair(message, sender));
+        break;
+      }
+      case 'RESUME_SCHEDULED_AUTO_APPLY_AFTER_REPAIR': {
+        if (!isSafeHhStatusUrl(sender?.tab?.url) || message?.authenticated !== true) {
+          sendResponse({ ok: false, reason: 'authenticated_safe_status_required' });
+          break;
+        }
+        sendResponse(await resumeScheduledRepair());
+        break;
+      }
       case 'CLAIM_AUTO_APPLY_RUN': {
         sendResponse(await claimAutoApplyRun(message, sender));
         break;
@@ -3831,7 +4955,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'STOP_RUN': {
         await storageSet({
           autoApplyStopRequested: true,
-          autoApplyStopRequestedAt: nowIso()
+          autoApplyStopRequestedAt: nowIso(),
+          autoApplyStopReason: 'user_stop'
         });
         await setRunState({ state: 'stopped', currentAction: 'Остановлено', lastError: '' });
         sendResponse({ ok: true });
@@ -3839,15 +4964,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'SET_RUN_STATE': {
         if (message.runId) {
-          const result = await mutateOwnedAutoApplyRun(message, sender, async () => {
+          const result = await mutateOwnedAutoApplyRun(message, sender, async (lease) => {
+            const terminalGuard = await guardScheduledTerminalTransition(message, lease);
+            if (!terminalGuard.allowed) {
+              return { written: false, ...terminalGuard };
+            }
             await setRunState(message.patch || {});
+            await syncScheduledSessionForTerminalRun(message, lease);
+            await releaseAutoApplyRunLeaseIfTerminalUnlocked(message, sender);
             return { written: true };
           });
           if (!result.ok) {
             sendResponse(result);
             break;
           }
-          await releaseAutoApplyRunLeaseIfTerminal(message, sender);
           sendResponse(result);
           break;
         }

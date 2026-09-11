@@ -13,6 +13,19 @@ const TEST_READY_CONFIG = {
   choiceRetryPrompt: 'Choose exact listed labels and follow Choice group N output markers.'
 };
 
+test('scheduled content entry is background-authorized and carries schedule provenance into queues', async () => {
+  const source = await readContentScriptSource();
+  assert.match(source, /START_SCHEDULED_AUTO_APPLY/);
+  assert.match(source, /entrySource:\s*'scheduled'/);
+  assert.match(source, /scheduledSessionId/);
+  assert.match(source, /scheduledDateMsk/);
+  assert.match(source, /AUTHORIZE_SCHEDULED_CONTINUATION/);
+  assert.match(source, /PAUSE_SCHEDULED_AUTO_APPLY_FOR_REPAIR/);
+  assert.match(source, /CHECKPOINT_SCHEDULED_REPAIR/);
+  assert.match(source, /delayMinMs/);
+  assert.match(source, /delayMaxMs/);
+});
+
 async function runContentAutoApply({
   messageType = 'START_AUTO_APPLY',
   dialogText,
@@ -882,10 +895,14 @@ async function runStatusPanel({ authenticated = true, snapshot } = {}) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const panel = elementsById.get('hh-job-assistant-status-panel') || null;
   const refresh = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-refresh') || null;
+  const review = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-review') || null;
+  const repairPause = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-repair-pause') || null;
   const flattenText = (node) => [node.textContent, ...node.children.flatMap(flattenText)].filter(Boolean).join('\n');
   return {
     panel,
     refresh,
+    review,
+    repairPause,
     panelText: panel ? flattenText(panel) : '',
     runtimeMessages,
     historyCalls,
@@ -970,6 +987,152 @@ test('hhjaStatus panel stays absent outside an authenticated safe HH context', a
   assert.equal(result.runtimeMessages.some((message) => message.type === 'RUN_SAFE_STATUS_PREFLIGHT'), false);
   assert.equal(result.historyCalls.length, 0);
   assert.equal(result.storageSetCalls, 0);
+});
+
+test('hhjaStatus panel exposes only a terminal review acknowledgement action', async () => {
+  const result = await runStatusPanel({
+    snapshot: {
+      manifestVersion: '1.2.3',
+      dailyLedger: {},
+      automationAudit: {},
+      runState: {},
+      startDigest: {},
+      schedule: {
+        enabled: true,
+        timeMsk: '10:40',
+        lateWindowMinutes: 120,
+        maxRepairAttempts: 3,
+        repairCutoffMsk: '18:00',
+        filterConfigured: true,
+        nextAlarmAt: '2026-08-17T07:40:00.000Z',
+        reviewGateBlocked: true,
+        filterUrl: 'must-not-render'
+      },
+      scheduledSession: {
+        present: true,
+        sessionId: 'scheduled:2026-08-16:test',
+        dateMsk: '2026-08-16',
+        state: 'complete',
+        extensionVersion: '1.2.3',
+        repairAttempts: 1,
+        reviewRequired: true,
+        reviewPending: true,
+        reviewIssueCount: 0,
+        reviewOutcome: '',
+        filterUrl: 'must-not-render',
+        runId: 'must-not-render'
+      }
+    }
+  });
+
+  assert.ok(result.review);
+  assert.equal(result.review.hidden, false);
+  assert.ok(result.repairPause);
+  assert.equal(result.repairPause.hidden, true);
+  result.review.listeners.get('click')();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const acknowledgement = result.runtimeMessages.find((message) => message.type === 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW');
+  assert.deepEqual(acknowledgement, {
+    type: 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW',
+    sessionId: 'scheduled:2026-08-16:test',
+    outcome: 'passed',
+    issues: [],
+    authenticated: true
+  });
+  assert.doesNotMatch(result.panelText, /must-not-render/);
+});
+
+test('hhjaStatus panel hides review acknowledgement while scheduled session is running', async () => {
+  const result = await runStatusPanel({
+    snapshot: {
+      manifestVersion: '1.2.3',
+      dailyLedger: {},
+      automationAudit: {},
+      runState: { state: 'applying' },
+      startDigest: {},
+      schedule: { enabled: true, reviewGateBlocked: true },
+      scheduledSession: {
+        present: true,
+        sessionId: 'scheduled:2026-08-16:running',
+        dateMsk: '2026-08-16',
+        state: 'running',
+        reviewRequired: true,
+        reviewPending: true
+      }
+    }
+  });
+
+  assert.ok(result.review);
+  assert.equal(result.review.hidden, true);
+  assert.ok(result.repairPause);
+  assert.equal(result.repairPause.hidden, false);
+  result.repairPause.listeners.get('click')();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(
+    result.runtimeMessages.find((message) => message.type === 'REQUEST_SCHEDULED_REPAIR_PAUSE'),
+    { type: 'REQUEST_SCHEDULED_REPAIR_PAUSE', authenticated: true }
+  );
+  assert.equal(
+    result.runtimeMessages.some((message) => message.type === 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW'),
+    false
+  );
+});
+
+test('scheduled start keeps user delays unchanged and stores 3-5 second queue provenance', async () => {
+  const result = await runContentAutoApply({
+    dailyLimit: 2,
+    nextPageUrl: 'https://hh.ru/search/vacancy?text=java&page=1',
+    message: {
+      type: 'START_SCHEDULED_AUTO_APPLY',
+      sessionId: 'scheduled:2026-08-16:test',
+      dateMsk: '2026-08-16',
+      limitOverride: 2,
+      delayMinMs: 3000,
+      delayMaxMs: 5000
+    },
+    initialLocalStore: {
+      delayMinMs: 1111,
+      delayMaxMs: 2222
+    }
+  });
+
+  const claim = result.runtimeMessages.find((message) => message.type === 'CLAIM_AUTO_APPLY_RUN');
+  assert.equal(claim.entrySource, 'scheduled');
+  assert.equal(claim.scheduledSessionId, 'scheduled:2026-08-16:test');
+  assert.equal(claim.scheduledDateMsk, '2026-08-16');
+  assert.equal(result.localStore.delayMinMs, 1111);
+  assert.equal(result.localStore.delayMaxMs, 2222);
+  assert.equal(result.localStore.autoApplySearchQueue.scheduledSessionId, 'scheduled:2026-08-16:test');
+  assert.equal(result.localStore.autoApplySearchQueue.scheduledDateMsk, '2026-08-16');
+  assert.equal(result.localStore.autoApplySearchQueue.config.delayMinMs, 3000);
+  assert.equal(result.localStore.autoApplySearchQueue.config.delayMaxMs, 5000);
+});
+
+test('scheduled queue from reload cannot continue without background authorization', async () => {
+  const queue = {
+    active: true,
+    runId: 'scheduled-run',
+    ownerId: 7,
+    scheduledSessionId: 'scheduled:2026-08-16:test',
+    scheduledDateMsk: '2026-08-16',
+    limit: 200,
+    counters: { found: 1, processed: 0, applied: 0, skipped: 0, errors: 0 },
+    processedVacancyIds: []
+  };
+  const result = await runContentAutoApply({
+    sendMessageAfterImport: false,
+    initialLocalStore: {
+      autoApplySearchQueue: queue,
+      runState: { state: 'applying', runId: 'scheduled-run', ownerId: 7 }
+    },
+    runtimeResponses: {
+      AUTHORIZE_SCHEDULED_CONTINUATION: { ok: true, authorized: false }
+    }
+  });
+
+  assert.equal(result.localStore.autoApplySearchQueue.active, true);
+  assert.equal(result.runtimeMessages.some((message) => message.type === 'RESUME_AUTO_APPLY_RUN'), false);
+  assert.equal(result.runtimeMessages.filter((message) => message.type === 'AUTHORIZE_SCHEDULED_CONTINUATION').length, 1);
 });
 
 test('[BS:COVERS:HHJA-BR-000019] trusted Alt+Shift+A fallback ignores synthetic input and starts only one run', async () => {
@@ -1147,6 +1310,9 @@ test('[BS:COVERS:HHJA-BR-000017] live start fails closed when the refreshed sett
   assert.equal(result.submitClicks, 0);
   assert.equal(result.navigateUrl, '');
   assert.equal(result.runtimeMessages.some((message) => message.type === 'GET_AUTOMATION_SETTINGS_AUDIT'), true);
+  assert.equal(result.states.at(-1).state, 'error');
+  assert.equal(result.states.at(-1).currentAction, 'Автоматические отклики заблокированы');
+  assert.match(result.states.at(-1).lastError, /Автоматические отклики заблокированы/);
 });
 
 async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 руб. на руки' } = {}) {
@@ -1515,6 +1681,27 @@ test('auto apply does not count current card as applied while response button is
   assert.equal(result.response.navigated, true);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.appended.length, 0);
+  assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
+});
+
+test('auto apply ignores a resume-visibility warning outside the active response surface', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseClickOpensDialog: false,
+    bodyText: 'Java Developer\nОткликнуться',
+    bodyTextAfterResponseClick: [
+      'Java Developer',
+      'Откликнуться',
+      'Рекомендованная вакансия',
+      'Поменяйте видимость резюме на "Видно компаниям-клиентам HeadHunter"'
+    ].join('\n')
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.appended.length, 0);
+  assert.equal(result.response.navigated, true);
   assert.match(result.navigateUrl, /\/applicant\/vacancy_response\?vacancyId=123/);
 });
 
@@ -2140,6 +2327,7 @@ test('auto apply confirms country warning before response form opens', async () 
 });
 
 test('auto apply confirms country warning when hh modal is only in document body', async () => {
+  const startedAt = Date.now();
   const result = await runContentAutoApply({
     initialFollowupBodyOnlyText: [
       'CTO / Chief Technology Officer',
@@ -2158,6 +2346,7 @@ test('auto apply confirms country warning when hh modal is only in document body
   assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 1);
   assert.equal(result.followupClicks, 1);
+  assert.ok(Date.now() - startedAt < 1500, 'country warning confirmation must not wait for the 7-second dialog timeout');
   assert.ok(result.states.some((state) => state.currentAction === 'HH предупреждает: отклик может получить отказ — подтверждаю отклик'));
   assert.equal(result.appended.at(-1).status, 'applied');
 });
@@ -3882,7 +4071,7 @@ test('queued search recovery preserves processed cap when resuming auto apply', 
 
   assert.match(
     source,
-    /handleAutoApply\(\s*autoApplyQueue\.limit \|\| 20,\s*counters,\s*autoApplyQueue\.processedVacancyIds \|\| \[\],\s*\{ maxProcessed: autoApplyQueue\.maxProcessed \|\| null \}\s*\)/
+    /handleAutoApply\(\s*autoApplyQueue\.limit \|\| 20,\s*counters,\s*autoApplyQueue\.processedVacancyIds \|\| \[\],\s*\{\s*maxProcessed: autoApplyQueue\.maxProcessed \|\| null,\s*configOverride: autoApplyQueue\.config \|\| null\s*\}\s*\)/
   );
 });
 

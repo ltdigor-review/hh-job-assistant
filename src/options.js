@@ -27,6 +27,12 @@ const fields = {
   dailyLimit: document.getElementById('dailyLimit'),
   delayMinMs: document.getElementById('delayMinMs'),
   delayMaxMs: document.getElementById('delayMaxMs'),
+  scheduledAutoApplyEnabled: document.getElementById('scheduledAutoApplyEnabled'),
+  scheduledAutoApplyTimeMsk: document.getElementById('scheduledAutoApplyTimeMsk'),
+  scheduledAutoApplyLateWindowMinutes: document.getElementById('scheduledAutoApplyLateWindowMinutes'),
+  scheduledAutoApplyFilterUrl: document.getElementById('scheduledAutoApplyFilterUrl'),
+  scheduledAutoApplyMaxRepairAttempts: document.getElementById('scheduledAutoApplyMaxRepairAttempts'),
+  scheduledAutoApplyRepairCutoffMsk: document.getElementById('scheduledAutoApplyRepairCutoffMsk'),
   agentDebugLogsEnabled: document.getElementById('agentDebugLogsEnabled'),
   agentDebugRetentionCount: document.getElementById('agentDebugRetentionCount'),
   agentDebugRunSelect: document.getElementById('agentDebugRunSelect'),
@@ -401,6 +407,12 @@ async function loadOptions() {
   fields.dailyLimit.value = values.dailyLimit ?? DEFAULTS.dailyLimit;
   fields.delayMinMs.value = values.delayMinMs ?? DEFAULTS.delayMinMs;
   fields.delayMaxMs.value = values.delayMaxMs ?? DEFAULTS.delayMaxMs;
+  fields.scheduledAutoApplyEnabled.checked = values.scheduledAutoApplyEnabled === true;
+  fields.scheduledAutoApplyTimeMsk.value = values.scheduledAutoApplyTimeMsk || DEFAULTS.scheduledAutoApplyTimeMsk;
+  fields.scheduledAutoApplyLateWindowMinutes.value = values.scheduledAutoApplyLateWindowMinutes ?? DEFAULTS.scheduledAutoApplyLateWindowMinutes;
+  fields.scheduledAutoApplyFilterUrl.value = values.scheduledAutoApplyFilterUrl || DEFAULTS.scheduledAutoApplyFilterUrl;
+  fields.scheduledAutoApplyMaxRepairAttempts.value = values.scheduledAutoApplyMaxRepairAttempts ?? DEFAULTS.scheduledAutoApplyMaxRepairAttempts;
+  fields.scheduledAutoApplyRepairCutoffMsk.value = values.scheduledAutoApplyRepairCutoffMsk || DEFAULTS.scheduledAutoApplyRepairCutoffMsk;
   fields.agentDebugLogsEnabled.checked = values.agentDebugLogsEnabled === true;
   fields.agentDebugRetentionCount.value = normalizeDebugRetention(
     values.agentDebugRetentionCount ?? DEFAULTS.agentDebugRetentionCount
@@ -430,6 +442,33 @@ async function saveOptions() {
     }
   }
   fields.resumeUrl.setCustomValidity('');
+
+  const rawScheduledFilterUrl = fields.scheduledAutoApplyFilterUrl.value.trim();
+  let normalizedScheduledFilterUrl = '';
+  if (rawScheduledFilterUrl) {
+    try {
+      const parsed = new URL(rawScheduledFilterUrl);
+      if (
+        parsed.protocol !== 'https:' ||
+        parsed.username ||
+        parsed.password ||
+        !(parsed.hostname === 'hh.ru' || parsed.hostname.endsWith('.hh.ru')) ||
+        parsed.pathname !== '/search/vacancy' ||
+        !parsed.search
+      ) throw new Error('invalid_scheduled_filter_url');
+      normalizedScheduledFilterUrl = parsed.href;
+    } catch {
+      fields.scheduledAutoApplyFilterUrl.setCustomValidity('Укажите ссылку поиска HH вида https://hh.ru/search/vacancy?...');
+      fields.scheduledAutoApplyFilterUrl.reportValidity();
+      throw new Error('Укажите корректную ссылку поиска вакансий HH.');
+    }
+  }
+  if (fields.scheduledAutoApplyEnabled.checked && !normalizedScheduledFilterUrl) {
+    fields.scheduledAutoApplyFilterUrl.setCustomValidity('Для ежедневного запуска укажите ссылку поиска HH.');
+    fields.scheduledAutoApplyFilterUrl.reportValidity();
+    throw new Error('Для ежедневного запуска укажите ссылку поиска HH.');
+  }
+  fields.scheduledAutoApplyFilterUrl.setCustomValidity('');
 
   for (const [field, label] of [
     [fields.fallbackCoverLetterTemplate, 'шаблон сопроводительного письма без ИИ'],
@@ -465,6 +504,17 @@ async function saveOptions() {
     dailyLimit: Math.max(1, Math.min(Number(fields.dailyLimit.value) || DEFAULTS.dailyLimit, 200)),
     delayMinMs: Math.max(500, Number(fields.delayMinMs.value) || DEFAULTS.delayMinMs),
     delayMaxMs: Math.max(500, Number(fields.delayMaxMs.value) || DEFAULTS.delayMaxMs),
+    scheduledAutoApplyEnabled: fields.scheduledAutoApplyEnabled.checked,
+    scheduledAutoApplyTimeMsk: fields.scheduledAutoApplyTimeMsk.value || DEFAULTS.scheduledAutoApplyTimeMsk,
+    scheduledAutoApplyLateWindowMinutes: Math.max(0, Math.min(
+      Number.isFinite(Number(fields.scheduledAutoApplyLateWindowMinutes.value))
+        ? Number(fields.scheduledAutoApplyLateWindowMinutes.value)
+        : DEFAULTS.scheduledAutoApplyLateWindowMinutes,
+      720
+    )),
+    scheduledAutoApplyFilterUrl: normalizedScheduledFilterUrl,
+    scheduledAutoApplyMaxRepairAttempts: Math.max(1, Math.min(Number(fields.scheduledAutoApplyMaxRepairAttempts.value) || DEFAULTS.scheduledAutoApplyMaxRepairAttempts, 10)),
+    scheduledAutoApplyRepairCutoffMsk: fields.scheduledAutoApplyRepairCutoffMsk.value || DEFAULTS.scheduledAutoApplyRepairCutoffMsk,
     agentDebugLogsEnabled: fields.agentDebugLogsEnabled.checked,
     agentDebugRetentionCount: normalizeDebugRetention(fields.agentDebugRetentionCount.value)
   };

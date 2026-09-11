@@ -41,6 +41,12 @@
     dailyLimit: 200,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    scheduledAutoApplyEnabled: false,
+    scheduledAutoApplyTimeMsk: '10:40',
+    scheduledAutoApplyLateWindowMinutes: 120,
+    scheduledAutoApplyFilterUrl: '',
+    scheduledAutoApplyMaxRepairAttempts: 3,
+    scheduledAutoApplyRepairCutoffMsk: '18:00',
     agentDebugLogsEnabled: true,
     agentDebugRetentionCount: 20,
     runState: {
@@ -57,6 +63,7 @@
     },
     autoApplyStopRequested: false,
     autoApplyStopRequestedAt: '',
+    autoApplyStopReason: '',
     autoApplyStopBeforeSubmit: null,
     runResults: []
   };

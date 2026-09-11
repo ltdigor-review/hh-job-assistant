@@ -147,6 +147,9 @@ function buildFileReport(args, text) {
       hasLocalDebugText: false,
       dailyLedger: null,
       settingsAudit: null,
+      scheduledConfiguration: null,
+      scheduledSession: null,
+      runtimeSafety: null,
       privateQuestionAudit: null,
       evidence: {
         complete: terminalComplete && warnings.length === 0,
@@ -197,6 +200,18 @@ async function readExactStorageSnapshot(storageDir) {
       'runState',
       'dailyApplicationLedger',
       'automationSettingsAudit',
+      'scheduledAutoApplyEnabled',
+      'scheduledAutoApplyTimeMsk',
+      'scheduledAutoApplyLateWindowMinutes',
+      'scheduledAutoApplyFilterUrl',
+      'scheduledAutoApplyMaxRepairAttempts',
+      'scheduledAutoApplyRepairCutoffMsk',
+      'scheduledAutoApplySession',
+      'autoApplyRunLease',
+      'autoApplyPendingSubmit',
+      'autoApplyResponseAttempts',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
       'agentPrivateQuestionAudit',
       'agentDebugRunIndex',
       'agentDebugActiveRunId'
@@ -271,6 +286,92 @@ function summarizePrivateAudit(rawAudit, coverage) {
   };
 }
 
+function summarizeScheduledConfiguration(values) {
+  let filterConfigured = false;
+  try {
+    const filterUrl = new URL(String(values.scheduledAutoApplyFilterUrl.value || ''));
+    filterConfigured = Boolean(
+      filterUrl.protocol === 'https:' &&
+      !filterUrl.username &&
+      !filterUrl.password &&
+      (filterUrl.hostname === 'hh.ru' || filterUrl.hostname.endsWith('.hh.ru')) &&
+      filterUrl.pathname === '/search/vacancy' &&
+      filterUrl.search
+    );
+  } catch {
+    filterConfigured = false;
+  }
+  return {
+    enabled: values.scheduledAutoApplyEnabled.value === true,
+    timeMsk: String(values.scheduledAutoApplyTimeMsk.value || ''),
+    lateWindowMinutes: Math.max(0, Number(values.scheduledAutoApplyLateWindowMinutes.value) || 0),
+    filterConfigured,
+    maxRepairAttempts: Math.max(0, Number(values.scheduledAutoApplyMaxRepairAttempts.value) || 0),
+    repairCutoffMsk: String(values.scheduledAutoApplyRepairCutoffMsk.value || '')
+  };
+}
+
+function summarizeScheduledSession(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const states = new Set(['starting', 'running', 'repair_pending', 'complete', 'blocked', 'error']);
+  const stopReasons = new Set([
+    '',
+    'user_stop',
+    'repair_pending',
+    'daily_limit_reached',
+    'authentication_required',
+    'parallel_run_conflict',
+    'scheduled_start_rejected',
+    'audit_not_ready',
+    'missing_checkpoint',
+    'max_repair_attempts',
+    'repair_cutoff',
+    'date_mismatch',
+    'version_not_advanced',
+    'unresolved_submit',
+    'unresolved_response_attempt',
+    'active_saved_queue',
+    'counter_result_mismatch',
+    'owner_missing'
+  ]);
+  const safeTimestamp = (input) => {
+    const text = String(input || '');
+    return !text || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(text) ? text : '';
+  };
+  const dateMsk = String(value.dateMsk || '');
+  const state = String(value.state || '');
+  const stopReason = String(value.stopReason || '');
+  const reviewOutcome = String(value.reviewOutcome || '');
+  return {
+    dateMsk: /^\d{4}-\d{2}-\d{2}$/.test(dateMsk) ? dateMsk : '',
+    extensionVersion: /^\d+(?:\.\d+){1,3}$/.test(String(value.extensionVersion || ''))
+      ? String(value.extensionVersion)
+      : '',
+    state: states.has(state) ? state : 'error',
+    repairAttempts: Math.max(0, Number(value.repairAttempts) || 0),
+    stopReason: stopReasons.has(stopReason) ? stopReason : (stopReason ? 'other' : ''),
+    reviewRequired: value.reviewRequired === true,
+    reviewOutcome: ['passed', 'blocked'].includes(reviewOutcome) ? reviewOutcome : '',
+    reviewedAt: safeTimestamp(value.reviewedAt),
+    startedAt: safeTimestamp(value.startedAt),
+    finishedAt: safeTimestamp(value.finishedAt)
+  };
+}
+
+function summarizeRuntimeSafety(values) {
+  const attempts = values.autoApplyResponseAttempts.value;
+  const unresolvedResponseAttempts = attempts && typeof attempts === 'object'
+    ? Object.values(attempts).filter((attempt) => attempt && !attempt.finalizedAt && !attempt.cancelledAt).length
+    : 0;
+  return {
+    activeLease: values.autoApplyRunLease.value?.active === true,
+    pendingSubmit: Boolean(values.autoApplyPendingSubmit.value?.item),
+    unresolvedResponseAttempts,
+    activeResponseQueue: values.autoApplyQueue.value?.active === true,
+    activeSearchQueue: values.autoApplySearchQueue.value?.active === true
+  };
+}
+
 function buildStorageReport(args, snapshot) {
   const { values, activeRunId } = snapshot;
   const rawResults = Array.isArray(values.runResults.value) ? values.runResults.value : [];
@@ -289,6 +390,9 @@ function buildStorageReport(args, snapshot) {
   const rawAudit = values.agentPrivateQuestionAudit.value;
   const coverage = auditCoverage(results, rawAudit, activeRunId);
   const privateQuestionAudit = summarizePrivateAudit(rawAudit, coverage);
+  const scheduledConfiguration = summarizeScheduledConfiguration(values);
+  const scheduledSession = summarizeScheduledSession(values.scheduledAutoApplySession.value);
+  const runtimeSafety = summarizeRuntimeSafety(values);
   const expectedResults = Math.max(0, Number(runState?.processed) || 0);
   const droppedDebugEntries = Math.max(0, Number(runRecord?.meta?.droppedEntries) || 0);
   const debugHistoryTruncated = droppedDebugEntries > 0 || runRecord?.meta?.truncated === true;
@@ -308,6 +412,13 @@ function buildStorageReport(args, snapshot) {
   if (coverage.missing > 0 || coverage.orphan > 0) warnings.push('private_audit_coverage_mismatch');
   if (debugHistoryTruncated) warnings.push('debug_history_truncated');
   const terminalComplete = runState?.state === 'complete';
+  if (terminalComplete && (
+    runtimeSafety.activeLease ||
+    runtimeSafety.pendingSubmit ||
+    runtimeSafety.unresolvedResponseAttempts > 0 ||
+    runtimeSafety.activeResponseQueue ||
+    runtimeSafety.activeSearchQueue
+  )) warnings.push('terminal_runtime_provenance_active');
   const fatalWarnings = warnings.filter((warning) => warning !== 'debug_history_truncated');
   const evidence = {
     complete: terminalComplete && fatalWarnings.length === 0,
@@ -338,6 +449,9 @@ function buildStorageReport(args, snapshot) {
       hasLocalDebugText: false,
       dailyLedger: values.dailyApplicationLedger.value || null,
       settingsAudit: sanitize(values.automationSettingsAudit.value || null),
+      scheduledConfiguration,
+      scheduledSession,
+      runtimeSafety,
       privateQuestionAudit,
       evidence,
       applied: applied.map((item) => sanitize(item)),

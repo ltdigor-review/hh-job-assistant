@@ -517,6 +517,33 @@ test('background safe status snapshot is read-only and excludes private automati
         conflicts: 0,
         lastEvent: 'duplicate_start',
         updatedAt: '2026-08-07T10:03:00.000Z'
+      },
+      schedule: {
+        enabled: false,
+        timeMsk: '10:40',
+        lateWindowMinutes: 120,
+        maxRepairAttempts: 3,
+        repairCutoffMsk: '18:00',
+        filterConfigured: false,
+        nextAlarmAt: '',
+        reviewGateBlocked: false
+      },
+      scheduledSession: {
+        present: false,
+        sessionId: '',
+        dateMsk: '',
+        state: 'none',
+        extensionVersion: '',
+        startedAt: '',
+        updatedAt: '',
+        finishedAt: '',
+        repairAttempts: 0,
+        stopReason: '',
+        reviewRequired: false,
+        reviewPending: false,
+        reviewOutcome: '',
+        reviewIssueCount: 0,
+        reviewedAt: ''
       }
     }
   });
@@ -675,6 +702,12 @@ test('background migrates old default employer question prompt', async () => {
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    scheduledAutoApplyEnabled: false,
+    scheduledAutoApplyTimeMsk: '10:40',
+    scheduledAutoApplyLateWindowMinutes: 120,
+    scheduledAutoApplyFilterUrl: '',
+    scheduledAutoApplyMaxRepairAttempts: 3,
+    scheduledAutoApplyRepairCutoffMsk: '18:00',
     coverPrompt: oldCoverPrompt,
     employerQuestionPrompt: oldEmployerQuestionPrompt,
     agentDebugLogsEnabled: true
@@ -3949,6 +3982,12 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    scheduledAutoApplyEnabled: true,
+    scheduledAutoApplyTimeMsk: '11:25',
+    scheduledAutoApplyLateWindowMinutes: 35,
+    scheduledAutoApplyFilterUrl: 'https://hh.ru/search/vacancy?text=loaded&excluded_text=QA%2CAQA&experience=moreThan6',
+    scheduledAutoApplyMaxRepairAttempts: 2,
+    scheduledAutoApplyRepairCutoffMsk: '17:45',
     agentDebugLogsEnabled: false,
     agentDebugRetentionCount: 5
   };
@@ -3995,12 +4034,13 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     return element;
   }
 
-  const ids = ['aiEnabled', 'aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiFallbackSection', 'fallbackCoverLetterTemplate', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
+  const ids = ['aiEnabled', 'aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiFallbackSection', 'fallbackCoverLetterTemplate', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'scheduledAutoApplyEnabled', 'scheduledAutoApplyTimeMsk', 'scheduledAutoApplyLateWindowMinutes', 'scheduledAutoApplyFilterUrl', 'scheduledAutoApplyMaxRepairAttempts', 'scheduledAutoApplyRepairCutoffMsk', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
   let delayedProviderTestResolver = null;
   let delayNextProviderTest = false;
   let debugRuns = [];
+  let storageSetCalls = 0;
   const downloadedRunIds = [];
   const createdLinks = [];
 
@@ -4031,6 +4071,12 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     dailyLimit: 100,
     delayMinMs: 4000,
     delayMaxMs: 8000,
+    scheduledAutoApplyEnabled: false,
+    scheduledAutoApplyTimeMsk: '10:40',
+    scheduledAutoApplyLateWindowMinutes: 120,
+    scheduledAutoApplyFilterUrl: '',
+    scheduledAutoApplyMaxRepairAttempts: 3,
+    scheduledAutoApplyRepairCutoffMsk: '18:00',
     agentDebugLogsEnabled: false,
     agentDebugRetentionCount: 5,
     runState: {},
@@ -4083,6 +4129,7 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
           return {};
         },
         async set(value) {
+          storageSetCalls += 1;
           Object.assign(storage, value);
         },
         async remove(keys) {
@@ -4130,6 +4177,47 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     assert.doesNotMatch(elements.configuredProviders.textContent, /sk_qwen_saved|gsk_saved/);
     assert.deepEqual(elements.aiFallbackProvider.children.map((option) => option.value), ['', 'groq']);
     assert.equal(elements.aiFallbackSection.hidden, false);
+    assert.equal(elements.scheduledAutoApplyEnabled.checked, true);
+    assert.equal(elements.scheduledAutoApplyTimeMsk.value, '11:25');
+    assert.equal(elements.scheduledAutoApplyLateWindowMinutes.value, 35);
+    assert.equal(
+      elements.scheduledAutoApplyFilterUrl.value,
+      'https://hh.ru/search/vacancy?text=loaded&excluded_text=QA%2CAQA&experience=moreThan6'
+    );
+    assert.equal(elements.scheduledAutoApplyMaxRepairAttempts.value, 2);
+    assert.equal(elements.scheduledAutoApplyRepairCutoffMsk.value, '17:45');
+
+    const writesBeforeInvalidSchedule = storageSetCalls;
+    elements.scheduledAutoApplyEnabled.checked = true;
+    elements.scheduledAutoApplyFilterUrl.value = '';
+    handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storageSetCalls, writesBeforeInvalidSchedule);
+    assert.equal(elements.scheduledAutoApplyFilterUrl.reported, true);
+    assert.match(elements.scheduledAutoApplyFilterUrl.validationMessage, /укажите ссылку поиска HH/i);
+
+    elements.scheduledAutoApplyFilterUrl.reported = false;
+    elements.scheduledAutoApplyFilterUrl.value = 'https://evil.example/search/vacancy?text=java';
+    handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storageSetCalls, writesBeforeInvalidSchedule);
+    assert.equal(elements.scheduledAutoApplyFilterUrl.reported, true);
+    assert.match(elements.scheduledAutoApplyFilterUrl.validationMessage, /укажите ссылку поиска HH/i);
+
+    const opaqueScheduledFilter = 'https://hh.ru/search/vacancy?text=opaque&excluded_text=QA%2CAQA&experience=between3And6&experience=moreThan6';
+    elements.scheduledAutoApplyFilterUrl.value = opaqueScheduledFilter;
+    elements.scheduledAutoApplyTimeMsk.value = '10:40';
+    elements.scheduledAutoApplyLateWindowMinutes.value = '0';
+    elements.scheduledAutoApplyMaxRepairAttempts.value = '3';
+    elements.scheduledAutoApplyRepairCutoffMsk.value = '18:00';
+    handlers.get('save:click')();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(storage.scheduledAutoApplyEnabled, true);
+    assert.equal(storage.scheduledAutoApplyFilterUrl, opaqueScheduledFilter);
+    assert.equal(storage.scheduledAutoApplyTimeMsk, '10:40');
+    assert.equal(storage.scheduledAutoApplyLateWindowMinutes, 0);
+    assert.equal(storage.scheduledAutoApplyMaxRepairAttempts, 3);
+    assert.equal(storage.scheduledAutoApplyRepairCutoffMsk, '18:00');
 
     elements.credentialProvider.value = 'groq';
     handlers.get('credentialProvider:change')();
@@ -4156,6 +4244,7 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     elements.resumeCacheTtlHours.value = '999';
     elements.delayMinMs.value = '900';
     elements.delayMaxMs.value = '600';
+    elements.scheduledAutoApplyLateWindowMinutes.value = '0';
     elements.agentDebugRetentionCount.value = '99';
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -4163,6 +4252,7 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     assert.equal(storage.resumeCacheTtlHours, 168);
     assert.equal(storage.delayMinMs, 900);
     assert.equal(storage.delayMaxMs, 900);
+    assert.equal(storage.scheduledAutoApplyLateWindowMinutes, 0);
     assert.equal(storage.agentDebugRetentionCount, 20);
 
     elements.employmentPreference.inputs[1].checked = true;
@@ -4440,4 +4530,1018 @@ test('options expose registry-driven credentials and fallback provider controls'
   assert.match(providers, /getRequestChainTimeoutMs/);
   assert.match(content, /Object\.keys\(globalThis\.HHJA_AI_PROVIDERS\?\.PROVIDERS \|\| \{\}\)/);
   assert.match(content, /getRequestChainTimeoutMs\?\.\(/);
+});
+
+test('daily scheduled auto apply exposes fail-closed defaults and Settings controls', async () => {
+  const defaults = await readFile(new URL('src/defaults.js', root), 'utf8');
+  const background = await readFile(new URL('src/background.js', root), 'utf8');
+  const html = await readFile(new URL('src/options.html', root), 'utf8');
+  const options = await readFile(new URL('src/options.js', root), 'utf8');
+
+  assert.match(defaults, /scheduledAutoApplyEnabled:\s*false/);
+  assert.match(defaults, /scheduledAutoApplyTimeMsk:\s*'10:40'/);
+  assert.match(defaults, /scheduledAutoApplyLateWindowMinutes:\s*120/);
+  assert.match(defaults, /scheduledAutoApplyFilterUrl:\s*''/);
+  assert.match(defaults, /scheduledAutoApplyMaxRepairAttempts:\s*3/);
+  assert.match(defaults, /scheduledAutoApplyRepairCutoffMsk:\s*'18:00'/);
+  assert.match(background, /hh-job-assistant-daily-auto-apply/);
+  assert.match(background, /START_SCHEDULED_AUTO_APPLY/);
+  assert.match(background, /ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW/);
+  assert.match(background, /Europe\/Moscow/);
+  assert.match(html, /id="scheduledAutoApplyEnabled"/);
+  assert.match(html, /id="scheduledAutoApplyTimeMsk" type="time"/);
+  assert.match(html, /id="scheduledAutoApplyFilterUrl" type="url"/);
+  assert.match(html, /id="scheduledAutoApplyRepairCutoffMsk" type="time"/);
+  assert.match(options, /scheduledAutoApplyEnabled:\s*fields\.scheduledAutoApplyEnabled\.checked/);
+  assert.match(options, /scheduledAutoApplyFilterUrl:\s*normalizedScheduledFilterUrl/);
+});
+
+test('scheduled time helpers honor Moscow catch-up and repair boundaries without inspecting filter text', async () => {
+  let installedListener = null;
+  let startupListener = null;
+  let alarmListener = null;
+  const localData = {};
+  vm.runInThisContext(await readFile(new URL('src/defaults.js', root), 'utf8'));
+  vm.runInThisContext(await readFile(new URL('src/ai-providers.js', root), 'utf8'));
+  globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__ = true;
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          return { ...localData };
+        },
+        async set(value) { Object.assign(localData, value); },
+        async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete localData[key]; }
+      },
+      onChanged: { addListener() {} }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      getManifest() { return { version: '1.2.3' }; },
+      onInstalled: { addListener(fn) { installedListener = fn; } },
+      onStartup: { addListener(fn) { startupListener = fn; } },
+      onMessage: { addListener() {} }
+    },
+    alarms: {
+      async clear() {},
+      create() {},
+      async get() { return null; },
+      onAlarm: { addListener(fn) { alarmListener = fn; } }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: { async get() { return { status: 'complete' }; } },
+    scripting: {}
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?scheduler-helpers=${crypto.randomUUID()}`);
+  const api = globalThis.HHJA_SCHEDULE_TEST_API;
+  assert.equal(typeof api?.getScheduleDecision, 'function');
+  assert.equal(typeof api?.normalizeScheduledFilterUrl, 'function');
+  assert.ok(installedListener);
+  assert.ok(startupListener);
+  assert.ok(alarmListener);
+
+  const settings = {
+    timeMsk: '10:40',
+    lateWindowMinutes: 120,
+    repairCutoffMsk: '18:00'
+  };
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T07:39:59.000Z'), settings).catchUp, false);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T07:40:00.000Z'), settings).catchUp, true);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T09:40:00.000Z'), settings).catchUp, true);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T09:40:00.001Z'), settings).catchUp, false);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T07:40:00.001Z'), { ...settings, lateWindowMinutes: 0 }).catchUp, false);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T14:59:59.999Z'), settings).beforeRepairCutoff, true);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T15:00:00.000Z'), settings).beforeRepairCutoff, true);
+  assert.equal(api.getScheduleDecision(Date.parse('2026-08-16T15:01:00.000Z'), settings).beforeRepairCutoff, false);
+  const opaque = 'https://hh.ru/search/vacancy?text=anything&excluded_text=opaque%2Cvalue&experience=moreThan6';
+  assert.equal(api.normalizeScheduledFilterUrl(opaque), opaque);
+  assert.equal(api.normalizeScheduledFilterUrl('https://hh.ru/search/vacancy'), '');
+  assert.equal(api.normalizeScheduledFilterUrl('https://user:pass@hh.ru/search/vacancy?text=java'), '');
+  assert.equal(api.normalizeScheduledFilterUrl('https://evil.example/search/vacancy?text=java'), '');
+  delete globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__;
+});
+
+async function createScheduledBackgroundHarness({
+  now = '2026-08-16T08:00:00.000Z',
+  version = '1.2.3',
+  authenticated = true,
+  unsafe = false,
+  existingTab = true,
+  startBehavior = 'success',
+  continueBehavior = 'success',
+  localData: overrides = {}
+} = {}) {
+  const filterUrl = 'https://hh.ru/search/vacancy?text=opaque&excluded_text=QA%2CAQA&experience=moreThan6';
+  const localData = {
+    scheduledAutoApplyEnabled: true,
+    scheduledAutoApplyTimeMsk: '10:40',
+    scheduledAutoApplyLateWindowMinutes: 120,
+    scheduledAutoApplyFilterUrl: filterUrl,
+    scheduledAutoApplyMaxRepairAttempts: 3,
+    scheduledAutoApplyRepairCutoffMsk: '18:00',
+    automationSettingsAudit: {
+      ready: true,
+      checkedAt: '2026-08-16T07:30:00.000Z',
+      issues: []
+    },
+    dailyApplicationLedger: {
+      date: '2026-08-16',
+      legacySubmitted: 0,
+      newSubmitted: 0,
+      alreadyApplied: 0,
+      submittedVacancyIds: [],
+      alreadyAppliedVacancyIds: [],
+      hhDailyLimitReached: false,
+      updatedAt: '2026-08-16T07:30:00.000Z'
+    },
+    ...structuredClone(overrides)
+  };
+  const tabs = new Map();
+  if (existingTab) tabs.set(71, { id: 71, url: filterUrl, status: 'complete', active: false });
+  const starts = [];
+  const repairPauses = [];
+  const createdTabs = [];
+  const removedTabs = [];
+  const reloadedTabs = [];
+  const alarms = new Map();
+  let runtimeListener = null;
+  let alarmListener = null;
+  let nextTabId = 90;
+  let manifestVersion = version;
+
+  vm.runInThisContext(await readFile(new URL('src/defaults.js', root), 'utf8'));
+  vm.runInThisContext(await readFile(new URL('src/ai-providers.js', root), 'utf8'));
+  globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__ = true;
+  globalThis.__HH_JOB_ASSISTANT_TEST_NOW_MS__ = Date.parse(now);
+
+  const invokeRuntime = (message, sender = {}) => new Promise((resolve) => {
+    assert.ok(runtimeListener, 'background runtime listener should be installed');
+    assert.equal(runtimeListener(message, sender, resolve), true);
+  });
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, localData[key]]));
+          return { ...localData };
+        },
+        async set(value) { Object.assign(localData, structuredClone(value)); },
+        async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete localData[key]; }
+      },
+      onChanged: { addListener() {} }
+    },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      getManifest() { return { version: manifestVersion }; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { runtimeListener = fn; } },
+      reload() {}
+    },
+    alarms: {
+      async clear(name) { return alarms.delete(name); },
+      create(name, info) { alarms.set(name, { name, scheduledTime: info.when }); },
+      async get(name) { return alarms.get(name) || null; },
+      onAlarm: { addListener(fn) { alarmListener = fn; } }
+    },
+    commands: { onCommand: { addListener() {} } },
+    tabs: {
+      async query() { return [...tabs.values()]; },
+      async get(tabId) {
+        const tab = tabs.get(tabId);
+        if (!tab) throw new Error('No tab');
+        return tab;
+      },
+      async create(createProperties) {
+        const tab = { id: nextTabId++, url: createProperties.url, status: 'complete', active: false };
+        tabs.set(tab.id, tab);
+        createdTabs.push(structuredClone(tab));
+        return tab;
+      },
+      async update(tabId, patch) {
+        const tab = { ...(tabs.get(tabId) || { id: tabId }), ...patch, status: 'complete' };
+        tabs.set(tabId, tab);
+        return tab;
+      },
+      async remove(tabId) {
+        removedTabs.push(tabId);
+        tabs.delete(tabId);
+      },
+      async reload(tabId) {
+        reloadedTabs.push(tabId);
+      },
+      async sendMessage(tabId, message) {
+        const tab = tabs.get(tabId);
+        if (!tab) throw new Error('No tab');
+        if (message.type === 'GET_CONTENT_STATUS') {
+          return { ok: true, authenticated, unsafe, url: tab.url };
+        }
+        if (message.type === 'START_SCHEDULED_AUTO_APPLY') {
+          starts.push(structuredClone(message));
+          if (startBehavior === 'throw') throw new Error('start_unreachable');
+          if (startBehavior === 'reject') return { ok: false, error: 'start_rejected' };
+          const runId = `scheduled-run-${starts.length}`;
+          const claim = await invokeRuntime({
+            type: 'CLAIM_AUTO_APPLY_RUN',
+            runId,
+            entrySource: 'scheduled',
+            scheduledSessionId: message.sessionId,
+            scheduledDateMsk: message.dateMsk
+          }, { tab });
+          return claim?.claimed
+            ? { ok: true, activeRunId: runId, ownerId: tabId }
+            : { ok: false, error: claim?.reason || 'claim_failed' };
+        }
+        if (message.type === 'PAUSE_SCHEDULED_AUTO_APPLY_FOR_REPAIR') {
+          repairPauses.push({ tabId, message: structuredClone(message) });
+          return { ok: true, checkpointed: true };
+        }
+        if (message.type === 'CONTINUE_SCHEDULED_AUTO_APPLY') {
+          if (continueBehavior === 'throw') throw new Error('continue_unreachable');
+          if (continueBehavior === 'reject_without_checkpoint') {
+            localData.autoApplySearchQueue = {
+              ...(localData.autoApplySearchQueue || {}),
+              active: false
+            };
+            return { ok: false, continued: false };
+          }
+          if (continueBehavior === 'reject') return { ok: false, continued: false };
+          return { ok: true, continued: true };
+        }
+        return { ok: true };
+      },
+      onUpdated: { addListener() {}, removeListener() {} },
+      onRemoved: { addListener() {} }
+    },
+    scripting: {
+      async executeScript() { return [{ result: 'complete' }]; }
+    }
+  };
+
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?scheduler-runtime=${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  return {
+    api: globalThis.HHJA_SCHEDULE_TEST_API,
+    localData,
+    starts,
+    repairPauses,
+    tabs,
+    createdTabs,
+    removedTabs,
+    reloadedTabs,
+    alarms,
+    alarmListener,
+    invokeRuntime,
+    filterUrl,
+    setVersion(value) { manifestVersion = value; },
+    setNow(value) { globalThis.__HH_JOB_ASSISTANT_TEST_NOW_MS__ = Date.parse(value); },
+    cleanup() {
+      delete globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__;
+      delete globalThis.__HH_JOB_ASSISTANT_TEST_NOW_MS__;
+      delete globalThis.HHJA_SCHEDULE_TEST_API;
+    }
+  };
+}
+
+test('scheduled alarm starts once inside the Moscow window and misses safely after 12:40', async () => {
+  const within = await createScheduledBackgroundHarness({ now: '2026-08-16T09:40:00.000Z' });
+  try {
+    assert.equal((await within.api.runScheduledAutoApply()).ok, true);
+    assert.equal(within.starts.length, 1);
+    assert.equal(within.localData.scheduledAutoApplySession.state, 'running');
+    assert.equal(within.localData.scheduledAutoApplySession.reviewRequired, true);
+    const runningSnapshot = await within.invokeRuntime(
+      { type: 'GET_SAFE_STATUS_SNAPSHOT' },
+      { tab: within.tabs.get(71) }
+    );
+    assert.equal(runningSnapshot.snapshot.scheduledSession.reviewPending, false);
+    assert.equal((await within.api.runScheduledAutoApply()).reason, 'already_attempted_today');
+    assert.equal(within.starts.length, 1);
+  } finally {
+    within.cleanup();
+  }
+
+  const late = await createScheduledBackgroundHarness({ now: '2026-08-16T09:40:00.001Z' });
+  try {
+    assert.equal((await late.api.runScheduledAutoApply()).reason, 'missed_start_window');
+    assert.equal(late.starts.length, 0);
+    assert.equal(late.localData.scheduledAutoApplySession, undefined);
+    const startupSchedule = await late.api.recreateScheduledAutoApplyAlarm({
+      catchUp: true,
+      reason: 'startup'
+    });
+    assert.equal(startupSchedule.missed, true);
+    assert.ok(startupSchedule.when > Date.parse('2026-08-17T07:39:59.000Z'));
+  } finally {
+    late.cleanup();
+  }
+
+  const parallel = await createScheduledBackgroundHarness({ now: '2026-08-16T08:00:00.000Z' });
+  try {
+    const results = await Promise.all([
+      parallel.api.runScheduledAutoApply(),
+      parallel.api.runScheduledAutoApply()
+    ]);
+    assert.equal(results.filter((result) => result.ok === true).length, 1);
+    assert.equal(results.filter((result) => result.reason === 'already_attempted_today').length, 1);
+    assert.equal(parallel.starts.length, 1);
+  } finally {
+    parallel.cleanup();
+  }
+});
+
+test('scheduled terminal state and owned lease release stay coupled to SET_RUN_STATE', async () => {
+  const harness = await createScheduledBackgroundHarness({ now: '2026-08-16T08:00:00.000Z' });
+  try {
+    assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+    const session = harness.localData.scheduledAutoApplySession;
+    harness.localData.runResults = [{ vacancyId: '1', status: 'applied' }];
+    harness.localData.autoApplyResponseAttempts = {
+      foreign: {
+        runId: session.runId,
+        ownerId: 999,
+        startedAt: '2026-08-16T07:59:00.000Z'
+      }
+    };
+    const response = await harness.invokeRuntime({
+      type: 'SET_RUN_STATE',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      patch: { state: 'complete', processed: 1, applied: 1 }
+    }, { tab: harness.tabs.get(session.ownerId) });
+    assert.equal(response.ok, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'complete');
+    assert.equal(harness.localData.scheduledAutoApplySession.reviewRequired, true);
+    assert.ok(harness.localData.scheduledAutoApplySession.finishedAt);
+    assert.equal(harness.localData.autoApplyRunLease.active, false);
+    assert.equal(harness.localData.autoApplyRunLease.releasedState, 'complete');
+    assert.equal(harness.localData.autoApplyResponseAttempts.foreign.cancelledAt, undefined);
+  } finally {
+    harness.cleanup();
+  }
+
+  const idle = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await idle.api.runScheduledAutoApply()).ok, true);
+    const session = idle.localData.scheduledAutoApplySession;
+    const response = await idle.invokeRuntime({
+      type: 'SET_RUN_STATE',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      patch: { state: 'idle', processed: 0 }
+    }, { tab: idle.tabs.get(session.ownerId) });
+    assert.equal(response.ok, true);
+    assert.equal(idle.localData.scheduledAutoApplySession.state, 'blocked');
+    assert.equal(idle.localData.scheduledAutoApplySession.stopReason, 'idle');
+    assert.equal(idle.localData.scheduledAutoApplySession.reviewRequired, true);
+    assert.equal(idle.localData.autoApplyRunLease.active, false);
+  } finally {
+    idle.cleanup();
+  }
+});
+
+test('scheduled terminal transition preserves live provenance and blocks counter divergence', async () => {
+  for (const kind of ['pending_submit', 'response_attempt', 'active_queue']) {
+    const harness = await createScheduledBackgroundHarness();
+    try {
+      assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+      const session = harness.localData.scheduledAutoApplySession;
+      harness.localData.runResults = [{ vacancyId: '1', status: 'applied' }];
+      harness.localData.runState = {
+        state: 'applying',
+        runId: session.runId,
+        ownerId: session.ownerId,
+        processed: 1,
+        applied: 1
+      };
+      if (kind === 'pending_submit') {
+        harness.localData.autoApplyPendingSubmit = {
+          item: { vacancyId: 'pending' },
+          runId: session.runId,
+          ownerId: session.ownerId
+        };
+      } else if (kind === 'response_attempt') {
+        harness.localData.autoApplyResponseAttempts = {
+          pending: {
+            runId: session.runId,
+            ownerId: session.ownerId,
+            startedAt: '2026-08-16T07:59:59.000Z'
+          }
+        };
+      } else {
+        harness.localData.autoApplySearchQueue = {
+          active: true,
+          runId: session.runId,
+          ownerId: session.ownerId,
+          scheduledSessionId: session.sessionId,
+          scheduledDateMsk: session.dateMsk
+        };
+      }
+      const response = await harness.invokeRuntime({
+        type: 'SET_RUN_STATE',
+        runId: session.runId,
+        ownerId: session.ownerId,
+        patch: { state: 'complete', processed: 1, applied: 1 }
+      }, { tab: harness.tabs.get(session.ownerId) });
+      assert.equal(response.ok, true, kind);
+      assert.equal(response.terminalDeferred, true, kind);
+      assert.equal(harness.localData.scheduledAutoApplySession.state, 'repair_pending', kind);
+      assert.equal(harness.localData.autoApplyRunLease.active, true, kind);
+      assert.equal(harness.localData.autoApplyRunLease.scheduledRepairPending, true, kind);
+      assert.equal(harness.localData.runState.state, 'paused', kind);
+      if (kind === 'pending_submit') assert.ok(harness.localData.autoApplyPendingSubmit.item);
+      if (kind === 'response_attempt') assert.ok(harness.localData.autoApplyResponseAttempts.pending);
+      if (kind === 'active_queue') assert.equal(harness.localData.autoApplySearchQueue.active, true);
+    } finally {
+      harness.cleanup();
+    }
+  }
+
+  const mismatch = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await mismatch.api.runScheduledAutoApply()).ok, true);
+    const session = mismatch.localData.scheduledAutoApplySession;
+    mismatch.localData.runResults = [{ vacancyId: '1', status: 'applied' }];
+    mismatch.localData.runState = {
+      state: 'applying',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      processed: 2,
+      applied: 1
+    };
+    const response = await mismatch.invokeRuntime({
+      type: 'SET_RUN_STATE',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      patch: { state: 'complete', processed: 2, applied: 1 }
+    }, { tab: mismatch.tabs.get(session.ownerId) });
+    assert.equal(response.terminalDeferred, true);
+    assert.equal(response.reason, 'counter_result_mismatch');
+    assert.equal(mismatch.localData.scheduledAutoApplySession.state, 'blocked');
+    assert.equal(mismatch.localData.autoApplyRunLease.active, false);
+    assert.equal(mismatch.localData.runState.processed, 1);
+  } finally {
+    mismatch.cleanup();
+  }
+});
+
+test('authenticated safe status can request repair pause on the owned scheduled tab', async () => {
+  const harness = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+    const sender = { tab: harness.tabs.get(71) };
+    const denied = await harness.invokeRuntime({
+      type: 'REQUEST_SCHEDULED_REPAIR_PAUSE',
+      authenticated: false
+    }, sender);
+    assert.equal(denied.reason, 'authenticated_safe_status_required');
+    assert.equal(harness.repairPauses.length, 0);
+    const requested = await harness.invokeRuntime({
+      type: 'REQUEST_SCHEDULED_REPAIR_PAUSE',
+      authenticated: true
+    }, sender);
+    assert.equal(requested.ok, true);
+    assert.equal(requested.checkpointed, true);
+    assert.deepEqual(harness.repairPauses, [{
+      tabId: 71,
+      message: { type: 'PAUSE_SCHEDULED_AUTO_APPLY_FOR_REPAIR' }
+    }]);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('scheduled start creates a hidden exact-filter tab and fails closed on every preflight blocker', async () => {
+  const created = await createScheduledBackgroundHarness({ existingTab: false });
+  try {
+    assert.equal((await created.api.runScheduledAutoApply()).ok, true);
+    assert.equal(created.createdTabs.length, 1);
+    assert.equal(created.createdTabs[0].url, created.filterUrl);
+    assert.equal(created.createdTabs[0].active, false);
+  } finally {
+    created.cleanup();
+  }
+
+  const failedCreated = await createScheduledBackgroundHarness({ existingTab: false, startBehavior: 'throw' });
+  try {
+    assert.equal((await failedCreated.api.runScheduledAutoApply()).ok, false);
+    assert.deepEqual(failedCreated.removedTabs, [90]);
+    assert.equal(failedCreated.localData.scheduledAutoApplySession.state, 'error');
+    assert.equal(failedCreated.localData.scheduledAutoApplySession.reviewRequired, true);
+    const snapshot = await failedCreated.invokeRuntime(
+      { type: 'GET_SAFE_STATUS_SNAPSHOT' },
+      { tab: { id: 999, url: failedCreated.filterUrl } }
+    );
+    assert.equal(snapshot.snapshot.scheduledSession.reviewPending, true);
+    failedCreated.setNow('2026-08-17T08:00:00.000Z');
+    assert.equal((await failedCreated.api.runScheduledAutoApply()).reason, 'previous_review_required');
+    const acknowledgement = await failedCreated.api.acknowledgeScheduledSessionReview({
+      sessionId: failedCreated.localData.scheduledAutoApplySession.sessionId,
+      outcome: 'passed',
+      issues: [],
+      authenticated: true
+    }, { tab: { id: 999, url: failedCreated.filterUrl } });
+    assert.equal(acknowledgement.acknowledged, true);
+    assert.ok(failedCreated.localData.scheduledAutoApplySession.reviewedAt);
+  } finally {
+    failedCreated.cleanup();
+  }
+
+  const nonExact = await createScheduledBackgroundHarness();
+  try {
+    const originalUrl = 'https://hh.ru/search/vacancy?text=another-filter';
+    nonExact.tabs.get(71).url = originalUrl;
+    assert.equal((await nonExact.api.runScheduledAutoApply()).ok, true);
+    assert.equal(nonExact.tabs.get(71).url, originalUrl);
+    assert.equal(nonExact.createdTabs.length, 1);
+    assert.equal(nonExact.createdTabs[0].url, nonExact.filterUrl);
+    assert.equal(nonExact.createdTabs[0].active, false);
+  } finally {
+    nonExact.cleanup();
+  }
+
+  const failedReused = await createScheduledBackgroundHarness({ startBehavior: 'throw' });
+  try {
+    const originalUrl = 'https://hh.ru/search/vacancy?text=another-filter';
+    failedReused.tabs.get(71).url = originalUrl;
+    assert.equal((await failedReused.api.runScheduledAutoApply()).ok, false);
+    assert.equal(failedReused.tabs.get(71).url, originalUrl);
+    assert.deepEqual(failedReused.removedTabs, [90]);
+  } finally {
+    failedReused.cleanup();
+  }
+
+  const failedRejected = await createScheduledBackgroundHarness({ startBehavior: 'reject' });
+  try {
+    assert.equal((await failedRejected.api.runScheduledAutoApply()).reason, 'scheduled_start_rejected');
+    assert.equal(failedRejected.localData.scheduledAutoApplySession.state, 'error');
+    assert.equal(failedRejected.localData.scheduledAutoApplySession.reviewRequired, true);
+  } finally {
+    failedRejected.cleanup();
+  }
+
+  const blockerCases = [
+    ['disabled', { scheduledAutoApplyEnabled: false }],
+    ['invalid_filter_url', { scheduledAutoApplyFilterUrl: 'https://evil.example/search/vacancy?text=java' }],
+    ['audit_not_ready', { automationSettingsAudit: { ready: false, checkedAt: '', issues: ['audit_not_ready'] } }],
+    ['daily_limit_reached', { dailyApplicationLedger: { date: '2026-08-16', legacySubmitted: 200, submittedVacancyIds: [], alreadyAppliedVacancyIds: [], hhDailyLimitReached: false } }],
+    ['daily_limit_reached', { dailyApplicationLedger: { date: '2026-08-16', legacySubmitted: 0, submittedVacancyIds: [], alreadyAppliedVacancyIds: [], hhDailyLimitReached: true } }],
+    ['active_run', { autoApplyRunLease: { active: true, runId: 'manual', ownerId: 99 } }],
+    ['active_saved_queue', { autoApplyQueue: { active: true, runId: 'stale-response', ownerId: 99 } }],
+    ['active_saved_queue', { autoApplySearchQueue: { active: true, runId: 'stale-search', ownerId: 99 } }],
+    ['pending_submit', { autoApplyPendingSubmit: { item: { vacancyId: 'secret' } } }],
+    ['unresolved_response_attempt', { autoApplyResponseAttempts: { secret: { startedAt: '2026-08-16T07:59:00.000Z' } } }],
+    ['previous_review_required', {
+      scheduledAutoApplySession: {
+        sessionId: 'scheduled:2026-08-15:old',
+        dateMsk: '2026-08-15',
+        state: 'complete',
+        reviewRequired: true,
+        reviewedAt: ''
+      }
+    }]
+  ];
+  for (const [reason, localData] of blockerCases) {
+    const harness = await createScheduledBackgroundHarness({ localData });
+    try {
+      assert.equal((await harness.api.runScheduledAutoApply()).reason, reason, reason);
+      assert.equal(harness.starts.length, 0, reason);
+    } finally {
+      harness.cleanup();
+    }
+  }
+
+  const unauthenticated = await createScheduledBackgroundHarness({ authenticated: false, existingTab: false });
+  try {
+    assert.equal((await unauthenticated.api.runScheduledAutoApply()).reason, 'authentication_required');
+    assert.equal(unauthenticated.starts.length, 0);
+    assert.deepEqual(unauthenticated.removedTabs, [90]);
+  } finally {
+    unauthenticated.cleanup();
+  }
+  const captcha = await createScheduledBackgroundHarness({ authenticated: true, unsafe: true });
+  try {
+    assert.equal((await captcha.api.runScheduledAutoApply()).reason, 'authentication_required');
+    assert.equal(captcha.starts.length, 0);
+  } finally {
+    captcha.cleanup();
+  }
+});
+
+test('scheduled review acknowledgement is authenticated, terminal-only, idempotent, and unlocks the gate', async () => {
+  const harness = await createScheduledBackgroundHarness({
+    localData: {
+      scheduledAutoApplySession: {
+        sessionId: 'scheduled:2026-08-15:review',
+        dateMsk: '2026-08-15',
+        runId: 'run-old',
+        ownerId: 71,
+        extensionVersion: '1.2.3',
+        state: 'running',
+        reviewRequired: true,
+        reviewOutcome: '',
+        reviewIssues: [],
+        reviewedAt: ''
+      }
+    }
+  });
+  const sender = { tab: harness.tabs.get(71) };
+  try {
+    assert.equal((await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:wrong', outcome: 'passed', issues: [], authenticated: true
+    }, sender)).reason, 'session_mismatch');
+    assert.equal((await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:review', outcome: 'passed', issues: [], authenticated: true
+    }, sender)).reason, 'session_not_terminal');
+    harness.localData.scheduledAutoApplySession.state = 'complete';
+    assert.equal((await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:review', outcome: 'unknown', issues: [], authenticated: true
+    }, sender)).reason, 'invalid_outcome');
+    assert.equal((await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:review', outcome: 'passed', issues: [], authenticated: false
+    }, sender)).reason, 'authenticated_safe_status_required');
+    const first = await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:review', outcome: 'passed', issues: ['counter_check'], authenticated: true
+    }, sender);
+    assert.equal(first.acknowledged, true);
+    assert.equal(first.alreadyAcknowledged, false);
+    const reviewedAt = harness.localData.scheduledAutoApplySession.reviewedAt;
+    const repeat = await harness.api.acknowledgeScheduledSessionReview({
+      sessionId: 'scheduled:2026-08-15:review', outcome: 'blocked', issues: [], authenticated: true
+    }, sender);
+    assert.equal(repeat.alreadyAcknowledged, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.reviewedAt, reviewedAt);
+    harness.localData.scheduledAutoApplySession.filterUrl = 'https://hh.ru/search/vacancy?secret=filter';
+    harness.localData.scheduledAutoApplySession.privateQuestions = [{ answer: 'secret-answer' }];
+    const snapshot = await harness.invokeRuntime({ type: 'GET_SAFE_STATUS_SNAPSHOT' }, sender);
+    const serialized = JSON.stringify(snapshot);
+    assert.doesNotMatch(serialized, /secret=filter|secret-answer|run-old/);
+    assert.equal(snapshot.snapshot.scheduledSession.reviewPending, false);
+    assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('scheduled repair preserves an owned checkpoint and resumes only after every gate passes', async () => {
+  const runningSession = {
+    sessionId: 'scheduled:2026-08-16:repair',
+    dateMsk: '2026-08-16',
+    runId: 'repair-run',
+    ownerId: 71,
+    filterUrl: 'https://hh.ru/search/vacancy?text=opaque',
+    extensionVersion: '1.2.3',
+    state: 'running',
+    repairAttempts: 0,
+    reviewRequired: true,
+    reviewedAt: ''
+  };
+  const queue = {
+    active: true,
+    runId: 'repair-run',
+    ownerId: 71,
+    scheduledSessionId: runningSession.sessionId,
+    scheduledDateMsk: runningSession.dateMsk,
+    counters: { processed: 1, applied: 1 }
+  };
+  const harness = await createScheduledBackgroundHarness({
+    version: '1.2.3',
+    localData: {
+      scheduledAutoApplySession: runningSession,
+      autoApplyRunLease: { active: true, runId: 'repair-run', ownerId: 71 },
+      autoApplySearchQueue: queue,
+      runResults: [{ vacancyId: '1', status: 'applied' }],
+      runState: { state: 'applying', runId: 'repair-run', ownerId: 71, processed: 1, applied: 1 }
+    }
+  });
+  try {
+    const checkpoint = await harness.api.checkpointScheduledRepair({
+      sessionId: runningSession.sessionId,
+      runId: 'repair-run',
+      counters: {
+        found: '5',
+        processed: 999,
+        applied: -1,
+        alreadyApplied: 2.9,
+        skipped: '3',
+        errors: Number.POSITIVE_INFINITY,
+        runId: 'forged-run',
+        ownerId: 999,
+        injected: 'forged'
+      }
+    }, { tab: harness.tabs.get(71) });
+    assert.equal(checkpoint.checkpointed, true);
+    assert.equal(harness.localData.autoApplySearchQueue.active, true);
+    assert.equal(harness.localData.autoApplyRunLease.active, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'repair_pending');
+    assert.equal(harness.localData.autoApplyStopReason, 'repair_pending');
+    assert.equal(harness.localData.runState.runId, 'repair-run');
+    assert.equal(harness.localData.runState.ownerId, 71);
+    assert.equal(harness.localData.runState.found, 5);
+    assert.equal(harness.localData.runState.processed, 1);
+    assert.equal(harness.localData.runState.applied, 0);
+    assert.equal(harness.localData.runState.alreadyApplied, 2);
+    assert.equal(harness.localData.runState.skipped, 3);
+    assert.equal(harness.localData.runState.errors, 0);
+    assert.equal(harness.localData.runState.injected, undefined);
+    harness.setVersion('1.2.4');
+    const resumed = await harness.api.resumeScheduledRepair();
+    assert.equal(resumed.ok, true, resumed.reason);
+    assert.equal(resumed.resumed, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'running');
+    assert.equal(harness.localData.scheduledAutoApplySession.repairAttempts, 1);
+    assert.equal(harness.localData.autoApplyStopRequested, false);
+  } finally {
+    harness.cleanup();
+  }
+
+  const denialCases = [
+    ['version_not_advanced', { version: '1.2.3' }],
+    ['repair_cutoff', { now: '2026-08-16T15:01:00.000Z', version: '1.2.4' }],
+    ['max_repair_attempts', { version: '1.2.4', repairAttempts: 3 }],
+    ['unresolved_submit', { version: '1.2.4', autoApplyPendingSubmit: { item: { vacancyId: 'secret' } } }],
+    ['unresolved_response_attempt', { version: '1.2.4', autoApplyResponseAttempts: { secret: { startedAt: '2026-08-16T08:00:00.000Z' } } }],
+    ['audit_not_ready', { version: '1.2.4', auditNotReady: true }],
+    ['owner_missing', { version: '1.2.4', authenticated: false }],
+    ['missing_checkpoint', { version: '1.2.4', missingQueue: true }]
+    ,['date_mismatch', { version: '1.2.4', dateMsk: '2026-08-15' }]
+    ,['missing_checkpoint', { version: '1.2.4', ownerId: 72 }]
+  ];
+  for (const [reason, variant] of denialCases) {
+    const pendingSession = {
+      ...runningSession,
+      state: 'repair_pending',
+      repairFromVersion: '1.2.3',
+      repairAttempts: variant.repairAttempts || 0,
+      dateMsk: variant.dateMsk || runningSession.dateMsk,
+      ownerId: variant.ownerId || runningSession.ownerId
+    };
+    const denied = await createScheduledBackgroundHarness({
+      now: variant.now || '2026-08-16T08:00:00.000Z',
+      version: variant.version,
+      authenticated: variant.authenticated !== false,
+      localData: {
+        scheduledAutoApplySession: pendingSession,
+        autoApplyRunLease: { active: true, runId: 'repair-run', ownerId: 71 },
+        ...(variant.auditNotReady ? {
+          automationSettingsAudit: { ready: false, checkedAt: '', issues: ['audit_not_ready'] }
+        } : {}),
+        ...(variant.missingQueue ? {} : { autoApplySearchQueue: queue }),
+        ...(variant.autoApplyPendingSubmit ? { autoApplyPendingSubmit: variant.autoApplyPendingSubmit } : {}),
+        ...(variant.autoApplyResponseAttempts ? { autoApplyResponseAttempts: variant.autoApplyResponseAttempts } : {}),
+        runResults: [
+          { vacancyId: '1', status: 'applied' },
+          { vacancyId: '2', status: 'skipped' }
+        ],
+        runState: {
+          state: 'paused',
+          runId: 'repair-run',
+          ownerId: 71,
+          processed: 99,
+          applied: 1
+        }
+      }
+    });
+    try {
+      assert.equal((await denied.api.reserveScheduledRepairResume()).reason, reason, reason);
+      if (
+        ['repair_cutoff', 'max_repair_attempts', 'date_mismatch', 'missing_checkpoint'].includes(reason) &&
+        variant.ownerId !== 72
+      ) {
+        assert.equal(denied.localData.autoApplyRunLease.active, false, `${reason}: lease`);
+        assert.equal(denied.localData.autoApplySearchQueue?.active, false, `${reason}: queue`);
+        assert.equal(denied.localData.runState.processed, 2, `${reason}: processed`);
+        assert.equal(denied.localData.scheduledAutoApplySession.state, 'blocked', `${reason}: session`);
+        assert.equal(denied.localData.autoApplyStopReason, reason, `${reason}: stop reason`);
+      }
+    } finally {
+      denied.cleanup();
+    }
+  }
+});
+
+test('extension-update repair reload happens only after storage and version gates pass', async () => {
+  const baseSession = {
+    sessionId: 'scheduled:2026-08-16:update-repair',
+    dateMsk: '2026-08-16',
+    runId: 'update-repair-run',
+    ownerId: 71,
+    state: 'repair_pending',
+    repairFromVersion: '1.2.3',
+    repairAttempts: 0,
+    reviewRequired: true
+  };
+  const baseQueue = {
+    active: true,
+    runId: baseSession.runId,
+    ownerId: baseSession.ownerId,
+    scheduledSessionId: baseSession.sessionId,
+    scheduledDateMsk: baseSession.dateMsk
+  };
+  const makeHarness = (version, localData = {}) => createScheduledBackgroundHarness({
+    version,
+    localData: {
+      scheduledAutoApplySession: baseSession,
+      autoApplyRunLease: {
+        active: true,
+        runId: baseSession.runId,
+        ownerId: baseSession.ownerId,
+        scheduledRepairPending: true
+      },
+      autoApplySearchQueue: baseQueue,
+      ...localData
+    }
+  });
+
+  const sameVersion = await makeHarness('1.2.3');
+  try {
+    const result = await sameVersion.api.resumeScheduledRepairAfterExtensionUpdate();
+    assert.equal(result.reason, 'version_not_advanced');
+    assert.deepEqual(sameVersion.reloadedTabs, []);
+  } finally {
+    sameVersion.cleanup();
+  }
+
+  const unresolved = await makeHarness('1.2.4', {
+    autoApplyPendingSubmit: {
+      item: { vacancyId: 'pending' },
+      runId: baseSession.runId,
+      ownerId: baseSession.ownerId
+    }
+  });
+  try {
+    const result = await unresolved.api.resumeScheduledRepairAfterExtensionUpdate();
+    assert.equal(result.reason, 'unresolved_submit');
+    assert.deepEqual(unresolved.reloadedTabs, []);
+    assert.ok(unresolved.localData.autoApplyPendingSubmit.item);
+  } finally {
+    unresolved.cleanup();
+  }
+
+  const valid = await makeHarness('1.2.4');
+  try {
+    const result = await valid.api.resumeScheduledRepairAfterExtensionUpdate();
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.resumed, true);
+    assert.deepEqual(valid.reloadedTabs, [71]);
+  } finally {
+    valid.cleanup();
+  }
+});
+
+test('repair terminal gates preserve unresolved submission provenance before cleanup', async () => {
+  for (const [expectedReason, sideEffect] of [
+    ['unresolved_submit', { autoApplyPendingSubmit: { item: { vacancyId: 'pending' } } }],
+    ['unresolved_response_attempt', {
+      autoApplyResponseAttempts: { pending: { startedAt: '2026-08-16T08:00:00.000Z' } }
+    }]
+  ]) {
+    const session = {
+      sessionId: `scheduled:2026-08-15:${expectedReason}`,
+      dateMsk: '2026-08-15',
+      runId: 'repair-side-effect',
+      ownerId: 71,
+      state: 'repair_pending',
+      repairFromVersion: '1.2.3',
+      repairAttempts: 3,
+      reviewRequired: true
+    };
+    const queue = {
+      active: true,
+      runId: session.runId,
+      ownerId: session.ownerId,
+      scheduledSessionId: session.sessionId,
+      scheduledDateMsk: session.dateMsk
+    };
+    const harness = await createScheduledBackgroundHarness({
+      version: '1.2.4',
+      localData: {
+        scheduledAutoApplySession: session,
+        autoApplyRunLease: { active: true, runId: session.runId, ownerId: session.ownerId },
+        autoApplySearchQueue: queue,
+        ...sideEffect
+      }
+    });
+    try {
+      const result = await harness.api.reserveScheduledRepairResume();
+      assert.equal(result.reason, expectedReason);
+      assert.equal(harness.localData.scheduledAutoApplySession.state, 'repair_pending');
+      assert.equal(harness.localData.autoApplyRunLease.active, true);
+      assert.equal(harness.localData.autoApplySearchQueue.active, true);
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test('failed scheduled repair continuation atomically restores the repair checkpoint', async () => {
+  for (const [continueBehavior, expectedReason] of [
+    ['reject', 'continue_rejected'],
+    ['throw', 'continue_unreachable']
+  ]) {
+    const session = {
+      sessionId: `scheduled:2026-08-16:${continueBehavior}`,
+      dateMsk: '2026-08-16',
+      runId: `repair-${continueBehavior}`,
+      ownerId: 71,
+      filterUrl: 'https://hh.ru/search/vacancy?text=opaque',
+      extensionVersion: '1.2.3',
+      state: 'repair_pending',
+      repairAttempts: 0,
+      repairFromVersion: '1.2.3',
+      reviewRequired: true,
+      reviewedAt: ''
+    };
+    const queue = {
+      active: true,
+      runId: session.runId,
+      ownerId: session.ownerId,
+      scheduledSessionId: session.sessionId,
+      scheduledDateMsk: session.dateMsk
+    };
+    const harness = await createScheduledBackgroundHarness({
+      version: '1.2.4',
+      continueBehavior,
+      localData: {
+        scheduledAutoApplySession: session,
+        autoApplyRunLease: {
+          active: true,
+          runId: session.runId,
+          ownerId: session.ownerId,
+          scheduledRepairPending: true
+        },
+        autoApplySearchQueue: queue,
+        autoApplyStopRequested: true,
+        autoApplyStopReason: 'repair_pending'
+      }
+    });
+    try {
+      const result = await harness.api.resumeScheduledRepair();
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, expectedReason);
+      assert.equal(harness.localData.scheduledAutoApplySession.state, 'repair_pending');
+      assert.equal(harness.localData.scheduledAutoApplySession.stopReason, 'repair_pending');
+      assert.equal(harness.localData.autoApplyRunLease.active, true);
+      assert.equal(harness.localData.autoApplyRunLease.scheduledRepairPending, true);
+      assert.equal(harness.localData.autoApplyStopRequested, true);
+      assert.equal(harness.localData.autoApplyStopReason, 'repair_pending');
+      assert.equal(harness.localData.autoApplySearchQueue.active, true);
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test('failed repair continuation without a checkpoint terminally cleans owned provenance', async () => {
+  const session = {
+    sessionId: 'scheduled:2026-08-16:lost-checkpoint',
+    dateMsk: '2026-08-16',
+    runId: 'repair-lost-checkpoint',
+    ownerId: 71,
+    state: 'repair_pending',
+    repairFromVersion: '1.2.3',
+    repairAttempts: 0,
+    reviewRequired: true
+  };
+  const harness = await createScheduledBackgroundHarness({
+    version: '1.2.4',
+    continueBehavior: 'reject_without_checkpoint',
+    localData: {
+      scheduledAutoApplySession: session,
+      autoApplyRunLease: {
+        active: true,
+        runId: session.runId,
+        ownerId: session.ownerId,
+        scheduledRepairPending: true
+      },
+      autoApplySearchQueue: {
+        active: true,
+        runId: session.runId,
+        ownerId: session.ownerId,
+        scheduledSessionId: session.sessionId,
+        scheduledDateMsk: session.dateMsk
+      },
+      runResults: [{ vacancyId: '1', status: 'applied' }],
+      runState: {
+        state: 'paused',
+        runId: session.runId,
+        ownerId: session.ownerId,
+        processed: 99
+      }
+    }
+  });
+  try {
+    const result = await harness.api.resumeScheduledRepair();
+    assert.equal(result.reason, 'continue_rejected');
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'blocked');
+    assert.equal(harness.localData.scheduledAutoApplySession.stopReason, 'missing_checkpoint');
+    assert.equal(harness.localData.autoApplyRunLease.active, false);
+    assert.equal(harness.localData.autoApplySearchQueue.active, false);
+    assert.equal(harness.localData.runState.processed, 1);
+    assert.equal(harness.localData.autoApplyStopReason, 'missing_checkpoint');
+  } finally {
+    harness.cleanup();
+  }
 });

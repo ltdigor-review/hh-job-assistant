@@ -150,6 +150,35 @@ function storageFixture({
       issues: [],
       ready: true
     },
+    scheduledAutoApplyEnabled: true,
+    scheduledAutoApplyTimeMsk: '10:40',
+    scheduledAutoApplyLateWindowMinutes: 120,
+    scheduledAutoApplyFilterUrl: 'https://hh.ru/search/vacancy?text=private-java-filter',
+    scheduledAutoApplyMaxRepairAttempts: 3,
+    scheduledAutoApplyRepairCutoffMsk: '18:00',
+    scheduledAutoApplySession: {
+      sessionId: 'scheduled:2026-07-27:private-session-id',
+      dateMsk: '2026-07-27',
+      runId: 'private-run-id',
+      ownerId: 123,
+      filterUrl: 'https://hh.ru/search/vacancy?text=private-java-filter',
+      extensionVersion: '0.1.238',
+      state: 'complete',
+      repairAttempts: 1,
+      stopReason: 'private-token',
+      reviewRequired: true,
+      reviewOutcome: '',
+      reviewedAt: '',
+      startedAt: '2026-07-27T10:40:00.000Z',
+      finishedAt: '2026-07-27T10:45:00.000Z'
+    },
+    autoApplyRunLease: { active: false, runId: 'private-run-id', ownerId: 123 },
+    autoApplyPendingSubmit: null,
+    autoApplyResponseAttempts: {
+      old: { finalizedAt: '2026-07-27T10:42:00.000Z' }
+    },
+    autoApplyQueue: { active: false, items: [{ vacancyId: 'private-vacancy' }] },
+    autoApplySearchQueue: { active: false, sourceUrl: 'https://hh.ru/search/vacancy?text=private' },
     agentPrivateQuestionAudit: {
       formatVersion: 1,
       retentionDays: 7,
@@ -562,6 +591,33 @@ test('[BS:COVERS:HHJA-BR-000040] inspect:logs reads exact current evidence from 
       results: 3
     });
     assert.equal(report.dailyLedger.newSubmitted, 12);
+    assert.deepEqual(report.scheduledConfiguration, {
+      enabled: true,
+      timeMsk: '10:40',
+      lateWindowMinutes: 120,
+      filterConfigured: true,
+      maxRepairAttempts: 3,
+      repairCutoffMsk: '18:00'
+    });
+    assert.deepEqual(report.scheduledSession, {
+      dateMsk: '2026-07-27',
+      extensionVersion: '0.1.238',
+      state: 'complete',
+      repairAttempts: 1,
+      stopReason: 'other',
+      reviewRequired: true,
+      reviewOutcome: '',
+      reviewedAt: '',
+      startedAt: '2026-07-27T10:40:00.000Z',
+      finishedAt: '2026-07-27T10:45:00.000Z'
+    });
+    assert.deepEqual(report.runtimeSafety, {
+      activeLease: false,
+      pendingSubmit: false,
+      unresolvedResponseAttempts: 0,
+      activeResponseQueue: false,
+      activeSearchQueue: false
+    });
     assert.equal(report.evidence.complete, true);
     assert.equal(report.evidence.expectedResults, 3);
     assert.equal(report.evidence.readResults, 3);
@@ -582,7 +638,7 @@ test('[BS:COVERS:HHJA-BR-000040] inspect:logs reads exact current evidence from 
     assert.equal(report.applied[0].url, 'https://hh.ru/vacancy/101');
     assert.equal(report.applied[1].error.redacted, true);
     assert.equal(report.skipped[0].error, 'HHJA_SAFE_CODE');
-    assert.doesNotMatch(stdout, /Secret Java Role|Sensitive employer|Private question|Private answer|Private cover letter/);
+    assert.doesNotMatch(stdout, /Secret Java Role|Sensitive employer|Private question|Private answer|Private cover letter|private-java-filter|private-session-id|private-run-id|private-vacancy|private-token/);
 
     const publicText = await readFile(output, 'utf8');
     const privateText = await readFile(privateOutput, 'utf8');
