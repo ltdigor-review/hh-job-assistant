@@ -78,7 +78,7 @@ const QUESTION_VISIBLE_FALLBACK_MAX_CHARS = 600;
 const HH_DAILY_RESPONSE_LIMIT_ACTION = 'Исчерпан лимит в 200 откликов в день';
 const HH_DAILY_RESPONSE_LIMIT_MESSAGE = 'HH временно не дает отправлять новые отклики.';
 const RESPONSE_CONFIRMATION_PATTERN = /вы\s+откликнулись|отклик\s+отправлен|отклик\s+успешно|отклик\s+на\s+вакансию\s+отправлен|резюме\s+(?:доставлено|отправлено)/i;
-const SALARY_QUESTION_PATTERN = /зарплат|заработн\p{L}*\s+плат\p{L}*|доход|компенсац|оклад|gross|salary|income/iu;
+const SALARY_QUESTION_PATTERN = /зарплат|заработн\p{L}*\s+плат\p{L}*|доход|компенсац|оклад|(?:^|[^\p{L}\p{N}_])з\s*\/\s*п(?:$|[^\p{L}\p{N}_])|gross|salary|income/iu;
 const SALARY_JOB_OFFER_AMOUNT_PATTERN = /(?:^|[^\p{L}\p{N}_])(?:на\s+)?какую\s+сумм\p{L}*[\s\S]{0,120}предложени\p{L}*\s+о\s+работе(?:$|[^\p{L}\p{N}_])/iu;
 const {
   cleanText,
@@ -240,6 +240,13 @@ async function appendDirectNavigationRegistrationSkip(item, counters, queue, rej
     reason
   });
   return { navigated: false, registrationRejected: true, stage, reason };
+}
+
+function hasEnabledResponseControlBeforeNavigation(item) {
+  return (
+    item?.targetResponseControlEnabledBefore === true ||
+    Boolean(item?.responseButton && !isDisabled(item.responseButton))
+  );
 }
 
 async function cancelDirectNavigationAttempt(queue, reason) {
@@ -901,7 +908,10 @@ async function markStopped(counters = {}, { discardPendingSubmit = false } = {})
   stoppedCounters.applied = Math.max(stoppedCounters.applied, Number(durableLedger.newSubmitted) || 0);
   stoppedCounters.alreadyApplied = Math.max(stoppedCounters.alreadyApplied, Number(durableLedger.alreadyApplied) || 0);
   if (Array.isArray(stoppedSnapshot.runResults)) {
-    stoppedCounters.processed = stoppedSnapshot.runResults.length;
+    stoppedCounters.processed = Math.max(
+      Number(stoppedCounters.processed) || 0,
+      stoppedSnapshot.runResults.length
+    );
     stoppedCounters.found = Math.max(stoppedCounters.found, stoppedCounters.processed);
   }
   if (!finalizedCounters && discardPendingSubmit) {
@@ -1275,6 +1285,41 @@ function getOrCreateStatusPanel() {
   refresh.addEventListener('click', () => {
     refreshStatusPanel().catch(() => {});
   });
+
+  const runStatusAction = async (button, message, actionFailureMessage) => {
+    const markButtonDisabled = (disabled) => {
+      button.disabled = disabled;
+      const buttonId = button?.getAttribute?.('id');
+      if (!buttonId) return;
+      const liveButton = document.getElementById?.(buttonId);
+      if (liveButton) {
+        liveButton.disabled = disabled;
+      }
+    };
+
+    markButtonDisabled(true);
+    let actionError = null;
+    try {
+      const response = await sendRuntimeMessage(message, { timeoutMs: STATUS_PANEL_MESSAGE_TIMEOUT_MS });
+      if (response?.ok !== true) {
+        throw new Error(localizeError(response?.error, actionFailureMessage));
+      }
+    } catch (error) {
+      actionError = localizeError(error, actionFailureMessage);
+    } finally {
+      markButtonDisabled(false);
+    }
+
+    await refreshStatusPanel({ runPreflight: false });
+
+    if (actionError) {
+      const content = document.getElementById?.(HHJA_STATUS_CONTENT_ID);
+      if (content) {
+        appendStatusPanelLine(content, `Ошибка: ${actionError}`);
+      }
+    }
+  };
+
   const repairPause = document.createElement('button');
   repairPause.setAttribute('id', HHJA_STATUS_REPAIR_PAUSE_BUTTON_ID);
   repairPause.setAttribute('type', 'button');
@@ -1285,16 +1330,10 @@ function getOrCreateStatusPanel() {
   repairPause.addEventListener('click', async () => {
     const session = latestSafeStatusSnapshot?.scheduledSession;
     if (session?.state !== 'running' || !isSafeStatusPanelContext()) return;
-    repairPause.disabled = true;
-    try {
-      await sendRuntimeMessage({
-        type: 'REQUEST_SCHEDULED_REPAIR_PAUSE',
-        authenticated: true
-      }, { timeoutMs: STATUS_PANEL_MESSAGE_TIMEOUT_MS });
-      await refreshStatusPanel({ runPreflight: false });
-    } finally {
-      repairPause.disabled = false;
-    }
+    await runStatusAction(repairPause, {
+      type: 'REQUEST_SCHEDULED_REPAIR_PAUSE',
+      authenticated: true
+    }, 'Не удалось запросить паузу для исправления.');
   });
   const acknowledge = document.createElement('button');
   acknowledge.setAttribute('id', HHJA_STATUS_REVIEW_BUTTON_ID);
@@ -1306,19 +1345,17 @@ function getOrCreateStatusPanel() {
   acknowledge.addEventListener('click', async () => {
     const session = latestSafeStatusSnapshot?.scheduledSession;
     if (!session?.reviewPending || !session.sessionId || !isSafeStatusPanelContext()) return;
-    acknowledge.disabled = true;
-    try {
-      await sendRuntimeMessage({
+    await runStatusAction(
+      acknowledge,
+      {
         type: 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW',
         sessionId: session.sessionId,
         outcome: 'passed',
         issues: [],
         authenticated: true
-      }, { timeoutMs: STATUS_PANEL_MESSAGE_TIMEOUT_MS });
-      await refreshStatusPanel({ runPreflight: false });
-    } finally {
-      acknowledge.disabled = false;
-    }
+      },
+      'Не удалось подтвердить проверку запуска.'
+    );
   });
   panel.append(heading, content, refresh, repairPause, acknowledge);
   document.body.append(panel);
@@ -1476,8 +1513,7 @@ function getCardInfo(card, index) {
   const titleLink = queryFirst(HH_SELECTORS.titleLinks, card) || card.querySelector('a[href*="/vacancy/"]');
   const responseButton =
     queryAll(HH_SELECTORS.responseButtons, card).find((node) => /откликнуться/i.test(textOf(node))) ||
-    findClickableByText(card, [/откликнуться/i]) ||
-    (/откликнуться/i.test(textOf(card)) ? card : null);
+    findClickableByText(card, [/откликнуться/i]);
   const responseHref = getResponseUrlFromControl(responseButton) || getResponseUrlFromControl(card);
   const href = getElementHref(titleLink) || getElementHref(card.querySelector?.('a[href*="/vacancy/"]')) || responseHref || location.href;
   const vacancyId = getVacancyId(href) || getVacancyId(responseHref);
@@ -3423,6 +3459,10 @@ function isNumericOnlyQuestionField(field) {
   return type === 'number' || /numeric|decimal/.test(inputMode);
 }
 
+function isCustomAnswerOption(label) {
+  return /^(?:свой вариант|другое|other)$/i.test(cleanText(label));
+}
+
 async function getDeterministicStructuredAnswers(snapshot) {
   const {
     expectedSalary = '',
@@ -3486,7 +3526,7 @@ async function getDeterministicStructuredAnswers(snapshot) {
     if (isCopyAnswersAcknowledgementDescriptor(descriptor)) continue;
     const preferred = getPreferredChoiceOptions(descriptor.group, preferences).map((option) => cleanText(option.label));
     const onlyOption = descriptor.group.options.length === 1 ? cleanText(descriptor.group.options[0].label) : '';
-    const selectedOptions = preferred.length > 0 ? preferred : [onlyOption].filter(Boolean);
+    const selectedOptions = preferred.length > 0 ? preferred : [onlyOption].filter((label) => label && !isCustomAnswerOption(label));
     if (selectedOptions.length > 0) {
       answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions });
     }
@@ -3500,8 +3540,7 @@ async function buildSafeStructuredFallback(snapshot, existingAnswers = new Map()
   for (const descriptor of snapshot.choiceQuestions) {
     if (answers.has(descriptor.id)) continue;
     const preferred = getPreferredChoiceOptions(descriptor.group, preferences);
-    const ownOption = descriptor.group.options.find((option) => /^(?:свой вариант|другое|other)$/i.test(cleanText(option.label)));
-    const selected = (preferred.length > 0 ? preferred : [ownOption].filter(Boolean)).map((option) => cleanText(option.label));
+    const selected = preferred.map((option) => cleanText(option.label));
     if (selected.length > 0) {
       answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions: selected });
     }
@@ -3937,7 +3976,12 @@ async function applyToVacancy(item, counters, config = null) {
 
   async function fallbackToDirectResponse(reason) {
     const responseUrl = getItemResponseUrl(item);
-    if (!responseUrl || !item.navigationQueue?.returnToSearch || isResponseFormPage()) {
+    if (
+      !responseUrl ||
+      !item.navigationQueue?.returnToSearch ||
+      isResponseFormPage() ||
+      !hasEnabledResponseControlBeforeNavigation(item)
+    ) {
       return null;
     }
     if (location.href === responseUrl) {
@@ -4007,6 +4051,16 @@ async function applyToVacancy(item, counters, config = null) {
         return;
       }
       counters.skipped += 1;
+      if (item.navigationQueue) {
+        item.navigationQueue = {
+          ...item.navigationQueue,
+          active: false,
+          responseAttempt: null,
+          counters: { ...counters },
+          directNavigationRejection: null
+        };
+        await saveQueue(item.navigationQueue);
+      }
       await appendResult({
         index: item.index,
         vacancyId: item.vacancyId,
@@ -4324,6 +4378,28 @@ async function applyToVacancy(item, counters, config = null) {
       const fillableChoiceDescriptors = questionSnapshot.choiceQuestions.filter(
         (descriptor) => !isCopyAnswersAcknowledgementDescriptor(descriptor)
       );
+      // Validate the whole current snapshot before triggering conditional HH controls.
+      if (questionSnapshot.textQuestions.some((descriptor) => (
+        getQuestionAnswerInvalidReason(structuredAnswers.get(descriptor.id)?.answer || '', descriptor.field)
+      ))) {
+        await skipQuestionForm('skipped_bad_generated_answer', 'Пропущено: для одного из полей HH нет безопасного ответа.');
+        return;
+      }
+      const invalidChoiceGroupIndexes = fillableChoiceDescriptors
+        .filter((descriptor) => {
+          const selected = structuredAnswers.get(descriptor.id)?.selectedOptions || [];
+          return selected.length === 0 ||
+            (descriptor.inputType === 'radio' && selected.length !== 1) ||
+            selected.some((label) => !descriptor.options.includes(label));
+        })
+        .map((descriptor) => descriptor.legacyIndex);
+      if (invalidChoiceGroupIndexes.length > 0) {
+        await skipQuestionForm(
+          'skipped_choice_fill_not_verified',
+          `Пропущено: безопасный вариант HH не найден (${invalidChoiceGroupIndexes.join(', ')}).`
+        );
+        return;
+      }
       if (fillableChoiceDescriptors.length > 0) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
         setBusyCursor(true);
@@ -4839,6 +4915,8 @@ async function restoreDurableResponseAttemptQueue() {
   if (!await checkCurrentRunOwnership(attempt.runId, attempt.ownerId)) {
     return false;
   }
+  activeRunId = attempt.runId;
+  activeRunOwnerId = Number(attempt.ownerId) || 0;
   const stored = await storageGet(['autoApplyQueue'], { optional: true });
   const currentQueue = stored.autoApplyQueue;
   if (
@@ -4847,8 +4925,6 @@ async function restoreDurableResponseAttemptQueue() {
   ) {
     return false;
   }
-  activeRunId = attempt.runId;
-  activeRunOwnerId = Number(attempt.ownerId) || 0;
   await saveQueue({
     ...queue,
     active: true,
@@ -5212,7 +5288,12 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
     }
     const appliedBeforeItem = counters.applied;
     try {
-      if (sourceUrl && item.responseUrl && !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__) {
+      if (
+        sourceUrl &&
+        item.responseUrl &&
+        !window.__HH_JOB_ASSISTANT_TEST_FAST_CLICKS__ &&
+        hasEnabledResponseControlBeforeNavigation(item)
+      ) {
         const registered = await registerDirectNavigationAttempt(item, item.navigationQueue, item.responseUrl);
         item.navigationQueue = registered.queue;
         if (!registered.attempt) {
@@ -5571,7 +5652,25 @@ async function startRun(mode, limitOverride = null, options = {}) {
   if (mode === 'dry') {
     return handleDryRun(limit);
   }
-  await ensureLiveAutomationSettings(config);
+  const startupRunId = activeRunId;
+  const startupOwnerId = activeRunOwnerId;
+  try {
+    await ensureLiveAutomationSettings(config);
+  } catch (error) {
+    if (
+      await checkCurrentRunOwnership(startupRunId, startupOwnerId) &&
+      activeRunId === startupRunId && activeRunOwnerId === startupOwnerId
+    ) {
+      await setRunState({
+        state: 'error',
+        ...initialCounters,
+        errors: initialCounters.errors + 1,
+        currentAction: 'Запуск откликов заблокирован',
+        lastError: localizeError(error)
+      });
+    }
+    throw error;
+  }
   return handleAutoApply(
     limit,
     initialCounters,
@@ -5840,13 +5939,63 @@ async function maybeEnableStopBeforeSubmitFromUrlParam() {
   return true;
 }
 
+function isTerminalRunWithoutActiveProvenance(stopSnapshot = {}) {
+  const terminalState = ['complete', 'dry_run_complete', 'idle', 'stopped', 'error']
+    .includes(String(stopSnapshot.runState?.state || ''));
+  const unresolvedAttempt = Object.values(stopSnapshot.autoApplyResponseAttempts || {}).some((attempt) => (
+    attempt && !attempt.finalizedAt && !attempt.cancelledAt
+  ));
+  const activeRuntime = Boolean(
+    stopSnapshot.autoApplyRunLease?.active === true ||
+    stopSnapshot.autoApplyQueue?.active === true ||
+    stopSnapshot.autoApplySearchQueue?.active === true ||
+    stopSnapshot.autoApplyPendingSubmit?.item ||
+    unresolvedAttempt
+  );
+  return terminalState && !activeRuntime;
+}
+
+async function adoptActiveRunOwnershipForStop(stopSnapshot = {}) {
+  const lease = stopSnapshot.autoApplyRunLease;
+  if (lease?.active !== true) return true;
+
+  const runId = String(lease.runId || '').trim();
+  const ownerId = Number(lease.ownerId) || 0;
+  if (!runId || !ownerId) return false;
+
+  activeRunId = runId;
+  activeRunOwnerId = ownerId;
+  if (await checkCurrentRunOwnership(runId, ownerId)) return true;
+
+  activeRunId = null;
+  activeRunOwnerId = 0;
+  return false;
+}
+
 async function maybeStopFromUrlParam() {
   if (!consumeStopRunParam()) {
     return false;
   }
 
+  const stopSnapshot = await storageGet([
+    'runState',
+    'autoApplyRunLease',
+    'autoApplyQueue',
+    'autoApplySearchQueue',
+    'autoApplyPendingSubmit',
+    'autoApplyResponseAttempts'
+  ], { optional: true });
+  if (isTerminalRunWithoutActiveProvenance(stopSnapshot)) {
+    await appendAgentLog('url_trigger_stop_run_ignored_terminal', {
+      url: location.href,
+      state: String(stopSnapshot.runState?.state || '')
+    });
+    return true;
+  }
+
+  const ownsActiveRun = await adoptActiveRunOwnershipForStop(stopSnapshot);
   await setStopRequested('url_stop');
-  const { runState = {} } = await storageGet(['runState']);
+  const { runState = {} } = stopSnapshot;
   const counters = {
     found: Number(runState.found) || 0,
     processed: Number(runState.processed) || 0,
@@ -5854,7 +6003,14 @@ async function maybeStopFromUrlParam() {
     skipped: Number(runState.skipped) || 0,
     errors: Number(runState.errors) || 0
   };
-  await appendAgentLog('url_trigger_stop_run', { url: location.href });
+  await appendAgentLog('url_trigger_stop_run', {
+    url: location.href,
+    runId: activeRunId || String(stopSnapshot.autoApplyRunLease?.runId || ''),
+    ownershipRestored: ownsActiveRun
+  });
+  if (stopSnapshot.autoApplyRunLease?.active === true && !ownsActiveRun) {
+    return true;
+  }
   await markStopped(counters);
   return true;
 }
@@ -5938,6 +6094,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(await pauseScheduledRunForRepair());
         break;
       case 'STOP_RUN':
+        {
+          const stopSnapshot = await storageGet([
+            'runState',
+            'autoApplyRunLease',
+            'autoApplyQueue',
+            'autoApplySearchQueue',
+            'autoApplyPendingSubmit',
+            'autoApplyResponseAttempts'
+          ], { optional: true });
+          if (isTerminalRunWithoutActiveProvenance(stopSnapshot)) {
+            await appendAgentLog('stop_run_ignored_terminal', {
+              activeRunId,
+              state: String(stopSnapshot.runState?.state || ''),
+              url: location.href
+            });
+            sendResponse({ ok: true, alreadyTerminal: true, activeRunId });
+            break;
+          }
+        }
         await setStopRequested('user_stop');
         await appendAgentLog('stop_run', { activeRunId, url: location.href });
         await markStopped();
@@ -5949,18 +6124,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })().catch(async (error) => {
     const messageText = localizeError(error);
     if (error?.code === 'HHJA_CONFIG_NOT_READY') {
-      if (activeRunId && activeRunOwnerId) {
-        await appendAgentLog('auto_apply_start_blocked', {
-          type: message?.type || '',
-          error: messageText,
-          url: location.href
-        });
-        await setRunState({
-          state: 'error',
-          currentAction: 'Автоматические отклики заблокированы',
-          lastError: messageText
-        });
-      }
       sendResponse({ ok: false, error: error.message, missing: error.readiness?.missing || [] });
       return;
     }

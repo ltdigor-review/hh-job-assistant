@@ -15,6 +15,7 @@ const DEFAULT_STORAGE_DIR = join(
   EXTENSION_ID
 );
 const STORAGE_READ_ATTEMPTS = 3;
+const RUN_RESULTS_RETENTION_LIMIT = 200;
 const sanitize = globalThis.HHJA_LOG_SANITIZE.sanitize;
 
 function parseArgs(argv) {
@@ -332,7 +333,8 @@ function summarizeScheduledSession(value) {
     'unresolved_response_attempt',
     'active_saved_queue',
     'counter_result_mismatch',
-    'owner_missing'
+    'owner_missing',
+    'owner_tab_closed'
   ]);
   const safeTimestamp = (input) => {
     const text = String(input || '');
@@ -394,6 +396,7 @@ function buildStorageReport(args, snapshot) {
   const scheduledSession = summarizeScheduledSession(values.scheduledAutoApplySession.value);
   const runtimeSafety = summarizeRuntimeSafety(values);
   const expectedResults = Math.max(0, Number(runState?.processed) || 0);
+  const expectedRetainedResults = Math.min(expectedResults, RUN_RESULTS_RETENTION_LIMIT);
   const droppedDebugEntries = Math.max(0, Number(runRecord?.meta?.droppedEntries) || 0);
   const debugHistoryTruncated = droppedDebugEntries > 0 || runRecord?.meta?.truncated === true;
   const warnings = [];
@@ -407,7 +410,22 @@ function buildStorageReport(args, snapshot) {
   for (const [key, entry, shapeValid] of required) {
     if (!entry.present || !entry.valid || !shapeValid) warnings.push(`missing_required_key:${key}`);
   }
-  if (expectedResults !== results.length) warnings.push('result_count_mismatch');
+  for (const key of [
+    'autoApplyRunLease',
+    'autoApplyPendingSubmit',
+    'autoApplyResponseAttempts',
+    'autoApplyQueue',
+    'autoApplySearchQueue'
+  ]) {
+    const entry = values[key];
+    if (entry?.present && entry.valid !== true) warnings.push(`invalid_runtime_key:${key}`);
+    else if (
+      entry?.present &&
+      entry.value !== null &&
+      (typeof entry.value !== 'object' || Array.isArray(entry.value))
+    ) warnings.push(`invalid_runtime_shape:${key}`);
+  }
+  if (expectedRetainedResults !== results.length) warnings.push('result_count_mismatch');
   if (rejectedIdentityless > 0) warnings.push('identityless_result');
   if (coverage.missing > 0 || coverage.orphan > 0) warnings.push('private_audit_coverage_mismatch');
   if (debugHistoryTruncated) warnings.push('debug_history_truncated');
@@ -423,6 +441,7 @@ function buildStorageReport(args, snapshot) {
   const evidence = {
     complete: terminalComplete && fatalWarnings.length === 0,
     expectedResults,
+    expectedRetainedResults,
     readResults: results.length,
     rejectedIdentityless,
     debugHistoryTruncated,

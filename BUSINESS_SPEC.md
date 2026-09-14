@@ -821,3 +821,23 @@ This file is the canonical business-level source of truth for the extension. Pro
 }
 ```
 <!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000042",
+  "scope": "ai-routing",
+  "requirement": "AI requests MUST use currently supported stable task models and the fixed routing declared in the provider registry.",
+  "acceptance": [
+    "Qwen uses qwen3.8-max with thinking enabled for supported AI tasks.",
+    "Groq uses openai/gpt-oss-20b with low reasoning effort for cover letters and openai/gpt-oss-120b for structured questions and resume profiles.",
+    "Structured tasks request the provider's declared JSON response format and token cap.",
+    "Payloads contain bounded resume/profile, vacancy, question, salary, contact, and preference context."
+  ],
+  "supersedes": ["HHJA-BR-000006"],
+  "introduced": "2026-08-28"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->

@@ -301,13 +301,15 @@ async function stopRunNow() {
   if (response?.ok === false) {
     throw new Error(localizeError(response.error, 'Остановка не выполнена'));
   }
-  try {
-    const tabResponse = await sendToActiveTab('STOP_RUN');
-    if (tabResponse?.ok === false) {
-      throw new Error(localizeError(tabResponse.error, 'Остановка не выполнена'));
+  if (!response?.alreadyTerminal) {
+    try {
+      const tabResponse = await sendToActiveTab('STOP_RUN');
+      if (tabResponse?.ok === false) {
+        throw new Error(localizeError(tabResponse.error, 'Остановка не выполнена'));
+      }
+    } catch {
+      // Durable stop flag in storage is enough for the running HH tab to stop on its next poll.
     }
-  } catch {
-    // Durable stop flag in storage is enough for the running HH tab to stop on its next poll.
   }
   await refreshPopup();
 }

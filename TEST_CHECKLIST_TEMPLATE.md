@@ -224,11 +224,9 @@ Result:
 
 - [ ] Open popup and click the settings button.
 - [ ] Options page opens.
-- [ ] Check available Groq models:
-  - `llama-3.3-70b-versatile`;
-  - `llama-3.1-8b-instant`;
-  - `openai/gpt-oss-120b`;
-  - `openai/gpt-oss-20b`.
+- [ ] Check configured Groq task models:
+  - cover letters: `openai/gpt-oss-20b`;
+  - structured questions and resume profiles: `openai/gpt-oss-120b`.
 - [ ] Enter resume URL.
 - [ ] Enter expected salary.
 - [ ] Edit cover-letter prompt.

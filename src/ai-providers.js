@@ -64,26 +64,26 @@
       endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
       timeoutMs: 120000,
       quotaPolicy: 'provider',
-      settingsModelSummary: 'Все AI-задачи: qwen3.8-max-preview',
+      settingsModelSummary: 'Все AI-задачи: qwen3.8-max',
       requestExtras: Object.freeze({ enable_thinking: true }),
       tasks: Object.freeze({
         cover_letter: taskCapability({
-          model: 'qwen3.8-max-preview',
+          model: 'qwen3.8-max',
           maxTokens: [4096],
           validateCoverLetter: true
         }),
         test_assist: taskCapability({
-          model: 'qwen3.8-max-preview',
+          model: 'qwen3.8-max',
           maxTokens: [8192],
           responseFormat: JSON_OBJECT_RESPONSE_FORMAT
         }),
         resume_profile_build: taskCapability({
-          model: 'qwen3.8-max-preview',
+          model: 'qwen3.8-max',
           maxTokens: [8192, 16384],
           responseFormat: JSON_OBJECT_RESPONSE_FORMAT
         }),
         resume_profile_edit: taskCapability({
-          model: 'qwen3.8-max-preview',
+          model: 'qwen3.8-max',
           maxTokens: [8192, 16384],
           responseFormat: JSON_OBJECT_RESPONSE_FORMAT
         })
@@ -97,16 +97,18 @@
       endpoint: 'https://api.groq.com/openai/v1/chat/completions',
       timeoutMs: 35000,
       quotaPolicy: 'groq',
-      settingsModelSummary: 'Вопросы: OpenAI GPT-OSS 120B · письма: Llama 3.1 8B Instant',
+      settingsModelSummary: 'Вопросы: OpenAI GPT-OSS 120B · письма: OpenAI GPT-OSS 20B',
       requestExtras: Object.freeze({}),
       tasks: Object.freeze({
         cover_letter: taskCapability({
-          model: 'llama-3.1-8b-instant',
-          maxTokens: [120]
+          model: 'openai/gpt-oss-20b',
+          maxTokens: [2048],
+          requestExtras: { reasoning_effort: 'low' }
         }),
         test_assist: taskCapability({
           model: 'openai/gpt-oss-120b',
-          maxTokens: [700],
+          maxTokens: [2048],
+          requestExtras: { reasoning_effort: 'low' },
           responseFormat: EMPLOYER_ANSWER_RESPONSE_FORMAT
         }),
         resume_profile_build: taskCapability({

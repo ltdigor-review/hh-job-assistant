@@ -31,6 +31,7 @@ async function runContentAutoApply({
   dialogText,
   hasTextarea,
   exactCardSelectorMatches = true,
+  searchCardHasResponseButton = true,
   broadVacancySelectorIncludesButton = false,
   broadVacancySelectorOnlyButton = false,
   startOnResponseForm = false,
@@ -42,6 +43,7 @@ async function runContentAutoApply({
   questionFieldLabel = '',
   questionFieldLabels = [],
   rejectQuestionFieldWrites = false,
+  revealQuestionFieldOnChoice = false,
   bodyText = 'HH вакансии',
   responseHref = '',
   responseAttrs = {},
@@ -150,6 +152,12 @@ async function runContentAutoApply({
       }
     }
   }));
+  let conditionalQuestionVisible = !revealQuestionFieldOnChoice;
+  if (revealQuestionFieldOnChoice) {
+    questionTextareas.forEach((field) => {
+      field.getBoundingClientRect = () => ({ width: 100, height: conditionalQuestionVisible ? 24 : 0 });
+    });
+  }
   const textarea = questionTextareas[0] || new FakeElement();
   const effectiveQuestionLabels = questionFieldLabels.length > 0 ? questionFieldLabels : questionFieldLabel ? [questionFieldLabel] : [];
   questionTextareas.forEach((field, index) => {
@@ -195,6 +203,7 @@ async function runContentAutoApply({
         attrs: { type: item.type, name: item.name || '', value: item.value || item.label },
         dispatch(event) {
           if (event?.type !== 'change') return;
+          if (revealQuestionFieldOnChoice) conditionalQuestionVisible = true;
           if (Array.isArray(forcedCheckedChoiceKeysAfterChange)) {
             const forcedKeys = new Set(forcedCheckedChoiceKeysAfterChange);
             selectableControls.forEach((candidate) => {
@@ -387,11 +396,11 @@ async function runContentAutoApply({
     selectorMap: {
       '[data-qa="serp-item__title"]': [titleLink],
       'a[href*="/vacancy/"]': [titleLink],
-      '[data-qa="vacancy-serp__vacancy_response"]': [responseButton],
+      '[data-qa="vacancy-serp__vacancy_response"]': searchCardHasResponseButton ? [responseButton] : [],
       '[data-qa="vacancy-response-link-top"]': [],
       '[data-qa="vacancy-response-link-bottom"]': [],
       'a[href*="vacancy_response"]': [],
-      button: [responseButton]
+      button: searchCardHasResponseButton ? [responseButton] : []
     }
   });
   responseButton.parentElement = card;
@@ -749,6 +758,9 @@ async function runContentAutoApply({
 
   return {
     response,
+    sendMessage(nextMessage) {
+      return new Promise((resolve) => listener(nextMessage, {}, resolve));
+    },
     shortcutResults,
     appended,
     states,
@@ -774,7 +786,11 @@ async function runContentAutoApply({
   };
 }
 
-async function runStatusPanel({ authenticated = true, snapshot } = {}) {
+async function runStatusPanel({
+  authenticated = true,
+  snapshot,
+  runtimeMessageOverrides = {}
+} = {}) {
   const source = await readContentScriptSource();
   const elementsById = new Map();
   const runtimeMessages = [];
@@ -871,11 +887,23 @@ async function runStatusPanel({ authenticated = true, snapshot } = {}) {
       onMessage: { addListener() {} },
       sendMessage(message, callback) {
         runtimeMessages.push(message);
-        const response = ['GET_SAFE_STATUS_SNAPSHOT', 'RUN_SAFE_STATUS_PREFLIGHT'].includes(message.type)
+        const runtimeOverride = runtimeMessageOverrides[message.type] || runtimeMessageOverrides['*'];
+        let response = null;
+        if (typeof runtimeOverride === 'function') {
+          response = runtimeOverride(message, snapshot);
+        } else if (runtimeOverride !== undefined) {
+          response = runtimeOverride;
+        }
+        if (response && response.chromeLastError) {
+          chrome.runtime.lastError = response.chromeLastError;
+        } else {
+          chrome.runtime.lastError = null;
+        }
+        const safeResponse = response?.ok !== undefined ? response : ['GET_SAFE_STATUS_SNAPSHOT', 'RUN_SAFE_STATUS_PREFLIGHT'].includes(message.type)
           ? { ok: true, snapshot }
           : { ok: true };
-        queueMicrotask(() => callback?.(response));
-        return Promise.resolve(response);
+        queueMicrotask(() => callback?.(safeResponse));
+        return Promise.resolve(safeResponse);
       }
     },
     storage: {
@@ -894,16 +922,28 @@ async function runStatusPanel({ authenticated = true, snapshot } = {}) {
   await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#${crypto.randomUUID()}`);
   await new Promise((resolve) => setTimeout(resolve, 0));
   const panel = elementsById.get('hh-job-assistant-status-panel') || null;
-  const refresh = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-refresh') || null;
-  const review = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-review') || null;
-  const repairPause = panel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-repair-pause') || null;
+  const getButton = (id) => panel?.children.find((node) => node.attrs['data-qa'] === id) || null;
+  const refresh = getButton('hhja-status-refresh');
+  const review = getButton('hhja-status-review');
+  const repairPause = getButton('hhja-status-repair-pause');
   const flattenText = (node) => [node.textContent, ...node.children.flatMap(flattenText)].filter(Boolean).join('\n');
   return {
     panel,
     refresh,
     review,
     repairPause,
+    readButtons() {
+      const currentPanel = elementsById.get('hh-job-assistant-status-panel') || panel;
+      return {
+        refresh: currentPanel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-refresh') || null,
+        review: currentPanel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-review') || null,
+        repairPause: currentPanel?.children.find((node) => node.attrs['data-qa'] === 'hhja-status-repair-pause') || null
+      };
+    },
     panelText: panel ? flattenText(panel) : '',
+    readPanelText() {
+      return panel ? flattenText(panel) : '';
+    },
     runtimeMessages,
     historyCalls,
     storageGetCalls,
@@ -1076,6 +1116,124 @@ test('hhjaStatus panel hides review acknowledgement while scheduled session is r
     result.runtimeMessages.some((message) => message.type === 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW'),
     false
   );
+});
+
+test('hhjaStatus panel handles repair pause send failures and keeps controls usable', async () => {
+  const result = await runStatusPanel({
+    snapshot: {
+      manifestVersion: '1.2.3',
+      dailyLedger: {},
+      automationAudit: {},
+      runState: { state: 'applying' },
+      startDigest: {},
+      schedule: { enabled: true, reviewGateBlocked: true },
+      scheduledSession: {
+        present: true,
+        sessionId: 'scheduled:2026-08-16:running',
+        dateMsk: '2026-08-16',
+        state: 'running',
+        reviewRequired: true,
+        reviewPending: true
+      }
+    },
+    runtimeMessageOverrides: {
+      REQUEST_SCHEDULED_REPAIR_PAUSE: {
+        chromeLastError: { message: 'Сбой отправки запроса' }
+      },
+      GET_SAFE_STATUS_SNAPSHOT: { ok: true, snapshot: {
+        manifestVersion: '1.2.3',
+        dailyLedger: {},
+        automationAudit: {},
+        runState: {},
+        startDigest: {},
+        schedule: { enabled: true, timeMsk: '10:40', lateWindowMinutes: 120, reviewGateBlocked: true },
+        stopBeforeSubmit: { state: 'none', runId: '' },
+        scheduledSession: {
+          present: false
+        }
+      }}
+    }
+  });
+
+  assert.ok(result.repairPause);
+  assert.equal(result.repairPause.hidden, false);
+  await assert.doesNotReject(async () => result.repairPause.listeners.get('click')());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(result.repairPause.disabled, false);
+  const latest = result.readButtons();
+  assert.ok(latest.repairPause);
+  assert.equal(result.repairPause.listeners, latest.repairPause.listeners);
+  assert.ok(result.runtimeMessages.some((message) => message.type === 'GET_SAFE_STATUS_SNAPSHOT'));
+  assert.match(result.readPanelText(), /Ошибка/);
+  assert.match(result.readPanelText(), /Сбой отправки запроса/);
+});
+
+test('hhjaStatus panel handles review acknowledgement send failures and keeps controls usable', async () => {
+  const result = await runStatusPanel({
+    snapshot: {
+      manifestVersion: '1.2.3',
+      dailyLedger: {},
+      automationAudit: {},
+      runState: {},
+      startDigest: {},
+      schedule: {
+        enabled: true,
+        timeMsk: '10:40',
+        lateWindowMinutes: 120,
+        reviewGateBlocked: true,
+        maxRepairAttempts: 3,
+        repairCutoffMsk: '18:00',
+        filterConfigured: true,
+        nextAlarmAt: '2026-08-17T07:40:00.000Z'
+      },
+      scheduledSession: {
+        present: true,
+        sessionId: 'scheduled:2026-08-16:complete',
+        dateMsk: '2026-08-16',
+        state: 'complete',
+        reviewRequired: true,
+        reviewPending: true,
+        reviewIssueCount: 1,
+        reviewOutcome: '',
+        extensionVersion: '1.2.3'
+      }
+    },
+    runtimeMessageOverrides: {
+      ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW: {
+        chromeLastError: { message: 'Ошибка подтверждения проверки' }
+      },
+      GET_SAFE_STATUS_SNAPSHOT: { ok: true, snapshot: {
+        manifestVersion: '1.2.3',
+        dailyLedger: {},
+        automationAudit: {},
+        runState: {},
+        startDigest: {},
+        schedule: { enabled: true, timeMsk: '10:40', lateWindowMinutes: 120, reviewGateBlocked: true },
+        stopBeforeSubmit: { state: 'none', runId: '' },
+        scheduledSession: {
+          present: true,
+          sessionId: 'scheduled:2026-08-16:complete',
+          dateMsk: '2026-08-16',
+          state: 'complete',
+          reviewRequired: true,
+          reviewPending: false,
+          reviewIssueCount: 1,
+          reviewOutcome: '',
+          reviewGateBlocked: true
+        }
+      }}
+    }
+  });
+
+  assert.ok(result.review);
+  assert.equal(result.review.hidden, false);
+  await assert.doesNotReject(async () => result.review.listeners.get('click')());
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(result.runtimeMessages.find((message) => message.type === 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW'));
+  assert.equal(result.review.disabled, false);
+  assert.ok(result.runtimeMessages.some((message) => message.type === 'GET_SAFE_STATUS_SNAPSHOT'));
+  assert.match(result.readPanelText(), /Ошибка/);
+  assert.match(result.readPanelText(), /Ошибка подтверждения проверки/);
 });
 
 test('scheduled start keeps user delays unchanged and stores 3-5 second queue provenance', async () => {
@@ -1313,8 +1471,66 @@ test('[BS:COVERS:HHJA-BR-000017] live start fails closed when the refreshed sett
   assert.equal(result.navigateUrl, '');
   assert.equal(result.runtimeMessages.some((message) => message.type === 'GET_AUTOMATION_SETTINGS_AUDIT'), true);
   assert.equal(result.states.at(-1).state, 'error');
-  assert.equal(result.states.at(-1).currentAction, 'Автоматические отклики заблокированы');
-  assert.match(result.states.at(-1).lastError, /Автоматические отклики заблокированы/);
+  assert.equal(result.states.at(-1).errors, 1);
+  assert.equal(result.states.at(-1).lastError, result.response.error);
+  assert.equal(result.states.at(-1).currentAction, 'Запуск откликов заблокирован');
+  assert.equal(result.bodyCursor, '');
+  const claim = result.runtimeMessages.find((message) => message.type === 'CLAIM_AUTO_APPLY_RUN');
+  const terminal = result.runtimeMessages.find((message) => message.type === 'SET_RUN_STATE' && message.patch.state === 'error');
+  assert.equal(terminal.runId, claim.runId);
+  assert.equal(terminal.ownerId, 7);
+});
+
+test('failed live resume refresh terminates its run and permits a same-page retry', async () => {
+  let lease = null;
+  let profileReady = false;
+  const terminalStates = [];
+  const result = await runContentAutoApply({
+    runtimeResponses: {
+      CLAIM_AUTO_APPLY_RUN(message) {
+        if (lease?.active) return { ok: true, claimed: false, runId: lease.runId, ownerId: 7 };
+        lease = { runId: message.runId, active: true };
+        return { ok: true, claimed: true, runId: message.runId, ownerId: 7 };
+      },
+      ENSURE_RESUME_PROFILE() {
+        return { ok: profileReady };
+      },
+      SET_RUN_STATE(message) {
+        assert.equal(message.runId, lease.runId);
+        assert.equal(message.ownerId, 7);
+        if (['error', 'complete'].includes(message.patch.state)) {
+          lease.active = false;
+          terminalStates.push(message.patch);
+        }
+        return { ok: true };
+      }
+    }
+  });
+
+  assert.equal(result.response.ok, false);
+  assert.equal(lease.active, false);
+  assert.equal(terminalStates.at(-1).state, 'error');
+  assert.equal(result.submitClicks, 0);
+  const failedRunId = lease.runId;
+  profileReady = true;
+  const retry = await result.sendMessage({ type: 'START_AUTO_APPLY' });
+  assert.notEqual(retry.alreadyRunning, true);
+  assert.notEqual(lease.runId, failedRunId);
+  assert.equal(terminalStates.at(-1).state, 'complete');
+  assert.equal(lease.active, false);
+});
+
+test('failed live startup cannot terminate a replacement run after ownership is lost', async () => {
+  const result = await runContentAutoApply({
+    runtimeResponses: {
+      GET_AUTOMATION_SETTINGS_AUDIT: { ok: true, audit: { ready: false, issues: ['resumeProfileFresh'] } },
+      CHECK_AUTO_APPLY_RUN_OWNERSHIP: { ok: true, owned: false, runId: 'replacement-run', ownerId: 8 }
+    }
+  });
+
+  assert.equal(result.response.ok, false);
+  assert.equal(result.states.some((state) => state.state === 'error'), false);
+  assert.equal(result.submitClicks, 0);
 });
 
 async function runQueuedResponsePages({ count = 20, expectedSalary = '250 000 руб. на руки' } = {}) {
@@ -1881,6 +2097,52 @@ test('auto apply eager direct-open registration rejection stores the post-skip t
   });
   assert.equal(result.states.at(-1).state, 'complete');
   assert.equal(result.states.at(-1).processed, result.localStore.runResults.length);
+});
+
+test('auto apply classifies a non-actionable search card without provenance rejection', async () => {
+  const responseUrl = 'https://hh.ru/applicant/vacancy_response?vacancyId=123&hhtmFrom=vacancy_search_list';
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    responseHref: responseUrl,
+    searchCardHasResponseButton: false,
+    cardText: 'Java Developer\nООО Test',
+    fastClicks: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.submitClicks, 0);
+  assert.ok(!result.runtimeMessages.some((message) => message.type === 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT'));
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_no_response_button']);
+  assert.deepEqual(result.localStore.autoApplyQueue.counters, {
+    found: 1,
+    processed: 1,
+    applied: 0,
+    alreadyApplied: 0,
+    skipped: 1,
+    errors: 0
+  });
+  assert.equal(result.localStore.autoApplyQueue.directNavigationRejection == null, true);
+  assert.equal(result.states.at(-1).state, 'complete');
+  assert.equal(result.states.at(-1).processed, result.localStore.runResults.length);
+});
+
+test('auto apply does not treat text-only Откликнуться copy as a response control', async () => {
+  const result = await runContentAutoApply({
+    dialogText: '',
+    hasTextarea: false,
+    searchCardHasResponseButton: false,
+    cardText: 'Java Developer\nООО Test\nОткликнуться',
+    fastClicks: false
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.submitClicks, 0);
+  assert.ok(!result.runtimeMessages.some((message) => message.type === 'REGISTER_AUTO_APPLY_RESPONSE_ATTEMPT'));
+  assert.deepEqual(result.appended.map((item) => item.status), ['skipped_no_response_button']);
+  assert.equal(result.states.at(-1).state, 'complete');
 });
 
 test('auto apply does not locally navigate to a direct response when background navigation is denied', async () => {
@@ -3517,6 +3779,7 @@ test('auto apply accepts one digit numeric answers for employer text questions',
       'В каком городе вы проживаете?',
       'Ваши пожелания по уровню з/п(минимум и комфорт)?'
     ],
+    expectedSalary: '300000 минимум, 350000 комфорт',
     initialLocalStore: {
       resumeProfileText: '9 лет разрабатывает на Java, руководил командой из 5 разработчиков, проживает в Москве.'
     },
@@ -5809,6 +6072,105 @@ test('auto apply finalizes pending response on detail confirmation page and retu
   assert.equal(logs.some((item) => item.event === 'pending_submit_finalized'), true);
 });
 
+test('terminal run ignores a late stop URL without mutating ownership or counters', async () => {
+  const source = await readContentScriptSource();
+  const runtimeMessages = [];
+  const replacedUrls = [];
+  const localStore = {
+    ...TEST_READY_CONFIG,
+    runState: {
+      state: 'complete',
+      runId: 'completed-run',
+      ownerId: 7,
+      found: 6,
+      processed: 6,
+      applied: 0,
+      skipped: 6,
+      errors: 0,
+      currentAction: 'Отклики завершены',
+      lastError: ''
+    },
+    runResults: Array.from({ length: 6 }, (_, index) => ({
+      vacancyId: String(index + 1),
+      status: 'skipped_no_response_button'
+    })),
+    autoApplyRunLease: {
+      active: false,
+      runId: 'completed-run',
+      ownerId: 7,
+      releasedState: 'complete'
+    },
+    autoApplyQueue: { active: false },
+    autoApplySearchQueue: { active: false },
+    autoApplyPendingSubmit: null,
+    autoApplyResponseAttempts: {},
+    autoApplyStopRequested: false,
+    autoApplyStopRequestedAt: '',
+    autoApplyStopReason: ''
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/?hhjaStopRun=1',
+    pathname: '/'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    history: {
+      replaceState(_state, _title, url) {
+        replacedUrls.push(String(url));
+      }
+    },
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH search',
+    body: new FakeElement({ text: 'HH main page' }),
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+    dispatchEvent() {},
+    createElement() {
+      return new FakeElement();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener() {} },
+      sendMessage(message) {
+        runtimeMessages.push(structuredClone(message));
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: {
+      local: {
+        async get() {
+          return structuredClone(localStore);
+        },
+        async set(value) {
+          Object.assign(localStore, structuredClone(value));
+        }
+      }
+    }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#late-stop-terminal-${crypto.randomUUID()}`);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(replacedUrls.length, 1);
+  assert.doesNotMatch(replacedUrls[0], /hhjaStopRun/);
+  assert.equal(localStore.runState.state, 'complete');
+  assert.equal(localStore.runState.processed, 6);
+  assert.equal(localStore.autoApplyStopRequested, false);
+  assert.equal(runtimeMessages.some((message) => message.type === 'WRITE_AUTO_APPLY_STATE'), false);
+  assert.equal(runtimeMessages.some((message) => message.type === 'SET_RUN_STATE'), false);
+});
+
 test('auto apply preserves a confirmed pending response when stop URL arrives after submit', async () => {
   const source = await readContentScriptSource();
   const appended = [];
@@ -5992,7 +6354,13 @@ test('auto apply preserves a fresh direct response attempt across stop and final
   const appended = [];
   const states = [];
   const navigations = [];
+  const runtimeMessages = [];
   const localStore = { ...TEST_READY_CONFIG,
+    autoApplyRunLease: {
+      active: true,
+      runId: 'test-run',
+      ownerId: 7
+    },
     runState: {
       state: 'waiting_for_dialog',
       found: 10,
@@ -6005,6 +6373,7 @@ test('auto apply preserves a fresh direct response attempt across stop and final
     autoApplyQueue: {
       active: true,
       runId: 'test-run',
+      ownerId: 7,
       index: 0,
       sourceUrl: 'https://hh.ru/search/vacancy?text=java',
       returnToSearch: true,
@@ -6031,6 +6400,7 @@ test('auto apply preserves a fresh direct response attempt across stop and final
       responseAttempt: {
         kind: 'direct_response_navigation',
         runId: 'test-run',
+        ownerId: 7,
         vacancyId: '135646486',
         sourceUrl: 'https://hh.ru/search/vacancy?text=java',
         responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=135646486',
@@ -6072,7 +6442,27 @@ test('auto apply preserves a fresh direct response attempt across stop and final
     runtime: {
       onMessage: { addListener() {} },
       sendMessage(message) {
+        runtimeMessages.push(message);
+        const owned = message.runId === 'test-run' && message.ownerId === 7;
+        if (message.type === 'CHECK_AUTO_APPLY_RUN_OWNERSHIP') {
+          return Promise.resolve({ ok: true, owned, runId: 'test-run', ownerId: 7 });
+        }
+        if (message.type === 'GET_AUTO_APPLY_RESPONSE_ATTEMPT') {
+          return Promise.resolve({
+            ok: true,
+            status: 'ready',
+            attempt: {
+              ...localStore.autoApplyQueue.responseAttempt,
+              ownerId: 7,
+              queue: { ...localStore.autoApplyQueue, active: true, ownerId: 7 }
+            }
+          });
+        }
+        if (message.type === 'WRITE_AUTO_APPLY_STATE' && !owned) {
+          return Promise.resolve({ ok: false, written: false, reason: 'run_not_owned' });
+        }
         if (message.type === 'SET_RUN_STATE') {
+          if (!owned) return Promise.resolve({ ok: false, written: false, reason: 'run_not_owned' });
           states.push(message.patch);
           localStore.runState = { ...(localStore.runState || {}), ...message.patch };
         }
@@ -6103,6 +6493,9 @@ test('auto apply preserves a fresh direct response attempt across stop and final
   assert.equal(appended.length, 0);
   assert.equal(localStore.autoApplyQueue.active, false);
   assert.equal(localStore.autoApplyQueue.responseAttempt.vacancyId, '135646486');
+  assert.ok(runtimeMessages.some((message) => (
+    message.type === 'WRITE_AUTO_APPLY_STATE' && message.runId === 'test-run' && message.ownerId === 7
+  )));
 
   globalThis.location = {
     href: 'https://hh.ru/vacancy/135646486',
@@ -7792,35 +8185,108 @@ test('[BS:COVERS:HHJA-BR-000022] stop run clears queues, reports stopped state, 
   assert.equal(logs.at(-1).details.url, 'https://hh.ru/search/vacancy?text=java');
 });
 
-test('stale stop writer cannot decrement durable counters and stopped processed matches run results', async () => {
+test('content stop is idempotent after a run already completed without active provenance', async () => {
+  const source = await readContentScriptSource();
+  const states = [];
+  const logs = [];
+  let listener = null;
+  const localStore = { ...TEST_READY_CONFIG,
+    runState: {
+      state: 'complete',
+      runId: 'completed-run',
+      ownerId: 71,
+      processed: 3,
+      skipped: 3
+    },
+    autoApplyRunLease: { active: false, runId: 'completed-run', ownerId: 71 },
+    autoApplyQueue: { active: false },
+    autoApplySearchQueue: { active: false },
+    autoApplyPendingSubmit: null,
+    autoApplyResponseAttempts: {},
+    autoApplyStopRequested: false,
+    autoApplyStopRequestedAt: '',
+    autoApplyStopReason: ''
+  };
+
+  globalThis.location = {
+    href: 'https://hh.ru/search/vacancy?text=java',
+    pathname: '/search/vacancy'
+  };
+  globalThis.window = {
+    __HH_JOB_ASSISTANT_TEST_FAST_CLICKS__: true,
+    getComputedStyle() {
+      return { visibility: 'visible', display: 'block' };
+    }
+  };
+  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
+  globalThis.document = {
+    title: 'HH search page',
+    body: new FakeElement({ text: 'HH вакансии' }),
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+    dispatchEvent() {},
+    createElement() { return new FakeElement(); }
+  };
+  globalThis.HHJobAssistantLog = {
+    append(scope, event, details) {
+      logs.push({ scope, event, details });
+      return Promise.resolve();
+    }
+  };
+  globalThis.chrome = {
+    runtime: {
+      onMessage: { addListener(fn) { listener = fn; } },
+      sendMessage(message) {
+        if (message.type === 'SET_RUN_STATE') states.push(message.patch);
+        return Promise.resolve({ ok: true });
+      }
+    },
+    storage: { local: {
+      async get() { return localStore; },
+      async set(value) { Object.assign(localStore, value); }
+    } }
+  };
+
+  await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}#terminal-stop-${crypto.randomUUID()}`);
+  const response = await new Promise((resolve) => listener({ type: 'STOP_RUN' }, {}, resolve));
+
+  assert.equal(response.ok, true);
+  assert.equal(response.alreadyTerminal, true);
+  assert.equal(localStore.runState.state, 'complete');
+  assert.equal(localStore.autoApplyStopRequested, false);
+  assert.equal(states.length, 0);
+  assert.equal(logs.at(-1).event, 'stop_run_ignored_terminal');
+});
+
+test('stale stop writer cannot decrement durable counters when retained results are capped', async () => {
   const source = await readContentScriptSource();
   let listener = null;
   const localStore = { ...TEST_READY_CONFIG,
     runState: {
       state: 'applying',
-      found: 70,
-      processed: 70,
-      applied: 70,
+      found: 201,
+      processed: 201,
+      applied: 201,
       alreadyApplied: 0,
       skipped: 0,
       errors: 0
     },
-    runResults: Array.from({ length: 70 }, (_, index) => ({ vacancyId: String(3000 + index), status: 'applied' })),
+    runResults: Array.from({ length: 200 }, (_, index) => ({ vacancyId: String(3001 + index), status: 'applied' })),
     dailyApplicationLedger: {
       date: '2026-08-15',
       legacySubmitted: 0,
-      newSubmitted: 70,
+      newSubmitted: 201,
       alreadyApplied: 0,
-      submittedVacancyIds: Array.from({ length: 70 }, (_, index) => String(3000 + index)),
+      submittedVacancyIds: Array.from({ length: 201 }, (_, index) => String(3000 + index)),
       alreadyAppliedVacancyIds: []
     },
     autoApplyQueue: {
       active: true,
       runId: 'stale-worker',
-      index: 69,
+      index: 198,
       items: [],
       responseAttempt: null,
-      counters: { found: 69, processed: 69, applied: 69, alreadyApplied: 0, skipped: 0, errors: 0 }
+      counters: { found: 199, processed: 199, applied: 199, alreadyApplied: 0, skipped: 0, errors: 0 }
     },
     autoApplySearchQueue: { active: true }
   };
@@ -7872,9 +8338,9 @@ test('stale stop writer cannot decrement durable counters and stopped processed 
 
   assert.equal(response.ok, true);
   assert.equal(localStore.runState.state, 'stopped');
-  assert.equal(localStore.runState.applied, 70);
-  assert.equal(localStore.runState.processed, localStore.runResults.length);
-  assert.equal(localStore.runState.processed, 70);
+  assert.equal(localStore.runState.applied, 201);
+  assert.equal(localStore.runResults.length, 200);
+  assert.equal(localStore.runState.processed, 201);
 });
 
 test('content script enables stop-before-submit from hh url parameter', async () => {
@@ -7994,4 +8460,138 @@ test('continue auto apply reports missing saved queue', async () => {
 
   assert.equal(result.response.ok, false);
   assert.match(result.response.error, /Нет сохраненного запуска/);
+});
+
+for (const onlyOther of [false, true]) {
+  test(`checkbox failure preflight: provider error never chooses Other (sole=${onlyOther})`, async () => {
+    const result = await runContentAutoApply({
+      dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакие технологии использовали?',
+      hasTextarea: false,
+      startOnResponseForm: true,
+      questionControls: [
+        ...(!onlyOther ? [{ type: 'checkbox', name: 'stack', label: 'Java', value: 'java' }] : []),
+        { type: 'checkbox', name: 'stack', label: 'Свой вариант', value: 'open' }
+      ],
+      groqResponse: { ok: false, error: 'Groq request failed: HTTP 400' }
+    });
+    assert.deepEqual(result.checkedLabels, []);
+    assert.equal(result.submitClicks, 0);
+    assert.equal(result.response.skipped, 1);
+  });
+}
+
+for (const invalidAnswer of ['', 'Text question 1: Context: Resume candidate']) {
+  test(`checkbox failure preflight: invalid text leaves valid choices untouched (${invalidAnswer || 'empty'})`, async () => {
+    const result = await runContentAutoApply({
+      dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nОпишите ваш опыт\nВыберите стек',
+      startOnResponseForm: true,
+      hasQuestionField: true,
+      questionFieldLabel: 'Опишите ваш опыт',
+      questionControls: [
+        { type: 'checkbox', name: 'stack', label: 'Java', value: 'java' },
+        { type: 'checkbox', name: 'stack', label: 'Свой вариант', value: 'open' }
+      ],
+      groqResponse: (message) => ({
+        ok: true,
+        answers: message.questions.map((question) => ({
+          id: question.id,
+          answer: question.kind === 'text' ? invalidAnswer : '',
+          selectedOptions: question.kind === 'choice' ? ['Java'] : []
+        })),
+        coverLetter: ''
+      })
+    });
+    assert.deepEqual(result.checkedLabels, []);
+    assert.equal(result.textareaValue, '');
+    assert.equal(result.submitClicks, 0);
+    assert.equal(result.response.skipped, 1);
+  });
+}
+
+test('checkbox failure preflight: missing group leaves configured choices untouched', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nКакие форматы работы вам подходят?\nКакие технологии использовали?',
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'checkbox', name: 'work_format', label: 'Удаленка', value: 'remote' },
+      { type: 'checkbox', name: 'work_format', label: 'Офис', value: 'office' },
+      { type: 'checkbox', name: 'stack', label: 'Java', value: 'java' },
+      { type: 'checkbox', name: 'stack', label: 'Свой вариант', value: 'open' }
+    ],
+    initialLocalStore: { workFormatPreference: 'remote' },
+    groqResponse: { ok: false, error: 'Groq request failed: HTTP 400' }
+  });
+  assert.deepEqual(result.checkedLabels, []);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.response.skipped, 1);
+});
+
+test('checkbox failure preflight: live salary shorthand uses configured expectations', async () => {
+  const salaryLabel = 'Ваши ожидания по з/п (минимальная сумма, ниже которой не готовы двигаться, и комфортная) в рублях, на руки?';
+  const result = await runContentAutoApply({
+    dialogText: `Отклик на вакансию\nОтветьте на вопросы работодателя\n${salaryLabel}`,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldLabel: salaryLabel,
+    expectedSalary: '350000',
+    groqResponse: { ok: false, error: 'Groq request failed: HTTP 400' }
+  });
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.textareaValue, '350000');
+  assert.equal(result.submitClicks, 1);
+});
+
+test('checkbox preflight accepts exact multiple selections across independent groups', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nВыберите стек и брокеры',
+    startOnResponseForm: true,
+    questionControls: [
+      { type: 'checkbox', name: 'stack', label: 'Java', value: 'java' },
+      { type: 'checkbox', name: 'stack', label: 'Kotlin', value: 'kotlin' },
+      { type: 'checkbox', name: 'stack', label: 'Свой вариант', value: 'open' },
+      { type: 'checkbox', name: 'broker', label: 'Kafka', value: 'kafka' },
+      { type: 'checkbox', name: 'broker', label: 'Свой вариант', value: 'open' }
+    ],
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id, answer: '',
+        selectedOptions: question.options.includes('Java') ? ['Java', 'Kotlin'] : ['Kafka']
+      })),
+      coverLetter: ''
+    })
+  });
+  assert.deepEqual(result.checkedLabels, ['Java', 'Kotlin', 'Kafka']);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.response.applied, 1);
+});
+
+test('checkbox preflight preserves explicit Other and answers newly revealed text', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Отклик на вакансию\nОтветьте на вопросы работодателя\nУкажите инструмент',
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    revealQuestionFieldOnChoice: true,
+    questionFieldLabel: 'Укажите инструмент',
+    questionControls: [
+      { type: 'checkbox', name: 'tool', label: 'Jenkins', value: 'jenkins' },
+      { type: 'checkbox', name: 'tool', label: 'Свой вариант', value: 'open' }
+    ],
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id,
+        answer: question.kind === 'text' ? 'GitHub Actions' : '',
+        selectedOptions: question.kind === 'choice' ? ['Свой вариант'] : []
+      })),
+      coverLetter: ''
+    })
+  });
+  assert.equal(result.groqRequests.length, 2);
+  assert.equal(result.groqRequests[0].questions.filter((question) => question.kind === 'text').length, 0);
+  assert.equal(result.groqRequests[1].questions.filter((question) => question.kind === 'text').length, 1);
+  assert.deepEqual(result.checkedLabels, ['Свой вариант']);
+  assert.equal(result.textareaValue, 'GitHub Actions');
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.response.applied, 1);
 });

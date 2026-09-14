@@ -384,7 +384,7 @@ test('[BS:COVERS:HHJA-BR-000001] background initializes defaults and registers r
   assert.ok(calls.some(([name]) => name === 'commands.onCommand'));
 });
 
-test('background safe status snapshot is read-only and excludes private automation data', async () => {
+test('background safe status snapshot is read-only, rejects out-of-range timestamps, and excludes private automation data', async () => {
   let listener = null;
   let storageSetCalls = 0;
   const moscowDate = new Intl.DateTimeFormat('en-CA', {
@@ -432,8 +432,21 @@ test('background safe status snapshot is read-only and excludes private automati
       duplicates: 1,
       conflicts: 0,
       lastEvent: 'duplicate_start',
-      updatedAt: '2026-08-07T10:03:00.000Z',
+      updatedAt: Number.MAX_VALUE,
       runId: 'must-not-leak'
+    },
+    scheduledAutoApplySession: {
+      sessionId: 'scheduled:2026-08-07:date-mismatch',
+      dateMsk: moscowDate,
+      state: 'blocked',
+      extensionVersion: '9.8.7',
+      startedAt: '2026-08-07T09:00:00.000Z',
+      updatedAt: '2026-08-07T10:04:00.000Z',
+      finishedAt: '2026-08-07T10:04:00.000Z',
+      repairAttempts: 1,
+      stopReason: 'date_mismatch',
+      reviewRequired: false,
+      reviewIssues: []
     },
     agentPrivateQuestionAudit: {
       entries: [{ vacancyId: 'private-question-vacancy', answer: 'private answer' }]
@@ -516,7 +529,7 @@ test('background safe status snapshot is read-only and excludes private automati
         duplicates: 1,
         conflicts: 0,
         lastEvent: 'duplicate_start',
-        updatedAt: '2026-08-07T10:03:00.000Z'
+        updatedAt: ''
       },
       schedule: {
         enabled: false,
@@ -529,16 +542,16 @@ test('background safe status snapshot is read-only and excludes private automati
         reviewGateBlocked: false
       },
       scheduledSession: {
-        present: false,
-        sessionId: '',
-        dateMsk: '',
-        state: 'none',
-        extensionVersion: '',
-        startedAt: '',
-        updatedAt: '',
-        finishedAt: '',
-        repairAttempts: 0,
-        stopReason: '',
+        present: true,
+        sessionId: 'scheduled:2026-08-07:date-mismatch',
+        dateMsk: moscowDate,
+        state: 'blocked',
+        extensionVersion: '9.8.7',
+        startedAt: '2026-08-07T09:00:00.000Z',
+        updatedAt: '2026-08-07T10:04:00.000Z',
+        finishedAt: '2026-08-07T10:04:00.000Z',
+        repairAttempts: 1,
+        stopReason: 'date_mismatch',
         reviewRequired: false,
         reviewPending: false,
         reviewOutcome: '',
@@ -1157,6 +1170,59 @@ test('background owns one auto-apply run and keeps direct-navigation provenance 
   }, 11);
   assert.equal(localData.autoApplyRunLease.active, false);
 
+  const beforeTerminalRecoveryCases = structuredClone(localData);
+  const staleTerminalSnapshot = {
+    ...beforeTerminalRecoveryCases,
+    autoApplyRunLease: { active: true, runId: 'stale-terminal', ownerId: 11, claimedAt: new Date().toISOString() },
+    runState: { state: 'stopped', runId: 'stale-terminal', ownerId: 11, processed: 2, applied: 1 },
+    runResults: [{ vacancyId: 'previous-result', status: 'applied' }],
+    autoApplyQueue: { active: false },
+    autoApplySearchQueue: { active: false },
+    autoApplyPendingSubmit: null,
+    autoApplyResponseAttempts: {}
+  };
+  const restoreLocalData = (snapshot) => {
+    for (const key of Object.keys(localData)) delete localData[key];
+    Object.assign(localData, structuredClone(snapshot));
+  };
+  for (const state of ['stopped', 'error', 'complete', 'dry_run_complete']) {
+    restoreLocalData(staleTerminalSnapshot);
+    localData.runState.state = state;
+    const recovery = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: `recovered-${state}` }, 11);
+    assert.equal(recovery.claimed, true, `${state}: terminal stale lease must permit restart`);
+    assert.equal(recovery.recoveredTerminalLease, true, state);
+    assert.equal(localData.autoApplyRunLease.runId, `recovered-${state}`, state);
+    assert.equal(localData.runState.state, 'scanning', state);
+    assert.deepEqual(localData.dailyApplicationLedger, staleTerminalSnapshot.dailyApplicationLedger, `${state}: preserve daily totals`);
+  }
+  const recoveryBlocks = [
+    ['active run', { runState: { ...staleTerminalSnapshot.runState, state: 'scanning' } }],
+    ['paused run', { runState: { ...staleTerminalSnapshot.runState, state: 'paused' } }],
+    ['idle run', { runState: { ...staleTerminalSnapshot.runState, state: 'idle' } }],
+    ['different run', { runState: { ...staleTerminalSnapshot.runState, runId: 'newer-run' } }],
+    ['different state owner', { runState: { ...staleTerminalSnapshot.runState, ownerId: 22 } }],
+    ['active response queue', { autoApplyQueue: { active: true, runId: 'stale-terminal', ownerId: 11 } }],
+    ['active foreign search queue', { autoApplySearchQueue: { active: true, runId: 'foreign', ownerId: 22 } }],
+    ['pending submit', { autoApplyPendingSubmit: { runId: 'stale-terminal', ownerId: 11, item: { vacancyId: 'pending' } } }],
+    ['foreign pending submit', { autoApplyPendingSubmit: { runId: 'foreign', ownerId: 22, item: { vacancyId: 'pending' } } }],
+    ['fresh response attempt', { autoApplyResponseAttempts: { attempt: { runId: 'stale-terminal', ownerId: 11, startedAt: new Date().toISOString() } } }],
+    ['foreign response attempt', { autoApplyResponseAttempts: { attempt: { runId: 'foreign', ownerId: 22, startedAt: new Date().toISOString() } } }],
+    ...['starting', 'running', 'repair_pending'].map((state) => [
+      `scheduled ${state}`,
+      { scheduledAutoApplySession: { state, runId: 'stale-terminal', ownerId: 11, sessionId: 'scheduled-checkpoint' } }
+    ]),
+    ['different sender', {}, 22],
+    ['response page', {}, 11, 'https://hh.ru/applicant/vacancy_response?vacancyId=123']
+  ];
+  for (const [label, patch, senderId = 11, url] of recoveryBlocks) {
+    restoreLocalData({ ...staleTerminalSnapshot, ...patch });
+    const beforeRejectedRecovery = structuredClone(localData);
+    const recovery = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'must-not-recover' }, senderId, url);
+    assert.equal(recovery.claimed, false, label);
+    assert.deepEqual(localData, beforeRejectedRecovery, `${label}: preserve all stored provenance`);
+  }
+  restoreLocalData(beforeTerminalRecoveryCases);
+
   const claimOrphan = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-orphan' }, 11);
   assert.equal(claimOrphan.claimed, true);
   const freshSameTabClaim = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-too-soon' }, 11);
@@ -1283,7 +1349,34 @@ test('background owns one auto-apply run and keeps direct-navigation provenance 
   await removedListener(11);
   const claimAfterClose = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-after-close' }, 22);
   assert.equal(claimAfterClose.claimed, true);
-  await removedListener(22);
+  localData.autoApplyPendingSubmit = {
+    runId: 'run-after-close',
+    ownerId: 22,
+    item: { index: 1, vacancyId: 'pending-owner-close', title: 'Pending owner close', url: 'https://hh.ru/vacancy/pending-owner-close' },
+    counters: { found: 1, processed: 1, applied: 0, alreadyApplied: 0, skipped: 0, errors: 0 },
+    status: 'applied'
+  };
+  localData.runState = {
+    ...localData.runState,
+    state: 'submitting',
+    runId: 'run-after-close',
+    ownerId: 22,
+    found: 1,
+    processed: 1,
+    applied: 0,
+    skipped: 0,
+    errors: 0
+  };
+  removedListener(22);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(localData.autoApplyRunLease.active, false);
+  assert.equal(localData.autoApplyPendingSubmit, null);
+  assert.equal(localData.runState.state, 'error');
+  assert.match(localData.runState.lastError, /вкладк.*закрыт/i);
+  assert.equal(localData.runResults.at(-1).status, 'error_pending_submit_owner_tab_closed');
+  const claimAfterPendingClose = await send({ type: 'CLAIM_AUTO_APPLY_RUN', runId: 'run-after-pending-close' }, 44);
+  assert.equal(claimAfterPendingClose.claimed, true);
+  await removedListener(44);
   const deniedResponsePageStart = await send(
     { type: 'CLAIM_AUTO_APPLY_RUN', runId: 'response-page-start' },
     33,
@@ -1537,7 +1630,7 @@ test('test assistance prompt includes resume, vacancy, question text, and expect
 
   assert.equal(response.ok, true);
   assert.equal(requestBody.model, 'openai/gpt-oss-120b');
-  assert.equal(requestBody.max_tokens, 700);
+  assert.equal(requestBody.max_tokens, 2048);
   assert.equal(requestBody.response_format.type, 'json_schema');
   assert.equal(requestBody.response_format.json_schema.strict, true);
   const userContent = requestBody.messages.find((message) => message.role === 'user').content;
@@ -1756,7 +1849,8 @@ test('[BS:COVERS:HHJA-BR-000006] generation tasks use fixed model routing and st
   await send('cover_letter');
   await send('test_assist');
 
-  assert.deepEqual(requests.map((body) => body.model), ['llama-3.1-8b-instant', 'openai/gpt-oss-120b']);
+  assert.deepEqual(requests.map((body) => body.model), ['openai/gpt-oss-20b', 'openai/gpt-oss-120b']);
+  assert.equal(requests[0].reasoning_effort, 'low');
   assert.equal(requests[0].messages[0].content, 'original cover prompt');
   assert.match(requests[0].messages.find((message) => message.role === 'user').content, /Tech Lead, команда 15 FTE/);
   assert.match(requests[1].messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n'), /original employer prompt[\s\S]*Tech Lead, команда 15 FTE/);
@@ -1828,10 +1922,10 @@ test('200 vacancies stay within request and daily token budgets with cached-toke
   }
 
   const gpt = localData.aiQuotaUsage.models['openai/gpt-oss-120b'];
-  const cover = localData.aiQuotaUsage.models['llama-3.1-8b-instant'];
+  const cover = localData.aiQuotaUsage.models['openai/gpt-oss-20b'];
   assert.ok(fetchCalls <= 200);
   assert.ok(gpt.rateTokens <= 180000);
-  assert.ok(cover.rateTokens <= 450000);
+  assert.ok(cover.rateTokens <= 180000);
   assert.equal(gpt.rateTokens, gpt.promptTokens - gpt.cachedTokens + gpt.completionTokens);
   assert.equal(cover.rateTokens, cover.promptTokens - cover.cachedTokens + cover.completionTokens);
   assert.equal(gpt.requests + cover.requests, fetchCalls);
@@ -1843,7 +1937,7 @@ test('[BS:COVERS:HHJA-BR-000009] quota manager waits only for short TPM resets a
   let listener = null;
   let fetchCalls = 0;
   const today = new Date().toISOString().slice(0, 10);
-  const coverModel = 'llama-3.1-8b-instant';
+  const coverModel = 'openai/gpt-oss-20b';
   const localData = {
     groqApiKey: 'gsk_test',
     resumeText: 'Java developer',
@@ -1856,7 +1950,7 @@ test('[BS:COVERS:HHJA-BR-000009] quota manager waits only for short TPM resets a
           rateTokens: 10,
           lastHeaders: {
             remainingTokens: 0,
-            limitTokens: 6000,
+            limitTokens: 8000,
             resetTokens: '61s',
             observedAt: new Date().toISOString()
           }
@@ -1905,7 +1999,7 @@ test('[BS:COVERS:HHJA-BR-000009] quota manager waits only for short TPM resets a
 
   localData.aiQuotaUsage.models[coverModel].lastHeaders = {
     remainingTokens: 0,
-    limitTokens: 6000,
+    limitTokens: 8000,
     resetTokens: '30ms',
     observedAt: new Date().toISOString()
   };
@@ -1917,7 +2011,7 @@ test('[BS:COVERS:HHJA-BR-000009] quota manager waits only for short TPM resets a
 
   localData.aiQuotaUsage = {
     utcDay: '2000-01-01',
-    models: { [coverModel]: { requests: 14400, rateTokens: 450000 } }
+    models: { [coverModel]: { requests: 1000, rateTokens: 180000 } }
   };
   const nextDay = await send();
   assert.equal(nextDay.ok, true);
@@ -1999,7 +2093,7 @@ test('Groq invalid structured JSON is not retried', async () => {
   assert.equal(response.ok, false);
   assert.match(response.error, /некорректный JSON/);
   assert.equal(calls, 1);
-  assert.deepEqual(maxTokensByCall, [700]);
+  assert.deepEqual(maxTokensByCall, [2048]);
   const responseLog = debugEntries(localData).find((entry) => entry.event === 'groq_response_payload');
   assert.equal(responseLog.details.attempt, 1);
   assert.equal(responseLog.details.finishReason, 'stop');
@@ -2078,12 +2172,12 @@ test('Groq empty response reports task, finish reason, attempts, and token cap',
   assert.match(response.error, /задача: ответы на вопросы работодателя/);
   assert.match(response.error, /finish_reason=length/);
   assert.match(response.error, /попытки 1\/1/);
-  assert.match(response.error, /max_tokens=700/);
+  assert.match(response.error, /max_tokens=2048/);
   assert.match(response.error, /completion_tokens=300/);
   const emptyErrorLogs = debugEntries(localData).filter((entry) => entry.event === 'groq_request_error' && entry.details.error === 'empty_response');
   assert.equal(emptyErrorLogs.length, 1);
   assert.equal(emptyErrorLogs.at(-1).details.finishReason, 'length');
-  assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 700);
+  assert.equal(emptyErrorLogs.at(-1).details.maxTokens, 2048);
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.usage.completionTokens, 300);
   assert.equal(emptyErrorLogs.at(-1).details.responseBody, undefined);
   assert.equal(emptyErrorLogs.at(-1).details.responseSummary.choices[0].finishReason, 'length');
@@ -2983,7 +3077,83 @@ test('[BS:COVERS:HHJA-BR-000014] resume profile auto refresh is single-flight an
   assert.equal(profileBuildCalls, 2);
   assert.equal(coverCalls, 3);
   assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-120b'].requests, 2);
-  assert.equal(localData.aiQuotaUsage.models['llama-3.1-8b-instant'].requests, 3);
+  assert.equal(localData.aiQuotaUsage.models['openai/gpt-oss-20b'].requests, 3);
+});
+
+test('resume access denial at a resume URL preserves cached candidate data and never calls AI', async () => {
+  let listener;
+  let providerCalls = 0;
+  let removedTabs = 0;
+  let marker = 'resume-access-denied';
+  const preserved = {
+    resumeParsedText: 'Java developer, Spring Boot, PostgreSQL',
+    resumeParsedAt: '2026-01-01T00:00:00.000Z',
+    resumeParsedUrl: 'https://hh.ru/resume/example',
+    resumeCandidateFacts: { age: 27, resumeHash: 'cached-source' },
+    resumeProfileText: 'Existing verified candidate profile',
+    resumeProfileSourceHash: 'cached-source',
+    resumeProfileCheckedAt: '2026-01-01T00:00:00.000Z',
+    resumeProfileBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeGroqBriefText: 'Existing brief',
+    resumeGroqBriefSourceHash: 'cached-source',
+    resumeGroqBriefBuiltAt: '2026-01-01T00:00:00.000Z',
+    resumeGroqBriefVersion: 'cached-version',
+    expectedSalary: '250000'
+  };
+  const localData = {
+    ...structuredClone(preserved),
+    groqApiKey: 'gsk_test',
+    resumeUrl: 'https://hh.ru/resume/example',
+    resumeProfileAutoRefreshEnabled: true,
+    resumeCacheTtlHours: 1
+  };
+  globalThis.fetch = async () => {
+    providerCalls += 1;
+    throw new Error('Access denial must not reach the AI provider');
+  };
+  globalThis.location = { pathname: '/resume/example' };
+  const gate = new FakeElement({ text: 'Войдите или зарегистрируйтесь\nРезюме могут посмотреть только работодатели — после входа в личный кабинет\nВойти\nЗарегистрироваться' });
+  globalThis.document = {
+    title: 'hh.ru/resume/example',
+    body: gate,
+    querySelector(selector) {
+      if (selector === 'main' || selector.split(',').some((part) => part.trim() === `[data-qa="${marker}"]`)) return gate;
+      return null;
+    },
+    querySelectorAll() { return []; }
+  };
+  globalThis.chrome = {
+    storage: { local: {
+      async get(keys) { return Object.fromEntries(keys.map((key) => [key, localData[key]])); },
+      async set(value) { Object.assign(localData, value); }
+    } },
+    runtime: {
+      getURL(path) { return `chrome-extension://test/${path}`; },
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener(fn) { listener = fn; } }
+    },
+    tabs: {
+      async create({ url }) { return { id: 73, url, status: 'complete' }; },
+      async get() { return { id: 73, status: 'complete' }; },
+      async remove() { removedTabs += 1; },
+      onUpdated: { addListener() {}, removeListener() {} }
+    },
+    scripting: { async executeScript({ func }) { return [{ result: await func() }]; } }
+  };
+  await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?t=${crypto.randomUUID()}`);
+  const send = (type) => new Promise((resolve) => listener({ type }, {}, resolve));
+  for (const [index, value] of ['resume-access-denied', 'resume-access-denied-signin-button', 'resume-access-denied-signup-button'].entries()) {
+    marker = value;
+    if (index > 0) gate.innerText = 'Access unavailable: sign in to continue';
+    await send('ENSURE_RESUME_PROFILE');
+    assert.deepEqual(Object.fromEntries(Object.keys(preserved).map((key) => [key, localData[key]])), preserved);
+    const built = await send('BUILD_RESUME_PROFILE');
+    assert.equal(built.ok, false);
+    assert.match(built.error, /Войдите в hh\.ru/);
+    assert.equal(providerCalls, 0);
+    assert.equal(removedTabs, (index + 1) * 2);
+  }
 });
 
 test('[BS:COVERS:HHJA-BR-000012] resume profile auto refresh does not require HH to display exact age', async () => {
@@ -3242,8 +3412,13 @@ test('Groq prompt caps large payload components', async () => {
     assert.equal(stayedAsync, true);
   });
 
-  assert.equal(response.ok, true);
-  assert.equal(requestBody.max_tokens, 700);
+  assert.equal(response.ok, true, response.error);
+  assert.ok(requestBody.max_tokens >= 700 && requestBody.max_tokens < 2048);
+  assert.equal(requestBody.reasoning_effort, 'low');
+  const inputBytes = new TextEncoder().encode(JSON.stringify({
+    messages: requestBody.messages, response_format: requestBody.response_format
+  })).length;
+  assert.ok(Math.ceil(inputBytes / 3) + requestBody.max_tokens <= 8000);
   const groqPayloadLog = debugEntries(localData).find((entry) => entry.event === 'groq_request_payload');
   assert.ok(groqPayloadLog.details.componentLengths.resumeBrief <= 6000);
   assert.ok(requestBody.messages.filter((message) => message.role === 'system').some((message) => message.content.includes(`Telegram: @${'x'.repeat(199)}`)));
@@ -3542,7 +3717,10 @@ test('repo script smoke tests Groq cover-letter output without logging secrets',
   const js = await readFile(new URL('scripts/groq-cover-smoke.mjs', root), 'utf8');
 
   assert.equal(packageJson.scripts['smoke:groq-cover'], 'node scripts/groq-cover-smoke.mjs');
-  assert.match(js, /llama-3\.3-70b-versatile/);
+  assert.match(js, /import\('\.\.\/src\/ai-providers\.js'\)/);
+  assert.match(js, /getTaskCapability\('groq', 'cover_letter'\)/);
+  assert.match(js, /\.\.\.COVER_CAPABILITY\.requestExtras/);
+  assert.doesNotMatch(js, /llama-3\.3-70b-versatile/);
   assert.match(js, /validateHumanShortCoverLetter/);
   assert.match(js, /соответствует требованиям/);
   assert.match(js, /HHJA_GROQ_PROXY/);
@@ -3639,6 +3817,7 @@ test('popup has ordered controls wired to Groq key, version, results, and action
   assert.match(js, /nodes\.continueApply\.disabled = view\.buttons\.continueDisabled/);
   assert.match(js, /async function stopRunNow\(\)/);
   assert.match(js, /chrome\.runtime\.sendMessage\(\{ type: 'STOP_RUN' \}\)/);
+  assert.match(js, /if \(!response\?\.alreadyTerminal\)[\s\S]*sendToActiveTab\('STOP_RUN'\)/);
   assert.doesNotMatch(html, /id="copyStatus"|Копировать статус/);
   assert.doesNotMatch(js, /copyStatus|lastStatusCopyText/);
   for (const removedId of ['dryRun', 'groqApiKey', 'saveGroqKey', 'testGroq', 'extensionStatus', 'tabStatus', 'agentDebugLog', 'clearAgentDebugLog', 'currentActionDetail', 'chatAssist', 'chatReportsSection', 'chatReports', 'clearReports']) {
@@ -4661,12 +4840,14 @@ async function createScheduledBackgroundHarness({
   if (existingTab) tabs.set(71, { id: 71, url: filterUrl, status: 'complete', active: false });
   const starts = [];
   const repairPauses = [];
+  const agentLogs = [];
   const createdTabs = [];
   const removedTabs = [];
   const reloadedTabs = [];
   const alarms = new Map();
   let runtimeListener = null;
   let alarmListener = null;
+  let removedListener = null;
   let nextTabId = 90;
   let manifestVersion = version;
 
@@ -4750,6 +4931,27 @@ async function createScheduledBackgroundHarness({
             scheduledSessionId: message.sessionId,
             scheduledDateMsk: message.dateMsk
           }, { tab });
+          if (startBehavior === 'claim_then_throw' && claim?.claimed) {
+            localData.autoApplySearchQueue = {
+              active: true,
+              runId,
+              ownerId: tabId,
+              scheduledSessionId: message.sessionId,
+              scheduledDateMsk: message.dateMsk,
+              sourceUrl: tab.url,
+              counters: { found: 1, processed: 0, applied: 0, skipped: 0, errors: 0 }
+            };
+            throw new Error('message_port_closed_after_claim');
+          }
+          if (startBehavior === 'claim_then_complete_throw' && claim?.claimed) {
+            await invokeRuntime({
+              type: 'SET_RUN_STATE',
+              runId,
+              ownerId: tabId,
+              patch: { state: 'complete', processed: 0, applied: 0, skipped: 0, errors: 0 }
+            }, { tab });
+            throw new Error('message_port_closed_after_completion');
+          }
           return claim?.claimed
             ? { ok: true, activeRunId: runId, ownerId: tabId }
             : { ok: false, error: claim?.reason || 'claim_failed' };
@@ -4773,7 +4975,7 @@ async function createScheduledBackgroundHarness({
         return { ok: true };
       },
       onUpdated: { addListener() {}, removeListener() {} },
-      onRemoved: { addListener() {} }
+      onRemoved: { addListener(fn) { removedListener = fn; } }
     },
     scripting: {
       async executeScript() { return [{ result: 'complete' }]; }
@@ -4782,17 +4984,28 @@ async function createScheduledBackgroundHarness({
 
   await import(`${pathToFileURL(new URL('src/background.js', root).pathname).href}?scheduler-runtime=${crypto.randomUUID()}`);
   await new Promise((resolve) => setTimeout(resolve, 0));
+  globalThis.HHJobAssistantLog = {
+    append(scope, event, details) {
+      agentLogs.push({ scope, event, details: structuredClone(details) });
+      return Promise.resolve();
+    }
+  };
   return {
     api: globalThis.HHJA_SCHEDULE_TEST_API,
     localData,
     starts,
     repairPauses,
+    agentLogs,
     tabs,
     createdTabs,
     removedTabs,
     reloadedTabs,
     alarms,
     alarmListener,
+    closeTab(tabId) {
+      tabs.delete(tabId);
+      removedListener?.(tabId);
+    },
     invokeRuntime,
     filterUrl,
     setVersion(value) { manifestVersion = value; },
@@ -4801,6 +5014,7 @@ async function createScheduledBackgroundHarness({
       delete globalThis.__HH_JOB_ASSISTANT_EXPOSE_SCHEDULE_TEST_API__;
       delete globalThis.__HH_JOB_ASSISTANT_TEST_NOW_MS__;
       delete globalThis.HHJA_SCHEDULE_TEST_API;
+      delete globalThis.HHJobAssistantLog;
     }
   };
 }
@@ -4987,6 +5201,200 @@ test('scheduled terminal transition preserves live provenance and blocks counter
   }
 });
 
+test('scheduled terminal transition accepts a complete run with a capped 200-result window', async () => {
+  const harness = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+    const session = harness.localData.scheduledAutoApplySession;
+    harness.localData.runResults = Array.from({ length: 200 }, (_, index) => ({
+      vacancyId: String(index + 2),
+      status: 'skipped_no_response_button'
+    }));
+    harness.localData.runState = {
+      state: 'applying',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      found: 201,
+      processed: 201,
+      applied: 0,
+      skipped: 201,
+      errors: 0
+    };
+
+    const response = await harness.invokeRuntime({
+      type: 'SET_RUN_STATE',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      patch: { state: 'complete', found: 201, processed: 201, applied: 0, skipped: 201, errors: 0 }
+    }, { tab: harness.tabs.get(session.ownerId) });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.terminalDeferred, undefined);
+    assert.equal(harness.localData.runResults.length, 200);
+    assert.equal(harness.localData.runState.state, 'complete');
+    assert.equal(harness.localData.runState.processed, 201);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'complete');
+    assert.equal(harness.localData.autoApplyRunLease.active, false);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('scheduled repair paths preserve processed counters beyond the retained 200-result window', async () => {
+  const retainedResults = Array.from({ length: 200 }, (_, index) => ({
+    vacancyId: String(index + 2),
+    status: 'skipped_no_response_button'
+  }));
+
+  const deferred = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await deferred.api.runScheduledAutoApply()).ok, true);
+    const session = deferred.localData.scheduledAutoApplySession;
+    deferred.localData.runResults = structuredClone(retainedResults);
+    deferred.localData.runState = {
+      state: 'applying',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      found: 201,
+      processed: 201,
+      skipped: 201
+    };
+    deferred.localData.autoApplyPendingSubmit = {
+      item: { vacancyId: 'pending' },
+      runId: session.runId,
+      ownerId: session.ownerId
+    };
+    const response = await deferred.invokeRuntime({
+      type: 'SET_RUN_STATE',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      patch: { state: 'complete', processed: 201, skipped: 201 }
+    }, { tab: deferred.tabs.get(session.ownerId) });
+    assert.equal(response.terminalDeferred, true);
+    assert.equal(deferred.localData.runState.processed, 201);
+  } finally {
+    deferred.cleanup();
+  }
+
+  const checkpoint = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await checkpoint.api.runScheduledAutoApply()).ok, true);
+    const session = checkpoint.localData.scheduledAutoApplySession;
+    checkpoint.localData.runResults = structuredClone(retainedResults);
+    checkpoint.localData.runState = {
+      state: 'applying',
+      runId: session.runId,
+      ownerId: session.ownerId,
+      found: 201,
+      processed: 201,
+      skipped: 201
+    };
+    checkpoint.localData.autoApplySearchQueue = {
+      active: true,
+      runId: session.runId,
+      ownerId: session.ownerId,
+      scheduledSessionId: session.sessionId,
+      scheduledDateMsk: session.dateMsk
+    };
+    const response = await checkpoint.api.checkpointScheduledRepair({
+      sessionId: session.sessionId,
+      runId: session.runId,
+      counters: { found: 201, processed: 201, skipped: 201 }
+    }, { tab: checkpoint.tabs.get(session.ownerId) });
+    assert.equal(response.checkpointed, true);
+    assert.equal(checkpoint.localData.runState.processed, 201);
+  } finally {
+    checkpoint.cleanup();
+  }
+
+  const blocked = await createScheduledBackgroundHarness({
+    version: '1.2.4',
+    localData: {
+      scheduledAutoApplySession: {
+        sessionId: 'scheduled:2026-08-16:retention',
+        dateMsk: '2026-08-16',
+        runId: 'retention-run',
+        ownerId: 71,
+        extensionVersion: '1.2.3',
+        repairFromVersion: '1.2.3',
+        state: 'repair_pending',
+        reviewRequired: true
+      },
+      autoApplyRunLease: {
+        active: true,
+        runId: 'retention-run',
+        ownerId: 71,
+        scheduledRepairPending: true
+      },
+      runResults: retainedResults,
+      runState: {
+        state: 'paused',
+        runId: 'retention-run',
+        ownerId: 71,
+        found: 201,
+        processed: 201,
+        skipped: 201
+      }
+    }
+  });
+  try {
+    const response = await blocked.api.reserveScheduledRepairResume();
+    assert.equal(response.reason, 'missing_checkpoint');
+    assert.equal(blocked.localData.runState.processed, 201);
+  } finally {
+    blocked.cleanup();
+  }
+});
+
+test('scheduled owner tab close terminalizes the session so review can be acknowledged', async () => {
+  const harness = await createScheduledBackgroundHarness();
+  try {
+    assert.equal((await harness.api.runScheduledAutoApply()).ok, true);
+    const session = structuredClone(harness.localData.scheduledAutoApplySession);
+    assert.equal(session.state, 'running');
+    harness.localData.autoApplyPendingSubmit = {
+      item: { vacancyId: 'pending-owner-close', title: 'Pending owner close' },
+      runId: session.runId,
+      ownerId: session.ownerId,
+      counters: { found: 1, processed: 0, applied: 0, skipped: 0, errors: 0 }
+    };
+
+    harness.closeTab(session.ownerId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(harness.localData.autoApplyRunLease.active, false);
+    assert.equal(harness.localData.runState.state, 'error');
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'error');
+    assert.equal(harness.localData.scheduledAutoApplySession.stopReason, 'owner_tab_closed');
+    assert.equal(harness.localData.scheduledAutoApplySession.reviewRequired, true);
+    assert.ok(harness.localData.scheduledAutoApplySession.finishedAt);
+    assert.equal(harness.localData.runResults.at(-1).status, 'error_pending_submit_owner_tab_closed');
+    assert.equal(
+      harness.agentLogs.find((entry) => entry.event === 'run_result')?.details?.status,
+      'error_pending_submit_owner_tab_closed'
+    );
+    assert.equal(harness.agentLogs.find((entry) => entry.event === 'run_state')?.details?.state, 'error');
+
+    const snapshot = await harness.invokeRuntime(
+      { type: 'GET_SAFE_STATUS_SNAPSHOT' },
+      { tab: { id: 99, url: 'https://hh.ru/?hhjaStatus=1' } }
+    );
+    assert.equal(snapshot.snapshot.scheduledSession.stopReason, 'owner_tab_closed');
+
+    const acknowledged = await harness.invokeRuntime({
+      type: 'ACKNOWLEDGE_SCHEDULED_SESSION_REVIEW',
+      sessionId: session.sessionId,
+      outcome: 'blocked',
+      issues: ['owner_tab_closed'],
+      authenticated: true
+    }, { tab: { id: 99, url: 'https://hh.ru/?hhjaStatus=1' } });
+    assert.equal(acknowledged.ok, true);
+    assert.equal(acknowledged.acknowledged, true);
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test('authenticated safe status can request repair pause on the owned scheduled tab', async () => {
   const harness = await createScheduledBackgroundHarness();
   try {
@@ -5088,7 +5496,7 @@ test('scheduled start creates a hidden exact-filter tab and fails closed on ever
     ['audit_not_ready', { automationSettingsAudit: { ready: false, checkedAt: '', issues: ['audit_not_ready'] } }],
     ['daily_limit_reached', { dailyApplicationLedger: { date: '2026-08-16', legacySubmitted: 200, submittedVacancyIds: [], alreadyAppliedVacancyIds: [], hhDailyLimitReached: false } }],
     ['daily_limit_reached', { dailyApplicationLedger: { date: '2026-08-16', legacySubmitted: 0, submittedVacancyIds: [], alreadyAppliedVacancyIds: [], hhDailyLimitReached: true } }],
-    ['active_run', { autoApplyRunLease: { active: true, runId: 'manual', ownerId: 99 } }],
+    ['active_run', { autoApplyRunLease: { active: true, runId: 'manual', ownerId: 71 } }],
     ['active_saved_queue', { autoApplyQueue: { active: true, runId: 'stale-response', ownerId: 99 } }],
     ['active_saved_queue', { autoApplySearchQueue: { active: true, runId: 'stale-search', ownerId: 99 } }],
     ['pending_submit', { autoApplyPendingSubmit: { item: { vacancyId: 'secret' } } }],
@@ -5127,6 +5535,158 @@ test('scheduled start creates a hidden exact-filter tab and fails closed on ever
     assert.equal(captcha.starts.length, 0);
   } finally {
     captcha.cleanup();
+  }
+});
+
+test('scheduled start preserves a claimed queued run when its response port closes', async () => {
+  const harness = await createScheduledBackgroundHarness({
+    existingTab: false,
+    startBehavior: 'claim_then_throw'
+  });
+  try {
+    const result = await harness.api.runScheduledAutoApply();
+    assert.equal(result.ok, true);
+    assert.equal(result.startAcknowledgementLost, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'running');
+    assert.equal(harness.localData.autoApplyRunLease.active, true);
+    assert.equal(harness.localData.autoApplySearchQueue.active, true);
+    assert.deepEqual(harness.removedTabs, []);
+    assert.equal(harness.tabs.has(90), true);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('scheduled start preserves durable completion when its response port closes', async () => {
+  const harness = await createScheduledBackgroundHarness({
+    existingTab: false,
+    startBehavior: 'claim_then_complete_throw'
+  });
+  try {
+    const result = await harness.api.runScheduledAutoApply();
+    assert.equal(result.ok, true);
+    assert.equal(result.startAcknowledgementLost, true);
+    assert.equal(result.completedBeforeAcknowledgement, true);
+    assert.equal(harness.localData.scheduledAutoApplySession.state, 'complete');
+    assert.equal(harness.localData.autoApplyRunLease.active, false);
+    assert.deepEqual(harness.removedTabs, []);
+    assert.equal(harness.tabs.has(90), true);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('missing scheduled owner is terminalized before reservation or manual replacement', async () => {
+  const missingOwnerState = {
+    scheduledAutoApplySession: {
+      sessionId: 'scheduled:2026-08-15:missing-owner',
+      dateMsk: '2026-08-15',
+      runId: 'orphaned-scheduled-run',
+      ownerId: 999,
+      extensionVersion: '1.2.3',
+      state: 'running',
+      reviewRequired: true,
+      reviewedAt: ''
+    },
+    autoApplyRunLease: {
+      active: true,
+      runId: 'orphaned-scheduled-run',
+      ownerId: 999,
+      scheduledSessionId: 'scheduled:2026-08-15:missing-owner'
+    },
+    autoApplySearchQueue: {
+      active: true,
+      runId: 'orphaned-scheduled-run',
+      ownerId: 999,
+      scheduledSessionId: 'scheduled:2026-08-15:missing-owner'
+    },
+    runState: {
+      state: 'applying',
+      runId: 'orphaned-scheduled-run',
+      ownerId: 999,
+      processed: 3,
+      skipped: 3
+    },
+    runResults: [
+      { vacancyId: '1', status: 'skipped_no_response_button' },
+      { vacancyId: '2', status: 'skipped_no_response_button' },
+      { vacancyId: '3', status: 'skipped_no_response_button' }
+    ]
+  };
+  const reservation = await createScheduledBackgroundHarness({ localData: missingOwnerState });
+  try {
+    const result = await reservation.api.runScheduledAutoApply();
+    assert.equal(result.reason, 'previous_review_required');
+    assert.equal(reservation.localData.autoApplyRunLease.active, false);
+    assert.equal(reservation.localData.autoApplySearchQueue.active, false);
+    assert.equal(reservation.localData.scheduledAutoApplySession.state, 'error');
+    assert.equal(reservation.localData.scheduledAutoApplySession.stopReason, 'owner_tab_closed');
+  } finally {
+    reservation.cleanup();
+  }
+
+  const replacement = await createScheduledBackgroundHarness({
+    localData: {
+      ...missingOwnerState,
+      autoApplySearchQueue: { active: false }
+    }
+  });
+  try {
+    const claim = await replacement.invokeRuntime({
+      type: 'CLAIM_AUTO_APPLY_RUN',
+      runId: 'manual-replacement'
+    }, { tab: replacement.tabs.get(71) });
+    assert.equal(claim.claimed, true);
+    assert.equal(replacement.localData.autoApplyRunLease.runId, 'manual-replacement');
+    assert.equal(replacement.localData.scheduledAutoApplySession.state, 'error');
+    assert.equal(replacement.localData.scheduledAutoApplySession.stopReason, 'owner_tab_closed');
+  } finally {
+    replacement.cleanup();
+  }
+});
+
+test('background stop is idempotent for a completed run with a capped result window', async () => {
+  const harness = await createScheduledBackgroundHarness();
+  try {
+    harness.localData.runState = {
+      state: 'complete',
+      runId: 'completed-201',
+      ownerId: 71,
+      found: 201,
+      processed: 201,
+      applied: 0,
+      skipped: 201,
+      errors: 0,
+      currentAction: 'Отклики завершены',
+      lastError: ''
+    };
+    harness.localData.runResults = Array.from({ length: 200 }, (_, index) => ({
+      vacancyId: String(index + 2),
+      status: 'skipped_no_response_button'
+    }));
+    harness.localData.autoApplyRunLease = {
+      active: false,
+      runId: 'completed-201',
+      ownerId: 71,
+      releasedState: 'complete'
+    };
+    harness.localData.autoApplyQueue = { active: false };
+    harness.localData.autoApplySearchQueue = { active: false };
+    harness.localData.autoApplyPendingSubmit = null;
+    harness.localData.autoApplyResponseAttempts = {};
+    harness.localData.autoApplyStopRequested = false;
+    harness.localData.autoApplyStopRequestedAt = '';
+    harness.localData.autoApplyStopReason = '';
+
+    const response = await harness.invokeRuntime({ type: 'STOP_RUN' });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.alreadyTerminal, true);
+    assert.equal(harness.localData.runState.state, 'complete');
+    assert.equal(harness.localData.runState.processed, 201);
+    assert.equal(harness.localData.autoApplyStopRequested, false);
+  } finally {
+    harness.cleanup();
   }
 });
 

@@ -715,6 +715,114 @@ test('inspect:logs retries then fails closed for incomplete completed LevelDB ev
   }
 });
 
+test('inspect:logs fails closed when completed runtime provenance contains malformed JSON', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-malformed-runtime-'));
+  const dbDir = join(dir, 'db');
+  await writeClassicLevelStorage(dbDir, storageFixture());
+  const { ClassicLevel } = await import('classic-level');
+  const db = new ClassicLevel(dbDir, { valueEncoding: 'utf8' });
+  await db.open();
+  try {
+    await db.put('autoApplyRunLease', '{invalid-json');
+  } finally {
+    await db.close();
+  }
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        'scripts/inspect-extension-log.mjs',
+        '--storage-dir',
+        dbDir,
+        '--json'
+      ], { cwd: new URL('.', root) }),
+      /invalid_runtime_key:autoApplyRunLease/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs fails closed when completed runtime provenance has a valid JSON primitive shape', async () => {
+  for (const key of [
+    'autoApplyRunLease',
+    'autoApplyPendingSubmit',
+    'autoApplyResponseAttempts',
+    'autoApplyQueue',
+    'autoApplySearchQueue'
+  ]) {
+    const dir = await mkdtemp(join(tmpdir(), `hhja-level-invalid-${key}-`));
+    const values = storageFixture();
+    values[key] = 'valid-json-but-not-runtime-state';
+    await writeClassicLevelStorage(join(dir, 'db'), values);
+
+    try {
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          'scripts/inspect-extension-log.mjs',
+          '--storage-dir',
+          join(dir, 'db'),
+          '--json'
+        ], { cwd: new URL('.', root) }),
+        new RegExp(`invalid_runtime_shape:${key}`),
+        key
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('inspect:logs preserves owner_tab_closed as an exact scheduled stop reason', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-owner-tab-closed-'));
+  const values = storageFixture();
+  values.scheduledAutoApplySession.stopReason = 'owner_tab_closed';
+  await writeClassicLevelStorage(join(dir, 'db'), values);
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/inspect-extension-log.mjs',
+      '--storage-dir',
+      join(dir, 'db'),
+      '--json'
+    ], { cwd: new URL('.', root) });
+    assert.equal(JSON.parse(stdout).scheduledSession.stopReason, 'owner_tab_closed');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspect:logs accepts a complete 201-item run with its capped 200-result window', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hhja-level-capped-results-'));
+  const values = storageFixture({
+    processed: 201,
+    runResults: Array.from({ length: 200 }, (_, index) => ({
+      vacancyId: String(index + 2),
+      status: 'skipped_no_response_button',
+      timestamp: '2026-07-27T10:00:02.000Z'
+    })),
+    privateEntries: []
+  });
+  await writeClassicLevelStorage(join(dir, 'db'), values);
+
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [
+      'scripts/inspect-extension-log.mjs',
+      '--storage-dir',
+      join(dir, 'db'),
+      '--json'
+    ], { cwd: new URL('.', root) });
+    const report = JSON.parse(stdout);
+    assert.equal(report.evidence.complete, true);
+    assert.equal(report.evidence.expectedResults, 201);
+    assert.equal(report.evidence.expectedRetainedResults, 200);
+    assert.equal(report.evidence.readResults, 200);
+    assert.deepEqual(report.evidence.warnings, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('inspect:logs reports truncated debug history without rejecting complete exact LevelDB evidence', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'hhja-level-truncated-debug-'));
   await writeClassicLevelStorage(join(dir, 'db'), storageFixture({

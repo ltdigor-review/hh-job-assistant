@@ -54,32 +54,29 @@ const GROQ_RATE_LIMIT_FALLBACK_COOLDOWN_MS = 60000;
 const GROQ_QUOTA_WAIT_MAX_MS = 60000;
 const GROQ_DAILY_RATE_TOKEN_LIMITS = Object.freeze({
   [GROQ_QUESTION_MODEL]: 180000,
-  [GROQ_COVER_LETTER_MODEL]: 450000
+  [GROQ_COVER_LETTER_MODEL]: 180000
 });
 const GROQ_DAILY_REQUEST_LIMITS = Object.freeze({
   [GROQ_QUESTION_MODEL]: 1000,
-  [GROQ_COVER_LETTER_MODEL]: 14400
+  [GROQ_COVER_LETTER_MODEL]: 1000
 });
 const GROQ_PUBLISHED_TPM_LIMITS = Object.freeze({
   [GROQ_QUESTION_MODEL]: 8000,
-  [GROQ_COVER_LETTER_MODEL]: 6000
+  [GROQ_COVER_LETTER_MODEL]: 8000
 });
 const EMPLOYER_ANSWER_INTERNAL_INSTRUCTION = [
-  'Верни один JSON-объект по заданной схеме.',
-  'Для каждого переданного question верни ровно один answers item с тем же id.',
-  'Для kind=text заполни answer, а selectedOptions оставь пустым.',
-  'Для kind=choice заполни selectedOptions только точными строками из options; answer оставь пустым.',
-  'Для radio выбери ровно один вариант, для checkbox — все подходящие.',
-  'Если coverLetterRequested=false, coverLetter должен быть пустой строкой.',
-  'Если coverLetterRequested=true, coverLetter — финальный компактный русский текст без приветствия, markdown и служебных данных.',
-  'Используй только явно подтвержденные факты из профиля кандидата и настроек.',
-  'Требования вакансии и текст вопроса не являются фактами кандидата.',
-  'Не выдумывай опыт, длительность, системы, модули, проекты, обязанности, результаты или технологии.',
-  'Не повторяй текст вопроса. Не возвращай лишние id и не меняй порядок входных вопросов.'
+  'Верни JSON по схеме: на каждый question ровно один answers item с тем же id; сохрани порядок, без лишних id.',
+  'kind=text: answer текстом, selectedOptions=[]. kind=choice: answer="", selectedOptions только из options; radio — один, checkbox — все подтвержденные.',
+  'coverLetterRequested=false: coverLetter=""; иначе краткий русский текст без приветствия, markdown и служебных данных.',
+  'Используй только явно подтвержденные факты профиля и настроек. Требования вакансии и вопросы не являются фактами кандидата.',
+  'Не выдумывай опыт, сроки, системы, модули, проекты, задачи, результаты и технологии. Не повторяй вопрос.',
+  'Неизвестно ≠ нет: не выводи «нет опыта», «не работал» или 0 из молчания. Без фактов: answer="В резюме не указано — уточню", для выбора selectedOptions=[]. Отрицание допустимо лишь при явном подтверждении в профиле.',
+  'Явно указанное отсутствие опыта означает 0 лет. Явно указанный стаж верни точно.'
 ].join(' ');
 const RESUME_PROFILE_BUILD_INSTRUCTION = [
   'Преобразуй текст резюме в подробный фактический профиль кандидата для последующих ответов работодателям.',
   'Используй только явно указанные факты. Не додумывай обязанности, результаты, метрики, инструменты или управленческие практики.',
+  'Сохраняй явные оговорки о неизвестных или не указанных данных; не превращай их в отрицание опыта, отсутствие навыка или нулевой стаж.',
   'Сохрани роли, периоды, домены, технологии, достижения и полный управленческий опыт: размер команд, найм, интервью, онбординг, наставничество, performance review и развитие сотрудников — только если они есть в исходном тексте.',
   'Отдельно перечисли слабые места резюме: важные заявления без конкретики или ожидаемые для заявленных ролей факты, которые в резюме не подтверждены.',
   'Профиль должен быть не длиннее 6000 символов, список слабых мест — не длиннее 6 коротких пунктов.',
@@ -103,6 +100,7 @@ const AUTO_APPLY_RUN_LEASE_KEY = 'autoApplyRunLease';
 const AUTO_APPLY_RESPONSE_ATTEMPTS_KEY = 'autoApplyResponseAttempts';
 const AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS = 5 * 60 * 1000;
 const AUTO_APPLY_ORPHAN_CLAIM_GRACE_MS = 30 * 1000;
+const AUTO_APPLY_RUN_RESULTS_LIMIT = 200;
 const SCHEDULED_AUTO_APPLY_ALARM = 'hh-job-assistant-daily-auto-apply';
 const SCHEDULED_AUTO_APPLY_SESSION_KEY = 'scheduledAutoApplySession';
 const SCHEDULED_AUTO_APPLY_LIMIT = 200;
@@ -514,8 +512,8 @@ function quotaStatusText(state) {
   const cacheHitRate = promptTokens > 0 ? Math.round((cachedTokens / promptTokens) * 100) : 0;
   return [
     `AI: ${question.requests + cover.requests} запросов`,
-    `GPT ${question.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_QUESTION_MODEL]}`,
-    `8B ${cover.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_COVER_LETTER_MODEL]}`,
+    `вопросы ${question.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_QUESTION_MODEL]}`,
+    `письма ${cover.rateTokens}/${GROQ_DAILY_RATE_TOKEN_LIMITS[GROQ_COVER_LETTER_MODEL]}`,
     `cache ${cacheHitRate}%`,
     `fallback ${fallbacks}`
   ].join(' · ');
@@ -900,6 +898,7 @@ async function claimAutoApplyRun(message, sender) {
       'runState',
       'runResults'
     ]);
+    await reconcileMissingAutoApplyOwnerLocked(stored);
     const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
     const scheduledEntry = message?.entrySource === 'scheduled';
     const scheduledSession = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
@@ -953,14 +952,33 @@ async function claimAutoApplyRun(message, sender) {
       ownedUnresolvedAttempts.every((attempt) => !isFreshTimestamp(attempt?.startedAt, AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS)) &&
       !ownedUnresolvedAttempts.some(isMatchingAttemptDestination);
     const hasOwnedSideEffectProvenance = Boolean(ownedPendingSubmit || ownedUnresolvedAttempts.length > 0);
+    const recoverableTerminalLease = lease?.active === true &&
+      leaseOwnerId === ownerId &&
+      normalizeRunId(runState.runId) === leaseRunId &&
+      normalizeRunOwnerId(runState.ownerId) === leaseOwnerId &&
+      ['stopped', 'error', 'complete', 'dry_run_complete'].includes(String(runState.state || '')) &&
+      isAutoApplySearchUrl(senderUrl) &&
+      ![stored.autoApplyQueue, stored.autoApplySearchQueue].some((queue) => queue?.active === true) &&
+      !stored.autoApplyPendingSubmit &&
+      !Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).some((attempt) => (
+        attempt && !attempt.finalizedAt && !attempt.cancelledAt
+      )) &&
+      !(
+        normalizeRunId(scheduledSession?.runId) === leaseRunId &&
+        normalizeRunOwnerId(scheduledSession?.ownerId) === leaseOwnerId &&
+        ['starting', 'running', 'repair_pending'].includes(String(scheduledSession?.state || ''))
+      );
     let recoveredOrphan = false;
     let recoveredTerminalAttempt = false;
+    let recoveredTerminalLease = false;
     if (lease?.active === true) {
       const owned = leaseRunId === requestedRunId && leaseOwnerId === ownerId;
       if (owned) {
         return { ok: true, claimed: true, owned: true, runId: requestedRunId, ownerId };
       }
-      if (recoverableStaleTerminalAttempts) {
+      if (recoverableTerminalLease) {
+        recoveredTerminalLease = true;
+      } else if (recoverableStaleTerminalAttempts) {
         recoveredTerminalAttempt = true;
       } else if (leaseOwnerId === ownerId && hasOwnedSideEffectProvenance) {
         return {
@@ -991,10 +1009,10 @@ async function claimAutoApplyRun(message, sender) {
         recoveredOrphan = true;
       }
       let ownerTabPresent = true;
-      if (!recoveredOrphan && !recoveredTerminalAttempt && chrome.tabs?.get && leaseOwnerId) {
+      if (!recoveredOrphan && !recoveredTerminalAttempt && !recoveredTerminalLease && chrome.tabs?.get && leaseOwnerId) {
         ownerTabPresent = await chrome.tabs.get(leaseOwnerId).then(() => true).catch(() => false);
       }
-      if (!recoveredOrphan && !recoveredTerminalAttempt && ownerTabPresent) {
+      if (!recoveredOrphan && !recoveredTerminalAttempt && !recoveredTerminalLease && ownerTabPresent) {
         return {
           ok: true,
           claimed: false,
@@ -1081,7 +1099,8 @@ async function claimAutoApplyRun(message, sender) {
       runId: requestedRunId,
       ownerId,
       recoveredOrphan,
-      recoveredTerminalAttempt
+      recoveredTerminalAttempt,
+      recoveredTerminalLease
     };
   });
 }
@@ -1424,7 +1443,9 @@ async function finalizeAutoApplyResponseAttempt(message, sender) {
       String(entry?.vacancyId || '') === vacancyId &&
       String(entry?.status || '') === String(result.status || '')
     ));
-    const nextResults = resultExists ? runResults : [...runResults.slice(-199), result];
+    const nextResults = resultExists
+      ? runResults
+      : [...runResults.slice(-(AUTO_APPLY_RUN_RESULTS_LIMIT - 1)), result];
     const counters = {
       found: 0,
       processed: 0,
@@ -1517,7 +1538,9 @@ async function finalizeAutoApplyPendingSubmit(message, sender) {
       message?.counters?.applied
     );
     const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
-    const nextResults = existingResult ? runResults : [...runResults.slice(-199), result];
+    const nextResults = existingResult
+      ? runResults
+      : [...runResults.slice(-(AUTO_APPLY_RUN_RESULTS_LIMIT - 1)), result];
     const counters = {
       found: 0,
       processed: 0,
@@ -1551,6 +1574,12 @@ async function finalizeAutoApplyPendingSubmit(message, sender) {
     });
     return { ok: true, finalized: true, ledger, counters, result };
   });
+}
+
+function processedCountForRetainedResults(runResults, ...candidates) {
+  const retained = Array.isArray(runResults) ? runResults.length : 0;
+  if (retained < AUTO_APPLY_RUN_RESULTS_LIMIT) return retained;
+  return Math.max(retained, ...candidates.map((value) => safeStatusCount(value)));
 }
 
 async function guardScheduledTerminalTransition(message, lease) {
@@ -1600,7 +1629,8 @@ async function guardScheduledTerminalTransition(message, lease) {
   const processed = Number.isFinite(processedNumber) && processedNumber >= 0
     ? Math.floor(processedNumber)
     : 0;
-  const counterMismatch = processed !== runResults.length;
+  const expectedRetainedResults = Math.min(processed, AUTO_APPLY_RUN_RESULTS_LIMIT);
+  const counterMismatch = expectedRetainedResults !== runResults.length;
   if (!pendingSubmit && !unresolvedAttempt && !activeQueue && !counterMismatch) {
     return { allowed: true };
   }
@@ -1632,7 +1662,11 @@ async function guardScheduledTerminalTransition(message, lease) {
       state: 'paused',
       runId,
       ownerId,
-      processed: runResults.length,
+      processed: processedCountForRetainedResults(
+        runResults,
+        stored.runState?.processed,
+        message?.patch?.processed
+      ),
       currentAction: 'Приостановлено: терминальное состояние не подтверждено',
       lastError: reason,
       updatedAt: timestamp
@@ -1772,7 +1806,9 @@ function safeStatusCount(value) {
 
 function safeStatusTimestamp(value) {
   const timestamp = typeof value === 'number' ? value : Date.parse(String(value || ''));
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
+  return Number.isFinite(timestamp) && Math.abs(timestamp) <= 8.64e15
+    ? new Date(timestamp).toISOString()
+    : '';
 }
 
 function safeStatusRunState(value) {
@@ -1911,12 +1947,14 @@ function buildSafeScheduledSession(value) {
     'missing_checkpoint',
     'max_repair_attempts',
     'repair_cutoff',
+    'date_mismatch',
     'version_not_advanced',
     'unresolved_submit',
     'unresolved_response_attempt',
     'active_saved_queue',
     'counter_result_mismatch',
-    'owner_missing'
+    'owner_missing',
+    'owner_tab_closed'
   ]);
   const stopReason = safeStopReasons.has(value.stopReason) ? value.stopReason : (value.stopReason ? 'other' : '');
   const reviewOutcome = ['passed', 'blocked'].includes(value.reviewOutcome) ? value.reviewOutcome : '';
@@ -2185,7 +2223,7 @@ async function appendRunResult(item) {
   };
   await storageSet({
     runResults: [
-      ...runResults.slice(-199),
+      ...runResults.slice(-(AUTO_APPLY_RUN_RESULTS_LIMIT - 1)),
       result
     ]
   });
@@ -2331,6 +2369,11 @@ function isAllowedTabNavigationUrl(value) {
 }
 
 function extractResumeTextScript() {
+  if (document.querySelector(
+    '[data-qa="resume-access-denied"], [data-qa="resume-access-denied-signin-button"], [data-qa="resume-access-denied-signup-button"]'
+  )) {
+    return { ok: false, error: 'Войдите в hh.ru, чтобы открыть резюме', text: '' };
+  }
   const text = (document.body?.innerText || '')
     .replace(/\u00a0/g, ' ')
     .replace(/[ \t]+/g, ' ')
@@ -3046,6 +3089,13 @@ function buildProviderRequestBody({ providerId, task, messages, attempt = 1 }) {
     ...capability.requestExtras
   };
   if (capability.responseFormat) requestBody.response_format = capability.responseFormat;
+  if (provider.id === 'groq' && task === 'test_assist') {
+    const inputTokens = estimateGroqRequestTokens({ ...requestBody, max_tokens: 0 }).likelyRateTokens;
+    const tpmLimit = GROQ_PUBLISHED_TPM_LIMITS[requestBody.model];
+    // Keep the larger output allowance within the existing request quota.
+    // Requests that cannot fit even the previous allowance still fail preflight.
+    if (tpmLimit) requestBody.max_tokens = Math.min(requestBody.max_tokens, Math.max(700, tpmLimit - inputTokens));
+  }
   return requestBody;
 }
 
@@ -3164,11 +3214,11 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
         usage: { reasoningTokens: normalizeUsage(data?.usage).reasoningTokens }
       });
     }
-    throw aiProviderError(
-      `Запрос ${provider.label} завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`,
-      'HHJA_AI_PROVIDER_HTTP',
-      true
-    );
+    const providerErrorCode = String(data?.code || data?.error?.code || '');
+    const providerHttpMessage = provider.id === 'qwen' && providerErrorCode === 'AccessDenied.Unpurchased'
+      ? 'Qwen недоступен: сервис Alibaba Cloud Model Studio не активирован для этого аккаунта. Активируйте Model Studio или выберите Groq.'
+      : `Запрос ${provider.label} завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`;
+    throw aiProviderError(providerHttpMessage, 'HHJA_AI_PROVIDER_HTTP', true);
   }
 
   const content = String(data?.choices?.[0]?.message?.content || '').trim();
@@ -3955,7 +4005,7 @@ async function recoverStalledResponseNavigation(watchdog) {
     };
     await storageSet({
       [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
-      runResults: [...(stored.runResults || []).slice(-199), result],
+      runResults: [...(stored.runResults || []).slice(-(AUTO_APPLY_RUN_RESULTS_LIMIT - 1)), result],
       autoApplyQueue: { ...queue, active: false, responseAttempt: null, recoveredFromUrl: watchdog.url, counters },
       autoApplySearchQueue: nextSearchQueue,
       runState: {
@@ -4203,8 +4253,11 @@ async function reserveScheduledAutoApplyStart() {
       'autoApplyPendingSubmit',
       AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
       'autoApplyQueue',
-      'autoApplySearchQueue'
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
     ]);
+    await reconcileMissingAutoApplyOwnerLocked(stored);
     const settings = scheduledSettings(stored);
     const nowMs = schedulerNowMs();
     const decision = getScheduleDecision(nowMs, settings);
@@ -4293,6 +4346,75 @@ async function runScheduledAutoApply() {
     });
     return { ok: true, sessionId: session.sessionId, runId: response.activeRunId || '' };
   } catch (error) {
+    const recovery = await storageGet([
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyQueue',
+      'autoApplySearchQueue'
+    ]);
+    const recoveredSession = recovery[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const recoveredLease = recovery[AUTO_APPLY_RUN_LEASE_KEY];
+    const recoveredRunId = normalizeRunId(recoveredLease?.runId);
+    const recoveredOwnerId = normalizeRunOwnerId(recoveredLease?.ownerId);
+    const matchingActiveQueue = [recovery.autoApplyQueue, recovery.autoApplySearchQueue].some((queue) => (
+      queue?.active === true &&
+      normalizeRunId(queue.runId) === recoveredRunId &&
+      normalizeRunOwnerId(queue.ownerId) === recoveredOwnerId &&
+      String(queue.scheduledSessionId || '') === String(session.sessionId || '')
+    ));
+    const claimedRunSurvived = recoveredSession?.sessionId === session.sessionId &&
+      recoveredSession.state === 'running' &&
+      recoveredLease?.active === true &&
+      recoveredRunId &&
+      recoveredOwnerId === normalizeRunOwnerId(tab?.id) &&
+      matchingActiveQueue;
+    if (claimedRunSurvived) {
+      await appendAgentLog('scheduled_auto_apply_start_ack_lost', {
+        sessionId: session.sessionId,
+        dateMsk: session.dateMsk,
+        tabId: tab.id,
+        runId: recoveredRunId,
+        error: localizeError(error)
+      });
+      return {
+        ok: true,
+        sessionId: session.sessionId,
+        runId: recoveredRunId,
+        startAcknowledgementLost: true
+      };
+    }
+    const terminalSessionSurvived = recoveredSession?.sessionId === session.sessionId &&
+      SCHEDULED_AUTO_APPLY_TERMINAL_STATES.has(recoveredSession.state) &&
+      normalizeRunOwnerId(recoveredSession.ownerId) === normalizeRunOwnerId(tab?.id) &&
+      normalizeRunId(recoveredSession.runId);
+    if (terminalSessionSurvived) {
+      const terminalRunId = normalizeRunId(recoveredSession.runId);
+      await appendAgentLog('scheduled_auto_apply_start_ack_lost', {
+        sessionId: session.sessionId,
+        dateMsk: session.dateMsk,
+        tabId: tab.id,
+        runId: terminalRunId,
+        terminalState: recoveredSession.state,
+        error: localizeError(error)
+      });
+      if (recoveredSession.state === 'complete') {
+        return {
+          ok: true,
+          sessionId: session.sessionId,
+          runId: terminalRunId,
+          startAcknowledgementLost: true,
+          completedBeforeAcknowledgement: true
+        };
+      }
+      return {
+        ok: false,
+        reason: recoveredSession.stopReason || recoveredSession.state,
+        sessionId: session.sessionId,
+        runId: terminalRunId,
+        startAcknowledgementLost: true,
+        terminalState: recoveredSession.state
+      };
+    }
     await updateScheduledSession(session.sessionId, (current) => ({
       ...current,
       state: 'error',
@@ -4470,7 +4592,11 @@ async function checkpointScheduledRepair(message, sender) {
       state: 'paused',
       runId,
       ownerId,
-      processed: runResults.length,
+      processed: processedCountForRetainedResults(
+        runResults,
+        stored.runState?.processed,
+        safeCounters.processed
+      ),
       currentAction: 'Приостановлено для исправления',
       lastError: '',
       updatedAt: timestamp
@@ -4536,7 +4662,7 @@ async function terminalizeScheduledRepairSession(stored, session, reason) {
         state: 'stopped',
         runId,
         ownerId,
-        processed: runResults.length,
+        processed: processedCountForRetainedResults(runResults, stored.runState?.processed),
         currentAction: 'Scheduled-сессия заблокирована',
         lastError: reason,
         updatedAt: timestamp
@@ -4749,6 +4875,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureDefaults();
+  await reconcileMissingAutoApplyOwner();
   await restoreResponseNavigationWatchdogAlarm();
   await recreateScheduledAutoApplyAlarm({ catchUp: true, reason: 'startup' });
   await resumeScheduledRepair();
@@ -4810,32 +4937,149 @@ chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo, tab) => {
   });
 });
 
+async function terminalizeClosedAutoApplyOwner(stored, tabId) {
+  const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+  if (lease?.active !== true || normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(tabId)) {
+    return { terminalized: false, updates: {} };
+  }
+  const closedAt = nowIso();
+  const runId = normalizeRunId(lease.runId);
+  const ownerId = normalizeRunOwnerId(tabId);
+  const belongsToClosedRun = (value) => (
+    normalizeRunId(value?.runId) === runId && normalizeRunOwnerId(value?.ownerId) === ownerId
+  );
+  const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
+    if (belongsToClosedRun(attempt) && !attempt?.finalizedAt && !attempt?.cancelledAt) {
+      return [key, { ...attempt, cancelledAt: closedAt, cancelReason: 'owner_tab_closed' }];
+    }
+    return [key, attempt];
+  }));
+  const pending = belongsToClosedRun(stored.autoApplyPendingSubmit) && stored.autoApplyPendingSubmit?.item
+    ? stored.autoApplyPendingSubmit
+    : null;
+  const runState = stored.runState || {};
+  const pendingCounters = pending?.counters || {};
+  const counters = {};
+  for (const key of ['found', 'processed', 'applied', 'alreadyApplied', 'skipped', 'errors']) {
+    counters[key] = Math.max(Number(runState[key]) || 0, Number(pendingCounters[key]) || 0);
+  }
+  if (pending) counters.errors += 1;
+  const ownerCloseError = pending
+    ? 'Вкладка запуска закрыта до подтверждения отклика.'
+    : 'Вкладка запуска закрыта.';
+  const runResults = Array.isArray(stored.runResults) ? stored.runResults : [];
+  const pendingResult = pending ? {
+    ...(pending.item || {}),
+    status: 'error_pending_submit_owner_tab_closed',
+    error: ownerCloseError,
+    timestamp: closedAt
+  } : null;
+  const resultExists = pendingResult && runResults.some((item) => (
+    String(item?.vacancyId || '') === String(pendingResult.vacancyId || '') &&
+    item?.status === pendingResult.status
+  ));
+  const nextResults = pendingResult && !resultExists
+    ? [...runResults.slice(-(AUTO_APPLY_RUN_RESULTS_LIMIT - 1)), pendingResult]
+    : runResults;
+  const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+  const scheduledOwnerClosed = session &&
+    normalizeRunId(session.runId) === runId &&
+    normalizeRunOwnerId(session.ownerId) === ownerId &&
+    !SCHEDULED_AUTO_APPLY_TERMINAL_STATES.has(session.state);
+  const reviewIssues = scheduledOwnerClosed
+    ? [...new Set([...(Array.isArray(session.reviewIssues) ? session.reviewIssues : []), 'owner_tab_closed'])].slice(0, 20)
+    : [];
+  const updates = {
+    [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
+    ...(pending ? { autoApplyPendingSubmit: null, runResults: nextResults } : {}),
+    ...(belongsToClosedRun(stored.autoApplyQueue)
+      ? { autoApplyQueue: { ...stored.autoApplyQueue, active: false } }
+      : {}),
+    ...(belongsToClosedRun(stored.autoApplySearchQueue)
+      ? { autoApplySearchQueue: { ...stored.autoApplySearchQueue, active: false } }
+      : {}),
+    runState: {
+      ...DEFAULTS.runState,
+      ...runState,
+      ...counters,
+      state: 'error',
+      runId,
+      ownerId,
+      currentAction: 'Запуск остановлен: вкладка закрыта',
+      lastError: ownerCloseError,
+      updatedAt: closedAt
+    },
+    [AUTO_APPLY_RUN_LEASE_KEY]: {
+      ...lease,
+      active: false,
+      updatedAt: closedAt,
+      releasedState: 'owner_tab_closed'
+    },
+    ...(scheduledOwnerClosed ? {
+      [SCHEDULED_AUTO_APPLY_SESSION_KEY]: {
+        ...session,
+        state: 'error',
+        stopReason: 'owner_tab_closed',
+        reviewIssues,
+        reviewRequired: true,
+        updatedAt: closedAt,
+        finishedAt: closedAt
+      }
+    } : {})
+  };
+  await storageSet(updates);
+  Object.assign(stored, updates);
+  if (pendingResult && !resultExists) {
+    await appendAgentLog('run_result', pendingResult);
+  }
+  await appendAgentLog('run_state', updates.runState);
+  await appendAgentLog('auto_apply_owner_tab_closed', {
+    runId,
+    ownerId,
+    pendingSubmitCancelled: Boolean(pending),
+    scheduledSessionTerminalized: Boolean(scheduledOwnerClosed)
+  });
+  return { terminalized: true, updates, pendingResult };
+}
+
+async function reconcileMissingAutoApplyOwnerLocked(stored) {
+  const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+  const ownerId = normalizeRunOwnerId(lease?.ownerId);
+  if (lease?.active !== true || !ownerId || !chrome.tabs?.get) return { terminalized: false };
+  const ownerPresent = await chrome.tabs.get(ownerId).then(() => true).catch(() => false);
+  if (ownerPresent) return { terminalized: false };
+  return terminalizeClosedAutoApplyOwner(stored, ownerId);
+}
+
+async function reconcileMissingAutoApplyOwner() {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    return reconcileMissingAutoApplyOwnerLocked(stored);
+  });
+}
+
 chrome.tabs?.onRemoved?.addListener?.((tabId) => {
   enqueueAutoApplyOwnership(async () => {
-    const stored = await storageGet([AUTO_APPLY_RUN_LEASE_KEY, AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]);
-    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
-    if (lease?.active !== true || normalizeRunOwnerId(lease.ownerId) !== normalizeRunOwnerId(tabId)) return;
-    const closedAt = nowIso();
-    const attempts = Object.fromEntries(Object.entries(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).map(([key, attempt]) => {
-      if (
-        normalizeRunId(attempt?.runId) === normalizeRunId(lease.runId) &&
-        normalizeRunOwnerId(attempt?.ownerId) === normalizeRunOwnerId(tabId) &&
-        !attempt?.finalizedAt &&
-        !attempt?.cancelledAt
-      ) {
-        return [key, { ...attempt, cancelledAt: closedAt, cancelReason: 'owner_tab_closed' }];
-      }
-      return [key, attempt];
-    }));
-    await storageSet({
-      [AUTO_APPLY_RESPONSE_ATTEMPTS_KEY]: attempts,
-      [AUTO_APPLY_RUN_LEASE_KEY]: {
-        ...lease,
-        active: false,
-        updatedAt: closedAt,
-        releasedState: 'owner_tab_closed'
-      }
-    });
+    const stored = await storageGet([
+      AUTO_APPLY_RUN_LEASE_KEY,
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+      SCHEDULED_AUTO_APPLY_SESSION_KEY,
+      'autoApplyPendingSubmit',
+      'autoApplyQueue',
+      'autoApplySearchQueue',
+      'runState',
+      'runResults'
+    ]);
+    await terminalizeClosedAutoApplyOwner(stored, tabId);
   }).catch((error) => {
     appendAgentLog('auto_apply_owner_tab_close_error', { tabId, error: localizeError(error) }).catch(() => {});
   });
@@ -4953,6 +5197,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'STOP_RUN': {
+        const stopSnapshot = await storageGet([
+          'runState',
+          AUTO_APPLY_RUN_LEASE_KEY,
+          AUTO_APPLY_RESPONSE_ATTEMPTS_KEY,
+          'autoApplyQueue',
+          'autoApplySearchQueue',
+          'autoApplyPendingSubmit'
+        ]);
+        const terminalState = ['complete', 'dry_run_complete', 'idle', 'stopped', 'error']
+          .includes(String(stopSnapshot.runState?.state || ''));
+        const unresolvedAttempt = Object.values(stopSnapshot[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).some((attempt) => (
+          attempt && !attempt.finalizedAt && !attempt.cancelledAt
+        ));
+        const activeRuntime = Boolean(
+          stopSnapshot[AUTO_APPLY_RUN_LEASE_KEY]?.active === true ||
+          stopSnapshot.autoApplyQueue?.active === true ||
+          stopSnapshot.autoApplySearchQueue?.active === true ||
+          stopSnapshot.autoApplyPendingSubmit?.item ||
+          unresolvedAttempt
+        );
+        if (terminalState && !activeRuntime) {
+          await appendAgentLog('stop_run_ignored_terminal', {
+            state: String(stopSnapshot.runState?.state || '')
+          });
+          sendResponse({ ok: true, alreadyTerminal: true });
+          break;
+        }
         await storageSet({
           autoApplyStopRequested: true,
           autoApplyStopRequestedAt: nowIso(),

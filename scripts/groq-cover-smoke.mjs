@@ -16,12 +16,14 @@ const STORAGE_DIR = process.env.HHJA_EXTENSION_STORAGE_DIR || join(
 );
 const SAMPLE_COUNT = Math.max(1, Math.min(Number(process.env.HHJA_GROQ_SMOKE_COUNT) || 8, 20));
 const PROXY = process.env.HHJA_GROQ_PROXY || readMacHttpsProxy();
-const MODEL = 'llama-3.3-70b-versatile';
-const MAX_TOKENS = 120;
 const TEMPERATURE = 0.2;
 
 await import('../src/defaults.js');
+await import('../src/ai-providers.js');
 const DEFAULTS = globalThis.HHJA_DEFAULTS;
+const COVER_CAPABILITY = globalThis.HHJA_AI_PROVIDERS.getTaskCapability('groq', 'cover_letter');
+const MODEL = COVER_CAPABILITY.model;
+const MAX_TOKENS = COVER_CAPABILITY.maxTokens[0];
 
 function fail(message) {
   console.error(`Groq cover smoke failed: ${message}`);
@@ -115,7 +117,8 @@ function callGroq(key) {
     model: MODEL,
     messages: buildMessages(),
     temperature: TEMPERATURE,
-    max_tokens: MAX_TOKENS
+    max_tokens: MAX_TOKENS,
+    ...COVER_CAPABILITY.requestExtras
   });
   const args = [
     '-sS',

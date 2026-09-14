@@ -94,6 +94,24 @@ function debugEntries(localData) {
   return runId ? localData[`agentDebugRun:${runId}`]?.entries || [] : [];
 }
 
+test('[BS:COVERS:HHJA-BR-000042] [BS:RETIRES:HHJA-BR-000006:BY:HHJA-BR-000042] provider registry uses currently available stable Qwen and Groq cover models', async () => {
+  delete globalThis.HHJA_AI_PROVIDERS;
+  await import(`${pathToFileURL(new URL('src/ai-providers.js', root).pathname).href}?registry-test=${crypto.randomUUID()}`);
+
+  const registry = globalThis.HHJA_AI_PROVIDERS;
+  assert.ok(registry);
+  assert.deepEqual(
+    Object.values(registry.PROVIDERS.qwen.tasks).map((task) => task.model),
+    ['qwen3.8-max', 'qwen3.8-max', 'qwen3.8-max', 'qwen3.8-max']
+  );
+  assert.equal(registry.PROVIDERS.groq.tasks.cover_letter.model, 'openai/gpt-oss-20b');
+  assert.deepEqual(
+    registry.PROVIDERS.groq.tasks.cover_letter.requestExtras,
+    { reasoning_effort: 'low' }
+  );
+  assert.deepEqual(registry.PROVIDERS.groq.tasks.cover_letter.maxTokens, [2048]);
+});
+
 test('Qwen routes structured AI requests with thinking and json_object mode', async () => {
   const resumeText = 'Java Tech Lead with confirmed Spring Boot delivery experience.';
   const requests = [];
@@ -111,7 +129,7 @@ test('Qwen routes structured AI requests with thinking and json_object mode', as
   const background = await loadBackground(localData, async (url, options) => {
     requests.push({ url, options, body: JSON.parse(options.body) });
     return jsonResponse(200, {
-      model: 'qwen3.8-max-preview',
+      model: 'qwen3.8-max',
       usage: {
         prompt_tokens: 120,
         completion_tokens: 30,
@@ -145,15 +163,15 @@ test('Qwen routes structured AI requests with thinking and json_object mode', as
     requests[0].url,
     'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions'
   );
-  assert.equal(requests[0].body.model, 'qwen3.8-max-preview');
+  assert.equal(requests[0].body.model, 'qwen3.8-max');
   assert.equal(requests[0].body.enable_thinking, true);
   assert.deepEqual(requests[0].body.response_format, { type: 'json_object' });
   assert.equal(requests[0].body.max_tokens, 8192);
   assert.equal(requests[0].options.headers.Authorization, 'Bearer sk-qwen-test');
-  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max-preview'].requests, 1);
-  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max-preview'].totalTokens, 150);
-  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max-preview'].reasoningTokens, 12);
-  assert.equal(localData.aiQuotaUsage.models['qwen3.8-max-preview'], undefined);
+  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max'].requests, 1);
+  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max'].totalTokens, 150);
+  assert.equal(localData.aiQuotaUsage.providers.qwen.models['qwen3.8-max'].reasoningTokens, 12);
+  assert.equal(localData.aiQuotaUsage.models['qwen3.8-max'], undefined);
   assert.doesNotMatch(JSON.stringify(debugEntries(localData)), /sk-qwen-test/);
 });
 
@@ -402,7 +420,7 @@ test('fallback stays off for unchecked, missing-key, and resume-validation failu
   }, async (url, options) => {
     noAgeRequests.push({ url, body: JSON.parse(options.body) });
     return jsonResponse(200, {
-      model: 'qwen3.8-max-preview',
+      model: 'qwen3.8-max',
       choices: [{
         finish_reason: 'stop',
         message: {
@@ -440,4 +458,69 @@ test('provider 429 is reported as quota or rate limiting, never an invalid key',
   assert.equal(result.ok, false);
   assert.match(result.error, /429|квот|лимит/i);
   assert.doesNotMatch(result.error, /неверн(?:ый|ого)\s+ключ/i);
+});
+
+test('Qwen unpurchased response is actionable and never exposes raw provider JSON', async () => {
+  const background = await loadBackground({
+    aiProvider: 'qwen',
+    aiProviderCredentials: { qwen: { apiKey: 'sk-sp-qwen-test' } },
+    resumeText: 'Java developer',
+    coverPrompt: 'cover prompt'
+  }, async () => jsonResponse(403, {
+    code: 'AccessDenied.Unpurchased',
+    message: 'Access to model denied. Please make sure you are eligible for using the model.',
+    request_id: 'mock-provider-request-secret'
+  }));
+
+  const result = await background.send({
+    type: 'TEST_AI_PROVIDER',
+    providerId: 'qwen'
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, 'HHJA_AI_PROVIDER_HTTP');
+  assert.match(result.error, /Model Studio.*не активирован|активируйте.*Model Studio/i);
+  assert.match(result.error, /Groq/i);
+  assert.doesNotMatch(result.error, /AccessDenied|Unpurchased|request_id|mock-provider|Access to model denied|Please make sure you are eligible|\{/i);
+});
+
+test('Groq preserves all nine questionnaire answers with a bounded reasoning budget', async () => {
+  const questions = Array.from({ length: 8 }, (_, index) => ({
+    id: `choice-${index}`,
+    kind: 'choice',
+    inputType: 'checkbox',
+    question: `Подтверждённые технологии ${index}?`,
+    options: ['Java', 'Kafka', 'Свой вариант']
+  }));
+  questions.push({ id: 'salary', kind: 'text', inputType: 'textarea', question: 'Ожидания по зарплате?', options: [] });
+  const expected = questions.map((question) => ({
+    id: question.id,
+    answer: question.kind === 'text' ? '300000 рублей' : '',
+    selectedOptions: question.kind === 'choice' ? ['Java', 'Kafka'] : []
+  }));
+  const requests = [];
+  const background = await loadBackground({
+    aiProvider: 'groq', groqApiKey: 'gsk-test',
+    resumeText: 'Synthetic Java developer with Kafka experience.',
+    resumeProfileText: 'Synthetic Java developer with Kafka experience.',
+    expectedSalary: '300000 рублей'
+  }, async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    assert.equal(body.reasoning_effort, 'low');
+    assert.equal(body.max_tokens, 2048);
+    assert.deepEqual(JSON.parse(body.messages.find((message) => message.role === 'user').content).questions, questions);
+    return jsonResponse(200, {
+      choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ answers: expected, coverLetter: '' }) } }],
+      usage: { prompt_tokens: 1100, completion_tokens: 836, total_tokens: 1936,
+        completion_tokens_details: { reasoning_tokens: 509 } }
+    });
+  });
+  const result = await background.send({
+    type: 'GENERATE_COVER_LETTER', task: 'test_assist', questions, coverLetterRequested: false
+  });
+  assert.equal(result.ok, true);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(result.answers, expected);
+  assert.equal(result.coverLetter, '');
 });
