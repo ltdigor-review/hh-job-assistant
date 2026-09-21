@@ -3255,6 +3255,11 @@ test('[BS:COVERS:HHJA-BR-000012] resume profile auto refresh does not require HH
   assert.equal(profileRequest.max_tokens, 2400);
   assert.match(profileRequest.messages[0].content, /не длиннее 6000 символов/);
 
+  const manuallyBuilt = await send({ type: 'BUILD_RESUME_PROFILE' });
+  assert.equal(manuallyBuilt.ok, true);
+  assert.match(localData.resumeProfileText, /Java\/Kotlin Tech Lead/);
+  assert.equal(localData.resumeCandidateFacts, null);
+
   delete localData.groqApiKey;
   localData.aiProvider = 'qwen';
   localData.aiProviderCredentials = { qwen: { apiKey: 'sk-qwen-test' } };

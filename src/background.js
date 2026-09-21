@@ -2787,7 +2787,7 @@ async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() }
 
 async function buildResumeProfile() {
   await assertAiEnabled();
-  const source = await getResumeContext({ forceRefresh: true, requireFacts: true });
+  const source = await getResumeContext({ forceRefresh: true });
   return buildResumeProfileFromSource(source);
 }
 
