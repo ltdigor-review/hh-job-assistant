@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { once } from 'node:events';
 import { readContentScriptSource } from './helpers/content-script-source.mjs';
+import { createSettingsUiHarness } from './helpers/settings-ui-harness.mjs';
 
 const root = new URL('../', import.meta.url);
 
@@ -435,5 +436,101 @@ test('real browser UI completes when hh daily response limit snackbar appears', 
       new Promise((resolve) => setTimeout(resolve, 2000))
     ]);
     await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('[BS:COVERS:HHJA-BR-000045] real browser popup and Settings share AI mode without losing drafts or run history', { timeout: 30000 }, async (t) => {
+  const browser = chromePath();
+  if (!browser) { t.skip('Chrome/Chromium not found'); return; }
+  const harness = await createSettingsUiHarness();
+  const userDataDir = await mkdtemp(join(tmpdir(), 'hhja-settings-ui-'));
+  const chrome = spawn(browser, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${userDataDir}`, 'about:blank'], { stdio: 'ignore' });
+  let session;
+  try {
+    const port = await waitForDevToolsPort(userDataDir);
+    const target = await cdpFetch(port, `/json/new?${encodeURIComponent(harness.url)}`, { method: 'PUT' });
+    session = await createCdpSession(target.webSocketDebuggerUrl);
+    await session.send('Runtime.enable');
+    await waitForComplete(session);
+    const evaluation = await session.send('Runtime.evaluate', {
+      expression: `(async () => {
+        const poll = async (predicate, description) => {
+          for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 30)); }
+          throw new Error('UI wait failed: ' + description);
+        };
+        const p = document.getElementById('popup').contentWindow;
+        const o = document.getElementById('options').contentWindow;
+        const pn = id => p.document.getElementById(id);
+        const on = id => o.document.getElementById(id);
+        await poll(() => pn('aiEnabled')?.checked && on('aiEnabled')?.checked && !pn('continueApply')?.disabled, 'initial saved queue');
+        const initial = { popupTitle: p.document.title, optionsTitle: o.document.title, popupText: p.document.body.innerText.length, optionsText: o.document.body.innerText.length };
+        on('fallbackCoverLetterTemplate').value = 'Несохранённое письмо: мой опыт.';
+        on('coverPrompt').value = 'Несохранённый промпт';
+        on('aiProviderApiKey').value = 'unsaved-synthetic-key';
+        on('aiProviderApiKey').dispatchEvent(new Event('input', { bubbles: true }));
+        pn('aiEnabled').click();
+        await poll(() => !on('aiEnabled').checked && !pn('aiEnabled').checked && !pn('aiEnabled').disabled, 'popup -> Settings mode');
+        const off = {
+          mode: __uiStore.aiEnabled, queue: __uiStore.hasSavedQueue, history: __uiStore.runResults,
+          continueDisabled: pn('continueApply').disabled,
+          templateDraft: on('fallbackCoverLetterTemplate').value, promptDraft: on('coverPrompt').value,
+          keyDraft: on('aiProviderApiKey').value, providerDisabled: on('aiProvider').disabled,
+          profileDisabled: on('buildResumeProfile').disabled && on('editResumeProfile').disabled,
+          templateEditable: !on('fallbackCoverLetterTemplate').disabled && !on('fallbackCoverLetterTemplate').readOnly
+        };
+        on('aiEnabled').click();
+        await poll(() => pn('aiEnabled').checked && !on('aiEnabled').disabled, 'Settings -> popup mode');
+        const onAgain = { mode: __uiStore.aiEnabled, template: on('fallbackCoverLetterTemplate').value, prompt: on('coverPrompt').value };
+        await p.chrome.storage.local.set({ runState: { state: 'applying' }, autoApplyRunLease: { active: true } });
+        await poll(() => pn('aiEnabled').disabled && on('aiEnabled').disabled, 'active run lock');
+        pn('aiEnabled').click(); on('aiEnabled').click();
+        const locked = { mode: __uiStore.aiEnabled, bothDisabled: pn('aiEnabled').disabled && on('aiEnabled').disabled };
+        await p.chrome.storage.local.set({ runState: { state: 'stopped' }, autoApplyRunLease: { active: false } });
+        await poll(() => !pn('aiEnabled').disabled && !on('aiEnabled').disabled, 'unlock');
+        on('aiEnabled').click();
+        await poll(() => !__uiStore.aiEnabled && !on('aiEnabled').disabled, 'disable before keyless run');
+        await p.chrome.storage.local.set({ aiProviderCredentials: {}, groqApiKey: '', resumeProfileText: '' });
+        await poll(() => !pn('autoApply').disabled, 'no AI start readiness');
+        const keyless = { startEnabled: !pn('autoApply').disabled, profileText: __uiStore.resumeProfileText, apiKeys: __uiStore.aiProviderCredentials };
+        on('save').click();
+        await poll(() => on('status').textContent === 'Сохранено.', 'save fixed template');
+        return { initial, off, onAgain, locked, keyless, savedTemplate: __uiStore.fallbackCoverLetterTemplate,
+          modeAfterSave: __uiStore.aiEnabled, runtimeTypes: __uiMessages.map(m => m.type), errors: __uiErrors,
+          overlays: [...p.document.querySelectorAll('vite-error-overlay, nextjs-portal'), ...o.document.querySelectorAll('vite-error-overlay, nextjs-portal')].length };
+      })()`, awaitPromise: true, returnByValue: true, timeout: 18000
+    });
+    if (evaluation.exceptionDetails) throw new Error(evaluation.exceptionDetails.exception?.description || evaluation.exceptionDetails.text);
+    const result = evaluation.result.value;
+    assert.equal(result.initial.popupTitle, 'HH Job Assistant');
+    assert.match(result.initial.optionsTitle, /HH Job Assistant/);
+    assert.ok(result.initial.popupText > 100 && result.initial.optionsText > 100);
+    assert.equal(result.off.mode, false);
+    assert.equal(result.off.queue, false);
+    assert.equal(result.off.continueDisabled, true);
+    assert.equal(result.off.history[0].title, 'История сохранена');
+    assert.equal(result.off.templateDraft, 'Несохранённое письмо: мой опыт.');
+    assert.equal(result.off.promptDraft, 'Несохранённый промпт');
+    assert.equal(result.off.keyDraft, 'unsaved-synthetic-key');
+    assert.equal(result.off.providerDisabled, true);
+    assert.equal(result.off.profileDisabled, true);
+    assert.equal(result.off.templateEditable, true);
+    assert.equal(result.onAgain.mode, true);
+    assert.equal(result.onAgain.template, result.off.templateDraft);
+    assert.equal(result.onAgain.prompt, result.off.promptDraft);
+    assert.deepEqual(result.locked, { mode: true, bothDisabled: true });
+    assert.equal(result.keyless.startEnabled, true);
+    assert.deepEqual(result.keyless.apiKeys, {});
+    assert.equal(result.keyless.profileText, '');
+    assert.equal(result.savedTemplate, result.off.templateDraft);
+    assert.equal(result.modeAfterSave, false);
+    assert.ok(!result.runtimeTypes.some(type => /GENERATE|BUILD_RESUME|EDIT_RESUME|TEST_AI/.test(type)));
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.overlays, 0);
+  } finally {
+    session?.close();
+    chrome.kill('SIGTERM');
+    await Promise.race([once(chrome, 'exit'), new Promise(resolve => setTimeout(resolve, 2000))]);
+    await rm(userDataDir, { recursive: true, force: true });
+    await harness.close();
   }
 });

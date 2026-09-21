@@ -482,14 +482,14 @@
 
       <h2>AI-провайдер</h2>
       <label class="checkbox" for="aiEnabled">
-        <input id="aiEnabled" type="checkbox">
+        <input id="aiEnabled" type="checkbox" role="switch">
         Использовать ИИ
       </label>
       <p class="hint">Если ИИ выключен, расширение вставляет шаблон в сопроводительное письмо. Вакансии с любыми вопросами работодателя пропускаются без заполнения и отправки.</p>
 
       <label for="fallbackCoverLetterTemplate">Шаблон сопроводительного письма без ИИ</label>
       <textarea id="fallbackCoverLetterTemplate" required></textarea>
-      <p class="hint">Этот текст также используется, если включённый AI-провайдер не ответил или вернул неподходящее письмо.</p>
+      <p class="hint">Используется только при выключенном ИИ. При включённом ИИ ошибка обоих провайдеров останавливает отклики без отправки.</p>
 
       <label for="aiProvider">Основной провайдер</label>
       <select id="aiProvider"></select>
@@ -534,6 +534,7 @@
     <script src="log-sanitize.js"></script>
     <script src="agent-log.js"></script>
     <script src="ai-providers.js"></script>
+    <script src="ai-mode.js"></script>
     <script src="defaults.js"></script>
     <script src="options.js"></script>
   </body>

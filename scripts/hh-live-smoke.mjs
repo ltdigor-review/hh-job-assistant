@@ -152,6 +152,7 @@ async function readContentScriptSource() {
     '../src/error-text.js',
     '../src/defaults.js',
     '../src/content-text.js',
+    '../src/ai-validation.js',
     '../src/content-dom.js',
     '../src/content-hh.js'
   ];

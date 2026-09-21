@@ -183,6 +183,23 @@
     return requestMs + Math.max(0, Number(marginMs) || 0);
   }
 
+  const QUEUE_WAIT_MAX_MS = 30000;
+  const QUOTA_WAIT_MAX_MS = 60000;
+
+  function getOperationBudgetMs(config = {}, task = 'cover_letter') {
+    const primary = normalizeProviderId(config.aiProvider);
+    const fallback = normalizeFallbackProvider(config, primary);
+    const attempts = task.startsWith('resume_profile_') ? 2 : 1;
+    return [primary, fallback].filter(Boolean).reduce((total, id) => {
+      const provider = getProvider(id);
+      return total + attempts * (QUEUE_WAIT_MAX_MS + provider.timeoutMs + (provider.quotaPolicy === 'groq' ? QUOTA_WAIT_MAX_MS : 0));
+    }, 15000);
+  }
+
+  function createOperationDeadline(config, task, now = Date.now()) {
+    return now + getOperationBudgetMs(config, task);
+  }
+
   function normalizeCredentials(value, legacyGroqApiKey = '') {
     const source = value && typeof value === 'object' ? value : {};
     const credentials = {};
@@ -220,6 +237,10 @@
     getTaskCapability,
     getTaskMaxTokens,
     getRequestChainTimeoutMs,
+    getOperationBudgetMs,
+    createOperationDeadline,
+    QUEUE_WAIT_MAX_MS,
+    QUOTA_WAIT_MAX_MS,
     normalizeProviderId,
     normalizeFallbackProvider,
     normalizeCredentials,

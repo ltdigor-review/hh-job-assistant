@@ -702,12 +702,14 @@ function waitForStopRequest({ signal } = {}) {
   });
 }
 
-function getRuntimeMessageTimeoutMs() {
+function getRuntimeMessageTimeoutMs(config = null, task = 'cover_letter') {
   const testOverride = Number(window.__HH_JOB_ASSISTANT_TEST_RUNTIME_TIMEOUT_MS__);
   if (Number.isFinite(testOverride) && testOverride > 0) {
     return testOverride;
   }
-  return RUNTIME_MESSAGE_TIMEOUT_MS;
+  return config && globalThis.HHJA_AI_PROVIDERS?.getOperationBudgetMs
+    ? globalThis.HHJA_AI_PROVIDERS.getOperationBudgetMs(config, task)
+    : RUNTIME_MESSAGE_TIMEOUT_MS;
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -3179,11 +3181,11 @@ function validateFilledQuestionFields(questionFields, answers) {
   for (const [index, field] of questionFields.entries()) {
     const expected = cleanText(answers[index] || '');
     const actual = cleanText(getFieldValue(field));
-    if (!expected || !actual) {
+    if (field.isConnected === false || !expected || !actual) {
       missing.push(index + 1);
       continue;
     }
-    if (actual !== expected && !actual.includes(expected) && !expected.includes(actual)) {
+    if (actual !== expected) {
       missing.push(index + 1);
     }
   }
@@ -3200,7 +3202,7 @@ function validateSelectedQuestionControls(descriptors, answers) {
         .filter(Boolean);
       const expectedSet = new Set(expected);
       const actualSet = new Set(actual);
-      const exactSet = expectedSet.size === actualSet.size && [...expectedSet].every((label) => actualSet.has(label));
+      const exactSet = descriptor.group.options.every(option => option.control?.isConnected !== false) && expectedSet.size === actualSet.size && [...expectedSet].every((label) => actualSet.has(label));
       const validRadio = descriptor.inputType !== 'radio' || (actual.length === 1 && expected.length === 1);
       return { index: Number(descriptor.legacyIndex || index + 1), verified: validRadio && exactSet };
     })
@@ -3351,6 +3353,9 @@ async function getConfig() {
     'expectedSalary',
     'aiEnabled',
     'aiProvider',
+    'aiFallbackProvider',
+    'aiFallbackEnabled',
+    'aiFallbackToGroq',
     'aiProviderCredentials',
     'groqApiKey',
     'resumeUrl',
@@ -3367,6 +3372,9 @@ async function getConfig() {
     expectedSalary: String(values.expectedSalary || '').trim(),
     aiEnabled: values.aiEnabled !== false,
     aiProvider: values.aiProvider,
+    aiFallbackProvider: values.aiFallbackProvider,
+    aiFallbackEnabled: values.aiFallbackEnabled,
+    aiFallbackToGroq: values.aiFallbackToGroq,
     aiProviderCredentials: values.aiProviderCredentials,
     groqApiKey: values.groqApiKey,
     resumeUrl: values.resumeUrl,
@@ -3393,46 +3401,75 @@ async function generateCoverLetter(vacancyText, options = {}) {
   if (!aiEnabled) {
     return getFallbackCoverLetter(vacancyText, fallbackTemplate);
   }
+  const timeoutMs = getRuntimeMessageTimeoutMs(await getConfig(), 'cover_letter');
   const response = await sendRuntimeMessage({
+    deadlineAt: Date.now() + timeoutMs,
     type: 'GENERATE_COVER_LETTER',
     task: 'cover_letter',
     vacancyText
   }, {
-    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMs,
     timeoutMessage: 'Запрос сопроводительного письма к AI-провайдеру не уложился во время.',
     cancelOnStop: true
   });
   if (!response?.ok) {
-    throw new Error(localizeError(response?.error, 'Не удалось сгенерировать сопроводительное письмо'));
+    throw terminalAiError(response, 'cover_letter');
   }
   const text = sanitizeGeneratedText(response.text);
   const invalidReason = getCoverLetterInvalidReason(text);
   if (invalidReason) {
-    throw new Error(`AI-провайдер вернул неподходящее сопроводительное письмо: ${invalidReason}`);
+    throw terminalAiError(new Error(`AI-провайдер вернул неподходящее сопроводительное письмо: ${invalidReason}`), 'cover_letter');
   }
   return text;
 }
 
+function terminalAiError(source, task) {
+  const error = source instanceof Error ? source : new Error(localizeError(source?.error, 'AI-провайдер не выполнил запрос'));
+  error.code = source?.errorCode || source?.code || 'HHJA_AI_FAILED';
+  error.provider = source?.provider || source?.metadata?.provider || '';
+  error.httpStatus = source?.httpStatus || source?.metadata?.httpStatus || null;
+  error.task = source?.task || source?.metadata?.task || task;
+  error.metadata = source?.metadata || error.metadata;
+  error.terminalAi = true;
+  return error;
+}
+
+function aiErrorStateFields(error) {
+  return { lastErrorCode: error?.code || '', lastErrorProvider: error?.provider || '',
+    lastErrorTask: error?.task || '', lastErrorHttpStatus: error?.httpStatus || null };
+}
+
+async function stopForTerminalError(error, counters) {
+  stopRequested = true;
+  stopReason = 'terminal_error';
+  await saveQueue({ active: false });
+  await saveSearchQueue({ active: false });
+  await setRunState({ state: 'error', ...counters, currentAction: 'Отклики остановлены из-за ошибки', lastError: localizeError(error), ...aiErrorStateFields(error) });
+}
+
 function isFatalAutoApplyError(error) {
-  return /login|captcha|anti-bot|слишком много запросов|не робот|страница входа|антибот/i.test(
+  return error?.terminalAi === true || /login|captcha|anti-bot|слишком много запросов|не робот|страница входа|антибот/i.test(
     error instanceof Error ? error.message : String(error)
   );
 }
 
-async function generateTestAssistance(vacancyText, questions, coverLetterRequested) {
+async function generateTestAssistance(vacancyText, questions, coverLetterRequested, allowStructuredCoverLetter = false) {
+  const timeoutMs = getRuntimeMessageTimeoutMs(await getConfig(), 'test_assist');
   const response = await sendRuntimeMessage({
     type: 'GENERATE_COVER_LETTER',
     task: 'test_assist',
+    deadlineAt: Date.now() + timeoutMs,
     vacancyText,
     questions,
-    coverLetterRequested
+    coverLetterRequested,
+    allowStructuredCoverLetter
   }, {
-    timeoutMs: getRuntimeMessageTimeoutMs(),
+    timeoutMs,
     timeoutMessage: 'Запрос помощи с вопросами к AI-провайдеру не уложился во время.',
     cancelOnStop: true
   });
   if (!response?.ok) {
-    throw new Error(localizeError(response?.error, 'Не удалось подготовить ответы на вопросы работодателя'));
+    throw terminalAiError(response, 'test_assist');
   }
   return response;
 }
@@ -3534,20 +3571,6 @@ async function getDeterministicStructuredAnswers(snapshot) {
   return { answers, blockedReason, blockedStatus };
 }
 
-async function buildSafeStructuredFallback(snapshot, existingAnswers = new Map()) {
-  const answers = new Map(existingAnswers);
-  const preferences = await getQuestionPreferences();
-  for (const descriptor of snapshot.choiceQuestions) {
-    if (answers.has(descriptor.id)) continue;
-    const preferred = getPreferredChoiceOptions(descriptor.group, preferences);
-    const selected = preferred.map((option) => cleanText(option.label));
-    if (selected.length > 0) {
-      answers.set(descriptor.id, { id: descriptor.id, answer: '', selectedOptions: selected });
-    }
-  }
-  return answers;
-}
-
 function parseLegacyStructuredAnswers(text, expectedDescriptors) {
   const source = String(text || '');
   if (expectedDescriptors.length === 1 && !/(?:^|\n)\s*(?:Text question|Choice group)\s+\d+\s*:/i.test(source)) {
@@ -3638,14 +3661,6 @@ function serializeStructuredAssistance(snapshot, answers) {
   return lines.join('\n');
 }
 
-async function recordLocalAiFallback(task, reason) {
-  await sendRuntimeMessage({
-    type: 'RECORD_AI_FALLBACK',
-    task,
-    reason: cleanText(reason || 'local_fallback').slice(0, 100)
-  }, { timeoutMs: 5000 }).catch(() => {});
-}
-
 async function getFallbackCoverLetter(vacancyText = '', templateOverride = '') {
   void vacancyText;
   const directTemplate = cleanText(templateOverride);
@@ -3655,45 +3670,11 @@ async function getFallbackCoverLetter(vacancyText = '', templateOverride = '') {
 }
 
 function getCoverLetterInvalidReason(value) {
-  const text = cleanText(value);
-  const genericReason = getGeneratedTextInvalidReason(text, { minLength: 20 });
-  if (genericReason) return genericReason;
-  if (text.length > 220) return 'cover_letter_too_long';
-  if (text.split(/\n+/).filter(Boolean).length > 4) return 'cover_letter_multiline_report';
-  if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'cover_letter_list';
-  const sentenceCount = text.split(/[.!?]+/).map(cleanText).filter(Boolean).length;
-  if (sentenceCount > 2) return 'cover_letter_too_many_sentences';
-  if (sentenceCount > 1 && text.length > 180) {
-    return 'cover_letter_long_template';
-  }
-  if (hasCoverLetterCliche(text)) {
-    return 'cover_letter_cliche';
-  }
-  if (hasCoverLetterProtocolLeak(text)) {
-    return 'cover_letter_protocol_leak';
-  }
-  return '';
-}
-
-function hasCoverLetterCliche(value) {
-  const text = cleanText(value);
-  return /(?:уважаем(?:ая|ые)\s+(?:команда|коллеги|работодатель)|меня\s+привлекла\s+возможность|ценятся\s+инновации|инновации\s+и\s+эффективность|масштабн(?:ыми|ые|ых)\s+проект|над[её]жн(?:ых|ые|ыми)\s+микросервисн(?:ых|ые|ыми)\s+решени|соответству(?:ет|ю)\s+требованиям|требования\s+вакансии|проявлял(?:а)?\s+интерес|готов(?:а)?\s+(?:обсудить|применять)\b|релевантн(?:ый|ого|ом)\s+опыт|ускорять\s+доставку\s+продукта|гибк(?:ий|ого)\s+формат\s+работы|открытость\s+к\s+удал[её]нному\s+сотрудничеству|быстро\s+включаться\s+в\s+новые\s+задачи|поддерживать\s+высокий\s+уровень\s+качества|буду\s+рад(?:а)?\s+стать\s+частью\s+команды|с\s+энтузиазмом\s+готов(?:а)?|динамично\s+развивающ(?:ейся|аяся)\s+команд|внести\s+вклад\s+в\s+развитие\s+компании|чем\s+могу\s+быть\s+полезен|близк(?:ий|ая|ое|ие|о|и|а)?\s+к\s+моему\s+опыту|вакансия\s+выглядит\s+близко|вижу\s+пересечение)/i.test(text);
+  return globalThis.HHJA_AI_VALIDATION.coverLetterInvalidReason(value);
 }
 
 function hasCoverLetterProtocolLeak(value) {
   return /(?:резюме кандидата|текст вакансии|структурированные вопросы|choice group|text question|ответы на вопросы работодателя)/i.test(cleanText(value));
-}
-
-async function sanitizeCoverLetterDraft(value, fallbackFactory = getFallbackCoverLetter, { allowStructuredAnswers = false } = {}) {
-  const reason = allowStructuredAnswers && isStructuredCoverLetterAnswer(value) && !hasCoverLetterProtocolLeak(value)
-    ? ''
-    : getCoverLetterInvalidReason(value);
-  if (!reason) return { text: value, fallbackUsed: false, reason: '' };
-  return {
-    text: await fallbackFactory(),
-    fallbackUsed: true,
-    reason
-  };
 }
 
 function isStructuredCoverLetterAnswer(value) {
@@ -3702,6 +3683,7 @@ function isStructuredCoverLetterAnswer(value) {
 }
 
 function selectControl(control) {
+  if (control.checked) return;
   control.focus?.();
   if (!control.checked) {
     control.click?.();
@@ -3711,13 +3693,33 @@ function selectControl(control) {
   control.dispatchEvent?.(new Event('change', { bubbles: true }));
 }
 
-function fillStructuredQuestionControls(choiceDescriptors, answers) {
+function fillStructuredQuestionControls(choiceDescriptors, answers, snapshot = null) {
   let selected = 0;
   const labels = [];
   for (const descriptor of choiceDescriptors) {
     const selectedOptions = answers.get(descriptor.id)?.selectedOptions || [];
+    const currentDescriptor = () => {
+      if (!snapshot) return descriptor;
+      if (!refreshQuestionSnapshot(snapshot)) return null;
+      return snapshot.choiceQuestions.find(item => item.id === descriptor.id);
+    };
+    if (descriptor.inputType === 'checkbox') {
+      for (const label of descriptor.options) {
+        const current = currentDescriptor();
+        if (!current) return { selected, labels };
+        const option = current.group.options.find(candidate => cleanText(candidate.label) === cleanText(label));
+        if (option?.control.checked && !selectedOptions.includes(cleanText(label))) {
+          option.control.click?.();
+          option.control.checked = false;
+          option.control.dispatchEvent?.(new Event('input', { bubbles: true }));
+          option.control.dispatchEvent?.(new Event('change', { bubbles: true }));
+        }
+      }
+    }
     for (const selectedLabel of selectedOptions) {
-      const option = descriptor.group.options.find((candidate) => cleanText(candidate.label) === cleanText(selectedLabel));
+      const current = currentDescriptor();
+      if (!current) return { selected, labels };
+      const option = current.group.options.find((candidate) => cleanText(candidate.label) === cleanText(selectedLabel));
       if (!option) continue;
       selectControl(option.control);
       selected += 1;
@@ -4199,7 +4201,7 @@ async function applyToVacancy(item, counters, config = null) {
   if (detectTest(root) || initialQuestionFields.length > 0 || initialQuestionControlGroups.length > 0) {
     const questionFields = findQuestionFields(root);
     const questionControlGroups = findQuestionControlGroups(root);
-    const coverLetterTextarea = findCoverLetterTextarea(root);
+    let coverLetterTextarea = findCoverLetterTextarea(root);
     let questionSnapshot = createQuestionSnapshot(root, questionFields, questionControlGroups);
     const questionContext = buildEmployerQuestionContext(root, questionFields, questionControlGroups);
     const vacancyText = getVacancyText(item.card) || getVacancyText(document);
@@ -4288,7 +4290,9 @@ async function applyToVacancy(item, counters, config = null) {
         );
         return;
       }
-      structuredAnswers = new Map(deterministic.answers);
+      const validIds = new Set([...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions].map(item => item.id));
+      structuredAnswers = new Map([...structuredAnswers].filter(([id]) => validIds.has(id)));
+      for (const [id, answer] of deterministic.answers) structuredAnswers.set(id, answer);
       const descriptors = [...questionSnapshot.textQuestions, ...questionSnapshot.choiceQuestions];
       const aiDescriptors = descriptors.filter((descriptor) => (
         !structuredAnswers.has(descriptor.id) && !isCopyAnswersAcknowledgementDescriptor(descriptor)
@@ -4307,7 +4311,8 @@ async function applyToVacancy(item, counters, config = null) {
           const response = await generateTestAssistance(
             vacancyText,
             aiDescriptors.map(toGroqQuestion),
-            requestCoverLetter
+            requestCoverLetter,
+            Boolean(acknowledgementContext)
           );
           const validated = validateStructuredAssistance(response, aiDescriptors, {
             coverLetterRequested: requestCoverLetter
@@ -4320,15 +4325,7 @@ async function applyToVacancy(item, counters, config = null) {
             closeDialog();
             return;
           }
-          await recordLocalAiFallback('test_assist', error?.code || localizeError(error));
-          structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
-          if (requestCoverLetter) letter = await getFallbackCoverLetter(vacancyText);
-          await appendAgentLog('question_structured_fallback', {
-            vacancyId: item.vacancyId,
-            reason: localizeError(error),
-            answers: structuredAnswers.size,
-            coverLetterRequested: requestCoverLetter
-          });
+          throw terminalAiError(error, 'test_assist');
         } finally {
           setBusyCursor(false);
         }
@@ -4345,13 +4342,7 @@ async function applyToVacancy(item, counters, config = null) {
         structuredAnswers.delete(descriptor.id);
       }
       if (invalidReason) {
-        await recordLocalAiFallback('test_assist', 'semantic_answer_rejected');
-        structuredAnswers = await buildSafeStructuredFallback(questionSnapshot, structuredAnswers);
-        await appendAgentLog('question_text_rejected_bad_answer', {
-          vacancyId: item.vacancyId,
-          error: invalidReason,
-          fields: questionSnapshot.textQuestions.length
-        });
+        throw terminalAiError(new Error(`AI-провайдер вернул неподходящий ответ: ${invalidReason}`), 'test_assist');
       }
 
       if (!refreshQuestionSnapshot(questionSnapshot)) {
@@ -4404,27 +4395,45 @@ async function applyToVacancy(item, counters, config = null) {
         await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Выбираю точные варианты работодателя' });
         setBusyCursor(true);
         try {
-          selectedChoices = fillStructuredQuestionControls(fillableChoiceDescriptors, structuredAnswers);
+          selectedChoices = fillStructuredQuestionControls(fillableChoiceDescriptors, structuredAnswers, questionSnapshot);
         } finally {
           setBusyCursor(false);
-        }
-        const missingChoiceGroupIndexes = validateSelectedQuestionControls(
-          fillableChoiceDescriptors,
-          structuredAnswers
-        );
-        if (missingChoiceGroupIndexes.length > 0) {
-          const message = `Пропущено: безопасный вариант HH не найден (${missingChoiceGroupIndexes.join(', ')}).`;
-          await skipQuestionForm('skipped_choice_fill_not_verified', message);
-          return;
         }
         await sleep(POST_FILL_SETTLE_MS);
         if (await stopIfRequested(counters)) return;
       }
 
-      if (refreshQuestionSnapshot(questionSnapshot)) break;
+      let textSchemaCurrent = refreshQuestionSnapshot(questionSnapshot);
+      if (textSchemaCurrent && questionSnapshot.textQuestions.length > 0) {
+        await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
+        setBusyCursor(true);
+        try {
+          const ids = questionSnapshot.textQuestions.map(descriptor => descriptor.id);
+          for (const id of ids) {
+            if (!refreshQuestionSnapshot(questionSnapshot)) { textSchemaCurrent = false; break; }
+            const descriptor = questionSnapshot.textQuestions.find(item => item.id === id);
+            const answer = structuredAnswers.get(id)?.answer || '';
+            if (cleanText(getFieldValue(descriptor.field)) !== cleanText(answer)) {
+              descriptor.field.focus?.();
+              setNativeValue(descriptor.field, answer);
+            }
+          }
+        } finally { setBusyCursor(false); }
+        await sleep(POST_FILL_SETTLE_MS);
+        if (await stopIfRequested(counters)) return;
+      }
+      const schemaCurrent = textSchemaCurrent && refreshQuestionSnapshot(questionSnapshot);
+      const textCurrent = schemaCurrent && validateFilledQuestionFields(
+        questionSnapshot.textQuestions.map(descriptor => descriptor.field),
+        questionSnapshot.textQuestions.map(descriptor => structuredAnswers.get(descriptor.id)?.answer || '')
+      ).length === 0;
+      const choicesCurrent = schemaCurrent && validateSelectedQuestionControls(
+        questionSnapshot.choiceQuestions.filter(descriptor => !isCopyAnswersAcknowledgementDescriptor(descriptor)), structuredAnswers
+      ).length === 0;
+      if (textCurrent && choicesCurrent) break;
       resnapshotCount += 1;
       if (resnapshotCount > MAX_QUESTION_FORM_RESNAPSHOTS) {
-        await skipQuestionForm('skipped_question_form_changed', 'Пропущено: форма HH слишком часто менялась во время заполнения.');
+        await skipQuestionForm(schemaCurrent ? (!textCurrent ? 'skipped_text_fill_not_verified' : 'skipped_choice_fill_not_verified') : 'skipped_question_form_changed', 'Пропущено: форма HH не сохранила точные ответы после заполнения.');
         return;
       }
       questionSnapshot = createQuestionSnapshot(
@@ -4455,32 +4464,6 @@ async function applyToVacancy(item, counters, config = null) {
       }
     }
 
-    const textAnswers = questionSnapshot.textQuestions.map((descriptor) => structuredAnswers.get(descriptor.id)?.answer || '');
-    if (textAnswers.some((answer) => !answer)) {
-      await skipQuestionForm('skipped_bad_generated_answer', 'Пропущено: для одного из полей HH нет безопасного ответа.');
-      return;
-    }
-    if (questionSnapshot.textQuestions.length > 0) {
-      await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю вопросы работодателя' });
-      setBusyCursor(true);
-      try {
-        questionSnapshot.textQuestions.forEach((descriptor, index) => {
-          descriptor.field.focus?.();
-          setNativeValue(descriptor.field, textAnswers[index]);
-        });
-      } finally {
-        setBusyCursor(false);
-      }
-      await sleep(POST_FILL_SETTLE_MS);
-      const currentQuestionFields = questionSnapshot.textQuestions.map((descriptor) => descriptor.field);
-      const missingTextFields = validateFilledQuestionFields(currentQuestionFields, textAnswers);
-      if (missingTextFields.length > 0) {
-        const message = `Пропущено: ответы HH не записались в поля (${missingTextFields.join(', ')}).`;
-        await skipQuestionForm('skipped_text_fill_not_verified', message);
-        return;
-      }
-    }
-
     const assistance = serializeStructuredAssistance(questionSnapshot, structuredAnswers);
     await appendAgentLog('question_test_answers_applied', {
       vacancyId: item.vacancyId,
@@ -4493,21 +4476,9 @@ async function applyToVacancy(item, counters, config = null) {
       )
     });
     if (coverLetterRequested) {
-      const fallbackContext = [vacancyText, questionContext, assistance, letter].map(cleanText).filter(Boolean).join('\n');
-      const sanitizedLetter = await sanitizeCoverLetterDraft(
-        letter,
-        () => getFallbackCoverLetter(fallbackContext),
-        { allowStructuredAnswers: Boolean(acknowledgementContext) }
-      );
-      if (sanitizedLetter.fallbackUsed) {
-        await recordLocalAiFallback('test_assist', sanitizedLetter.reason || 'invalid_cover_letter');
-        await appendAgentLog('mandatory_cover_letter_fallback_after_bad_text', {
-          vacancyId: item.vacancyId,
-          reason: sanitizedLetter.reason,
-          rejectedTextLength: cleanText(letter).length
-        });
-        letter = sanitizedLetter.text;
-      }
+      const invalidLetterReason = acknowledgementContext && isStructuredCoverLetterAnswer(letter) && !hasCoverLetterProtocolLeak(letter)
+        ? '' : getCoverLetterInvalidReason(letter);
+      if (invalidLetterReason) throw terminalAiError(new Error(`AI-провайдер вернул неподходящее письмо: ${invalidLetterReason}`), 'test_assist');
       if (acknowledgementContext) {
         const acknowledgementError = getAcknowledgementVerificationError(letter, acknowledgementContext);
         if (acknowledgementError) {
@@ -4518,6 +4489,12 @@ async function applyToVacancy(item, counters, config = null) {
 
       await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю обязательное сопроводительное письмо' });
       setBusyCursor(true);
+      coverLetterTextarea = findCoverLetterTextarea(root);
+      if (!coverLetterTextarea || coverLetterTextarea.isConnected === false) {
+        setBusyCursor(false);
+        await skipQuestionForm('skipped_cover_letter_fill_not_verified', 'Пропущено: поле письма изменилось.');
+        return;
+      }
       setNativeValue(coverLetterTextarea, letter);
       setBusyCursor(false);
       if (!cleanText(getFieldValue(coverLetterTextarea))) {
@@ -4554,7 +4531,7 @@ async function applyToVacancy(item, counters, config = null) {
           selectedOptions: [cleanText(option.label)]
         });
       }
-      const acknowledgementSelections = fillStructuredQuestionControls(acknowledgementDescriptors, structuredAnswers);
+      const acknowledgementSelections = fillStructuredQuestionControls(acknowledgementDescriptors, structuredAnswers, questionSnapshot);
       selectedChoices.selected += acknowledgementSelections.selected;
       selectedChoices.labels.push(...acknowledgementSelections.labels);
       await sleep(POST_FILL_SETTLE_MS);
@@ -4577,6 +4554,13 @@ async function applyToVacancy(item, counters, config = null) {
         );
         return;
       }
+    }
+    if (!refreshQuestionSnapshot(questionSnapshot) || validateFilledQuestionFields(
+      questionSnapshot.textQuestions.map(descriptor => descriptor.field),
+      questionSnapshot.textQuestions.map(descriptor => structuredAnswers.get(descriptor.id)?.answer || '')
+    ).length > 0) {
+      await skipQuestionForm('skipped_text_fill_not_verified', 'Пропущено: текущие поля формы изменились после заполнения.');
+      return;
     }
     const finalChoiceMismatches = validateSelectedQuestionControls(
       questionSnapshot.choiceQuestions,
@@ -4619,6 +4603,17 @@ async function applyToVacancy(item, counters, config = null) {
     if (await stopBeforeSubmitIfRequested(counters)) {
       return;
     }
+    coverLetterTextarea = findCoverLetterTextarea(root);
+    if (coverLetterRequested && (!coverLetterTextarea || coverLetterTextarea.isConnected === false || cleanText(getFieldValue(coverLetterTextarea)) !== cleanText(letter))) {
+      await skipQuestionForm('skipped_cover_letter_fill_not_verified', 'Пропущено: письмо не сохранилось в текущей форме.');
+      return;
+    }
+    if (!refreshQuestionSnapshot(questionSnapshot) ||
+      validateFilledQuestionFields(questionSnapshot.textQuestions.map(d => d.field), questionSnapshot.textQuestions.map(d => structuredAnswers.get(d.id)?.answer || '')).length ||
+      validateSelectedQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers).length) {
+      await skipQuestionForm('skipped_text_fill_not_verified', 'Пропущено: текущие ответы HH не подтверждены перед отправкой.');
+      return;
+    }
     const beforeSubmitText = textOf(document.body);
     await savePendingSubmit({
       item,
@@ -4630,7 +4625,21 @@ async function applyToVacancy(item, counters, config = null) {
     if (await stopBeforeSubmitIfRequested(counters)) {
       return;
     }
-    clickWithActionCursor(submitButton);
+    if (!refreshQuestionSnapshot(questionSnapshot) ||
+      validateFilledQuestionFields(questionSnapshot.textQuestions.map(d => d.field), questionSnapshot.textQuestions.map(d => structuredAnswers.get(d.id)?.answer || '')).length ||
+      validateSelectedQuestionControls(questionSnapshot.choiceQuestions, structuredAnswers).length ||
+      (coverLetterRequested && cleanText(getFieldValue(findCoverLetterTextarea(root))) !== cleanText(letter))) {
+      await clearPendingSubmit();
+      await skipQuestionForm('skipped_text_fill_not_verified', 'Пропущено: форма изменилась перед отправкой.');
+      return;
+    }
+    const currentSubmitButton = findSubmitButton(root);
+    if (!currentSubmitButton || currentSubmitButton.isConnected === false) {
+      await clearPendingSubmit();
+      await skipQuestionForm('skipped_submit_not_found', 'Пропущено: кнопка отправки изменилась.');
+      return;
+    }
+    clickWithActionCursor(currentSubmitButton);
     await sleep(POST_SUBMIT_SETTLE_MS);
     if (await stopIfRequested(counters)) return;
     await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -4663,7 +4672,8 @@ async function applyToVacancy(item, counters, config = null) {
   }
 
   let coverLetterUsed = false;
-  const textarea = findTextarea(root);
+  let textarea = findTextarea(root);
+  let expectedCoverLetter = null;
 
   if (root === document && !isResponseFormPage() && !hasSubmitControl(document) && !textarea) {
     if (location.href === beforeUrl && isHhSearchPageUrl(location.href)) {
@@ -4696,8 +4706,7 @@ async function applyToVacancy(item, counters, config = null) {
         closeDialog();
         return;
       }
-      await recordLocalAiFallback('cover_letter', error?.code || localizeError(error));
-      letter = await getFallbackCoverLetter(vacancyText);
+      throw terminalAiError(error, 'cover_letter');
     } finally {
       setBusyCursor(false);
     }
@@ -4706,8 +4715,15 @@ async function applyToVacancy(item, counters, config = null) {
 
     await setRunState({ state: 'filling_cover_letter', ...counters, currentAction: 'Заполняю сопроводительное письмо' });
     setBusyCursor(true);
+    textarea = findTextarea(root);
+    if (!textarea || textarea.isConnected === false) {
+      setBusyCursor(false);
+      await appendSkippedResponse(item, counters, 'skipped_cover_letter_fill_not_verified', 'Пропущено: поле письма изменилось.');
+      return;
+    }
     textarea.focus?.();
     setNativeValue(textarea, letter);
+    expectedCoverLetter = letter;
     setBusyCursor(false);
     coverLetterUsed = true;
     await sleep(500);
@@ -4744,6 +4760,13 @@ async function applyToVacancy(item, counters, config = null) {
   if (await stopBeforeSubmitIfRequested(counters)) {
     return;
   }
+  if (expectedCoverLetter !== null) {
+    const current = findTextarea(root);
+    if (!current || current.isConnected === false || cleanText(getFieldValue(current)) !== cleanText(expectedCoverLetter)) {
+      await appendSkippedResponse(item, counters, 'skipped_cover_letter_fill_not_verified', 'Пропущено: письмо не сохранилось в текущей форме.');
+      return;
+    }
+  }
   const beforeSubmitText = textOf(document.body);
   await savePendingSubmit({
     item,
@@ -4755,7 +4778,15 @@ async function applyToVacancy(item, counters, config = null) {
   if (await stopBeforeSubmitIfRequested(counters)) {
     return;
   }
-  clickWithActionCursor(submitButton);
+  const currentLetterField = expectedCoverLetter !== null ? findTextarea(root) : null;
+  const currentSubmitButton = findSubmitButton(root);
+  if (!currentSubmitButton || currentSubmitButton.isConnected === false || (expectedCoverLetter !== null &&
+    (!currentLetterField || currentLetterField.isConnected === false || cleanText(getFieldValue(currentLetterField)) !== cleanText(expectedCoverLetter)))) {
+    await clearPendingSubmit();
+    await appendSkippedResponse(item, counters, 'skipped_cover_letter_fill_not_verified', 'Пропущено: текущая форма изменилась перед отправкой.');
+    return;
+  }
+  clickWithActionCursor(currentSubmitButton);
   await sleep(POST_SUBMIT_SETTLE_MS);
   if (await stopIfRequested(counters)) return;
   await confirmFollowupIfNeeded(beforeSubmitText, counters);
@@ -4872,6 +4903,15 @@ async function authorizeScheduledQueueContinuation(queue) {
   return response?.ok === true && response?.authorized === true;
 }
 
+async function assertQueueAiMode(queue) {
+  const config = await getConfig();
+  if (queue?.config && (queue.config.aiEnabled !== false) !== config.aiEnabled) {
+    const error = new Error('Режим ИИ изменён. Начните новый запуск вместо продолжения сохранённой очереди.');
+    error.code = 'HHJA_AI_MODE_CHANGED';
+    throw error;
+  }
+}
+
 async function getAutoApplyQueueStatus() {
   const { autoApplyQueue, autoApplySearchQueue } = await storageGet(['autoApplyQueue', 'autoApplySearchQueue'], { optional: true });
   const hasResponseQueue = autoApplyQueue?.active === true && Array.isArray(autoApplyQueue.items);
@@ -4981,6 +5021,7 @@ async function continueQueuedAutoApply() {
   if (!autoApplyQueue?.active || !Array.isArray(autoApplyQueue.items)) {
     return false;
   }
+  await assertQueueAiMode(autoApplyQueue);
   if (!await authorizeScheduledQueueContinuation(autoApplyQueue)) {
     await appendAgentLog('scheduled_queue_continuation_denied', {
       kind: 'response',
@@ -5002,6 +5043,13 @@ async function continueQueuedAutoApply() {
     }).catch(() => null);
     if (resumed?.ok !== true || resumed?.resumed !== true || resumed?.owned !== true) return true;
     activeRunOwnerId = Number(resumed.ownerId) || activeRunOwnerId;
+  }
+  try {
+    await assertQueueAiMode(autoApplyQueue);
+    globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
+  } catch (error) {
+    await stopForTerminalError(error, autoApplyQueue.counters || {});
+    return true;
   }
   await claimStopBeforeSubmitForRun(activeRunId);
   if (stopRequested) {
@@ -5110,8 +5158,7 @@ async function continueQueuedAutoApply() {
       error: message
     });
     if (isFatalAutoApplyError(error)) {
-      await saveQueue({ ...queue, active: false, counters });
-      await setRunState({ state: 'error', ...counters, lastError: message });
+      await stopForTerminalError(error, counters);
       return true;
     }
   }
@@ -5345,11 +5392,11 @@ async function handleAutoApply(limit, existingCounters = null, existingProcessed
         testDetected: item.testDetected,
         error: message
       });
-      await setRunState({ state: isFatalAutoApplyError(error) ? 'error' : 'applying', ...counters, lastError: message });
       if (isFatalAutoApplyError(error)) {
-        stopRequested = true;
-        break;
+        await stopForTerminalError(error, counters);
+        return { ok: error?.terminalAi !== true, ...counters, error: message, errorCode: error.code, provider: error.provider, task: error.task, httpStatus: error.httpStatus };
       }
+      await setRunState({ state: 'applying', ...counters, lastError: message });
       closeDialog();
     }
 
@@ -5446,6 +5493,7 @@ async function continueSearchAutoApply() {
   if (!autoApplySearchQueue?.active) {
     return false;
   }
+  await assertQueueAiMode(autoApplySearchQueue);
   if (!await authorizeScheduledQueueContinuation(autoApplySearchQueue)) {
     await appendAgentLog('scheduled_queue_continuation_denied', {
       kind: 'search',
@@ -5464,7 +5512,13 @@ async function continueSearchAutoApply() {
     if (resumed?.ok !== true || resumed?.resumed !== true || resumed?.owned !== true) return true;
     activeRunOwnerId = Number(resumed.ownerId) || activeRunOwnerId;
   }
-  globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
+  try {
+    await assertQueueAiMode(autoApplySearchQueue);
+    globalThis.HHJA_CONFIG_READINESS.assertReady(await getConfig());
+  } catch (error) {
+    await stopForTerminalError(error, autoApplySearchQueue.counters || {});
+    return true;
+  }
   if (['complete', 'dry_run_complete', 'stopped', 'idle', 'error'].includes(runState?.state)) {
     await saveSearchQueue({ active: false });
     await clearStopBeforeSubmitForRun(activeRunId, 'stale_search_queue');
@@ -5542,11 +5596,12 @@ function throwAutomationAuditNotReady(response) {
 
 async function ensureLiveAutomationSettings(config) {
   if (config.aiEnabled) {
+    const timeoutMs = getRuntimeMessageTimeoutMs(config, 'resume_profile_build');
     const profile = await sendRuntimeMessage(
-      { type: 'ENSURE_RESUME_PROFILE' },
-      { timeoutMs: getRuntimeMessageTimeoutMs() }
+      { type: 'ENSURE_RESUME_PROFILE', deadlineAt: Date.now() + timeoutMs },
+      { timeoutMs }
     );
-    if (profile?.ok !== true) throwAutomationAuditNotReady(null);
+    if (profile?.ok !== true) throw terminalAiError(profile, 'resume_profile_build');
   }
   const response = await sendRuntimeMessage(
     { type: 'GET_AUTOMATION_SETTINGS_AUDIT' },
@@ -5561,7 +5616,7 @@ async function ensureLiveAutomationSettings(config) {
 async function startRun(mode, limitOverride = null, options = {}) {
   const storedConfig = await getConfig();
   const scheduledEntry = options.entrySource === 'scheduled';
-  const config = scheduledEntry ? {
+  let config = scheduledEntry ? {
     ...storedConfig,
     delayMinMs: Math.max(3000, Math.min(Number(options.delayMinMs) || 3000, 5000)),
     delayMaxMs: Math.max(3000, Math.min(Number(options.delayMaxMs) || 5000, 5000))
@@ -5612,6 +5667,15 @@ async function startRun(mode, limitOverride = null, options = {}) {
   }
   activeRunId = ownership?.runId || requestedRunId;
   activeRunOwnerId = Number(ownership?.ownerId) || 0;
+  try {
+    const currentConfig = await getConfig();
+    config = scheduledEntry ? { ...currentConfig, delayMinMs: config.delayMinMs, delayMaxMs: config.delayMaxMs } : currentConfig;
+    if (config.delayMaxMs < config.delayMinMs) config.delayMaxMs = config.delayMinMs;
+    globalThis.HHJA_CONFIG_READINESS.assertReady(config);
+  } catch (error) {
+    await stopForTerminalError(error, { ...initialCounters, errors: initialCounters.errors + 1 });
+    throw error;
+  }
   await clearStopRequestedFlag();
   await globalThis.HHJobAssistantLog?.reset?.('content', 'auto_apply_started', {
     mode,
@@ -5666,7 +5730,8 @@ async function startRun(mode, limitOverride = null, options = {}) {
         ...initialCounters,
         errors: initialCounters.errors + 1,
         currentAction: 'Запуск откликов заблокирован',
-        lastError: localizeError(error)
+        lastError: localizeError(error),
+        ...aiErrorStateFields(error)
       });
     }
     throw error;
@@ -6037,7 +6102,7 @@ async function maybeStartFromUrlParam() {
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('url_trigger_error', { mode, error: messageText, url: location.href });
-    await setRunState({ state: 'error', lastError: messageText });
+    await setRunState({ state: 'error', lastError: messageText, ...aiErrorStateFields(error) });
   }
   return true;
 }
@@ -6128,8 +6193,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     await appendAgentLog('content_message_error', { type: message?.type || '', error: messageText, url: location.href });
-    await setRunState({ state: 'error', lastError: messageText });
-    sendResponse({ ok: false, error: messageText });
+    await setRunState({ state: 'error', lastError: messageText, ...aiErrorStateFields(error) });
+    sendResponse({ ok: false, error: messageText, errorCode: error?.code, provider: error?.provider, task: error?.task, httpStatus: error?.httpStatus, metadata: error?.metadata });
   });
 
   return true;
@@ -6147,7 +6212,7 @@ globalThis.window?.addEventListener?.('hh-job-assistant:start-auto-apply', async
   } catch (error) {
     const messageText = localizeError(error);
     await appendAgentLog('page_trigger_error', { event: 'start-auto-apply', error: messageText, url: location.href });
-    await setRunState({ state: 'error', lastError: messageText });
+    await setRunState({ state: 'error', lastError: messageText, ...aiErrorStateFields(error) });
   }
 });
 
@@ -6192,5 +6257,5 @@ initializeContentScript().catch(async (error) => {
   if (activeRunId && activeRunOwnerId) {
     await writeOwnedAutoApplyState({ autoApplyQueue: { active: false }, autoApplySearchQueue: { active: false } }).catch(() => {});
   }
-  await setRunState({ state: 'error', lastError: messageText });
+  await setRunState({ state: 'error', lastError: messageText, ...aiErrorStateFields(error) });
 });

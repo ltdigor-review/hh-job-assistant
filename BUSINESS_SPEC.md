@@ -841,3 +841,111 @@ This file is the canonical business-level source of truth for the extension. Pro
 }
 ```
 <!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000043",
+  "scope": "ai-failure-safety",
+  "requirement": "Enabled AI MUST stop the entire auto-apply run without submission after eligible provider fallback is exhausted or generated output is unsafe.",
+  "acceptance": [
+    "Generated cover letters remain final Russian compact text, at most 220 characters and two sentences, with no protocol, prompt/context leakage, refusals, or configured clichés.",
+    "Only explicit no-AI mode uses the saved local cover template; enabled-AI errors never substitute local answers or template letters.",
+    "Provider and profile failures retain typed cause and HTTP status; both queues stop and late results cannot cause submission or a move to the next vacancy.",
+    "HH daily response limits clear queues and pending submission without counting a new application; authentication, CAPTCHA, anti-bot and excessive-request states remain fatal.",
+    "Blocked dialogs and unsupported vacancy-specific forms may still be skipped; supported HH country warnings remain handled before continuing."
+  ],
+  "supersedes": [
+    "HHJA-BR-000027",
+    "HHJA-BR-000035"
+  ],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000044",
+  "scope": "ai-routing",
+  "requirement": "A provider diagnostic MUST verify cover and structured task capabilities using synthetic inputs and only the selected provider and draft credential.",
+  "acceptance": [
+    "Groq checks GPT-OSS 20B cover output and GPT-OSS 120B structured profile and employer-answer output; Qwen checks its declared capabilities.",
+    "Partial model or task failure is reported as such, not as general provider readiness.",
+    "An explicitly empty credential does not reuse the saved key; testing does not save a draft or invoke provider fallback.",
+    "Provider diagnostics do not read or transmit the user resume."
+  ],
+  "supersedes": [
+    "HHJA-BR-000007"
+  ],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000045",
+  "scope": "settings-ui",
+  "requirement": "Popup and Settings MUST share an immediately persisted Use AI switch and prevent mode changes during active runs.",
+  "acceptance": [
+    "The switch uses existing aiEnabled storage, preserves keys, provider selections and custom text, and synchronizes between open views without erasing unrelated drafts.",
+    "An active run or run lease rejects a mode change; terminal or idle state permits it.",
+    "A changed mode invalidates resumable queues of the old mode, preserves result history, and requires a new start.",
+    "No-AI mode uses the saved cover text without AI requests or profile/key requirements and skips all employer questionnaires.",
+    "Existing default enabled state is preserved for new installations."
+  ],
+  "supersedes": [],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000046",
+  "scope": "ai-runtime",
+  "requirement": "Provider operations MUST enforce a bounded full-response and queue deadline, route quota failures through configured fallback, and preserve trustworthy diagnostics.",
+  "acceptance": [
+    "Timeouts cover response headers and body; body read failures remain typed and release queued work.",
+    "Background and content derive task deadlines from selected providers, attempts and permitted quota waits; expired queued work cannot issue late requests.",
+    "Local Groq quota failures are eligible for the configured credentialed alternate provider, with no fallback when disabled.",
+    "Failed HTTP responses without usage do not incur estimated generated tokens; rate-limit headers and cooldown remain observed.",
+    "Provider, task, HTTP status and typed error code survive sanitized diagnostics without keys or private request/response text."
+  ],
+  "supersedes": [],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000047",
+  "scope": "employer-questions",
+  "requirement": "Question autofill MUST reconcile exact checkbox selections and validate connected current form fields after rerenders before submission.",
+  "acceptance": [
+    "Undesired preselected checkboxes are cleared and desired selections remain checked.",
+    "Equivalent rerenders rebind current fields and reuse answers; changed question schemas regenerate only within the bounded resnapshot limit.",
+    "Synchronous and delayed rerenders cannot cause detached-node values to pass final fill verification.",
+    "An unstable or unverifiable form is never submitted."
+  ],
+  "supersedes": [],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->

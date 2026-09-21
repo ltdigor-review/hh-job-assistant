@@ -1,12 +1,15 @@
 import { derivePopupView } from './popup-view.js';
 import './ai-providers.js';
 import './config-readiness.js';
+import './ai-mode.js';
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
 }
 
 const nodes = {
+  aiEnabled: document.getElementById('aiEnabled'),
+  aiModeStatus: document.getElementById('aiModeStatus'),
   appStatus: document.getElementById('appStatus'),
   appStatusTitle: document.getElementById('appStatusTitle'),
   appStatusDetail: document.getElementById('appStatusDetail'),
@@ -30,6 +33,9 @@ let lastTabState = { kind: 'tab_unavailable', error: 'Проверяю вкла�
 let aiProviderStatus = { provider: 'qwen', label: 'Qwen', configured: false, enabled: true };
 let readiness = { ready: false, missing: [] };
 let copyToastTimeout = null;
+let aiModeSaving = false;
+let aiModeLocked = false;
+let aiModeNotice = '';
 
 async function copyText(text) {
   const value = String(text || '').trim();
@@ -68,6 +74,12 @@ function showCopyToast() {
 }
 
 function renderView() {
+  nodes.aiEnabled.checked = aiProviderStatus.enabled;
+  nodes.aiEnabled.disabled = aiModeSaving || aiModeLocked || globalThis.HHJA_AI_MODE.isLocked({ runState: lastRunState }) || lastTabState.autoApplyInProgress === true;
+  nodes.aiEnabled.title = nodes.aiEnabled.disabled ? 'Остановите запуск перед сменой режима ИИ' : '';
+  nodes.aiModeStatus.textContent = aiModeNotice || (aiProviderStatus.enabled
+    ? 'ИИ включён. При сбое провайдеров отклики остановятся.'
+    : 'Без ИИ: готовое письмо из настроек; анкеты пропускаются.');
   const view = derivePopupView({
     runState: lastRunState,
     tabState: lastTabState,
@@ -248,7 +260,8 @@ async function refreshPopup() {
   // GET_STATUS waits for background default initialization. Read storage only
   // afterwards so a cold popup cannot observe an incomplete migration.
   const runtimeError = await readRuntimeState();
-  const settings = await chrome.storage.local.get(['aiEnabled', 'aiProvider', 'aiProviderCredentials', 'groqApiKey', 'resumeUrl']);
+  const settings = await chrome.storage.local.get(['aiEnabled', 'aiProvider', 'aiProviderCredentials', 'groqApiKey', 'resumeUrl', 'runState', 'autoApplyRunLease']);
+  aiModeLocked = globalThis.HHJA_AI_MODE.isLocked(settings);
   const provider = globalThis.HHJA_AI_PROVIDERS.normalizeProviderId(settings.aiProvider);
   aiProviderStatus = {
     provider,
@@ -331,6 +344,22 @@ nodes.autoApply.addEventListener('click', () => {
   });
 });
 
+nodes.aiEnabled.addEventListener('change', async () => {
+  const enabled = nodes.aiEnabled.checked;
+  aiModeSaving = true;
+  nodes.aiEnabled.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'SET_AI_ENABLED', enabled });
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось изменить режим ИИ.');
+    aiModeNotice = response.queueInvalidated ? 'Режим изменён. Начните новый запуск; история сохранена.' : '';
+  } catch (error) {
+    aiModeNotice = localizeError(error);
+  } finally {
+    aiModeSaving = false;
+    await refreshPopup();
+  }
+});
+
 nodes.continueApply.addEventListener('click', () => {
   runContentAction('CONTINUE_AUTO_APPLY', 'Продолжаю отклики...').catch((error) => {
     lastRunState = { state: 'error', lastError: localizeError(error) };
@@ -375,3 +404,9 @@ refreshPopup().catch((error) => {
 setInterval(() => {
   refreshPopup().catch(() => {});
 }, 1000);
+
+chrome.storage?.onChanged?.addListener?.((changes, area) => {
+  if (area === 'local' && (changes.aiEnabled || changes.runState || changes.autoApplyRunLease)) {
+    refreshPopup().catch(() => {});
+  }
+});

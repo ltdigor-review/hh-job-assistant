@@ -77,6 +77,7 @@ test('[BS:COVERS:HHJA-BR-000041] manifest is valid MV3 and exposes popup UI', as
       'src/defaults.js',
       'src/config-readiness.js',
     'src/content-text.js',
+    'src/ai-validation.js',
     'src/content-dom.js',
     'src/content-hh.js'
   ]);
@@ -192,6 +193,8 @@ test('version guard bumps json and regex files without stack-specific tooling', 
 
 test('javascript files parse', async () => {
   const files = [
+    'src/ai-mode.js',
+    'src/ai-validation.js',
     'src/log-sanitize.js',
     'src/agent-log.js',
     'src/content-text.js',
@@ -2508,7 +2511,7 @@ test('Groq prompt parses configured hh resume URL for resume context', async () 
     return {
       ok: true,
       async json() {
-        return { choices: [{ message: { content: 'Письмо' } }] };
+        return { choices: [{ message: { content: 'Разрабатывал сервисы на Java и Spring Boot. Откликаюсь.' } }] };
       }
     };
   };
@@ -2622,7 +2625,7 @@ test('Groq resume cache TTL is configurable in hours', async () => {
     return {
       ok: true,
       async json() {
-        return { choices: [{ message: { content: 'Письмо' } }] };
+        return { choices: [{ message: { content: 'Разрабатывал сервисы на Java и Spring Boot. Откликаюсь.' } }] };
       }
     };
   };
@@ -2739,7 +2742,7 @@ test('[BS:COVERS:HHJA-BR-000011] Groq prompt rebuilds stale resume brief and kee
     return {
       ok: true,
       async json() {
-        return { choices: [{ message: { content: 'Письмо' } }] };
+        return { choices: [{ message: { content: 'Разрабатывал сервисы на Java и Spring Boot. Откликаюсь.' } }] };
       }
     };
   };
@@ -4135,6 +4138,7 @@ test('trusted page shortcut shares a single-flight live start guard', async () =
 });
 
 test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000037] options preserve generic credential drafts and selected fallback provider', async () => {
+  await import('../src/ai-mode.js');
   const source = await readFile(new URL('src/options.js', root), 'utf8');
   const providersSource = await readFile(new URL('src/ai-providers.js', root), 'utf8');
   vm.runInThisContext(providersSource);
@@ -4325,6 +4329,10 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     },
     runtime: {
       async sendMessage(message) {
+        if (message?.type === 'SET_AI_ENABLED') {
+          storage.aiEnabled = message.enabled;
+          return { ok: true, aiEnabled: storage.aiEnabled, queueInvalidated: false };
+        }
         if (message?.type === 'TEST_AI_PROVIDER') {
           groqKeySeenByTest = message.apiKey ||
             storage.aiProviderCredentials?.[message.providerId]?.apiKey ||
@@ -4512,7 +4520,7 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     assert.equal(storage.aiFallbackToGroq, true);
 
     elements.aiEnabled.checked = false;
-    handlers.get('aiEnabled:change')();
+    await handlers.get('aiEnabled:change')();
     assert.equal(elements.aiProvider.disabled, true);
     assert.equal(elements.testAiProvider.disabled, true);
     assert.equal(elements.aiFallbackSection.hidden, true);
@@ -4529,7 +4537,7 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     assert.equal(storage.aiProviderCredentials.groq.apiKey, 'gsk_test_before_save');
 
     elements.aiEnabled.checked = true;
-    handlers.get('aiEnabled:change')();
+    await handlers.get('aiEnabled:change')();
     await handlers.get('save:click')();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(storage.aiEnabled, true);
@@ -4659,7 +4667,8 @@ test('options expose editable resume profile, audit, refinement, and auto refres
   assert.match(js, /credentialDrafts/);
   assert.match(js, /fields\.aiProviderApiKey\.dataset\.masked === 'true'/);
   assert.match(js, /aiFallbackProvider/);
-  assert.match(js, /aiEnabled: isAiEnabled\(\)/);
+  assert.match(js, /type: 'SET_AI_ENABLED', enabled/);
+  assert.doesNotMatch(js, /aiEnabled: isAiEnabled\(\)/);
   assert.match(js, /fallbackCoverLetterTemplate: fields\.fallbackCoverLetterTemplate\.value\.trim\(\)/);
   assert.match(js, /fields\.aiFallbackSection\.hidden = !isAiEnabled\(\) \|\| options\.length === 0/);
   assert.match(js, /Math\.max\(0\.1/);

@@ -57,6 +57,8 @@ let credentialEditorProviderId = '';
 let aiProviderTestGeneration = 0;
 let agentDebugRuns = [];
 let agentDebugDownloadInProgress = false;
+let aiModeSaving = false;
+let aiModeLocked = false;
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
@@ -116,6 +118,8 @@ function renderFallbackProviders(preferredValue = fields.aiFallbackProvider.valu
 
 function renderAiModeControls() {
   const enabled = isAiEnabled();
+  fields.aiEnabled.disabled = aiModeSaving || aiModeLocked;
+  fields.aiEnabled.title = aiModeLocked ? 'Остановите запуск перед сменой режима ИИ' : '';
   fields.aiProvider.disabled = !enabled;
   testAiProviderButton.disabled = !enabled;
   fields.resumeProfileEditComment.disabled = !enabled;
@@ -370,6 +374,7 @@ function getMultiCheckboxValue(field, allowedValues) {
 async function loadOptions() {
   const values = await chrome.storage.local.get(Object.keys({
     ...DEFAULTS,
+    autoApplyRunLease: null,
     groqApiKey: '',
     aiFallbackEnabled: false
   }));
@@ -377,6 +382,7 @@ async function loadOptions() {
 
   populateProviderSelectors();
   fields.aiEnabled.checked = values.aiEnabled !== false;
+  aiModeLocked = globalThis.HHJA_AI_MODE.isLocked(values);
   fields.fallbackCoverLetterTemplate.value =
     String(values.fallbackCoverLetterTemplate || '').trim() || DEFAULTS.fallbackCoverLetterTemplate;
   fields.aiProvider.value = AI_PROVIDERS.normalizeProviderId(values.aiProvider);
@@ -484,7 +490,6 @@ async function saveOptions() {
   }
 
   const patch = {
-    aiEnabled: isAiEnabled(),
     aiProvider: selectedProviderId(),
     aiFallbackProvider: fields.aiFallbackProvider.value,
     aiFallbackEnabled: Boolean(fields.aiFallbackProvider.value),
@@ -583,11 +588,15 @@ async function testAiProvider() {
     return;
   }
   if (!isCurrent()) return;
+  const taskLabels = { cover_letter: 'письмо', resume_profile_build: 'профиль резюме', test_assist: 'ответы на вопросы' };
+  const checkSummary = Array.isArray(response?.checks)
+    ? response.checks.map((check) => `${taskLabels[check.task] || 'проверка'} (${check.model}): ${check.ok ? 'OK' : 'ошибка'}`).join(' · ')
+    : '';
   if (!response?.ok) {
-    setAiProviderStatus(localizeError(response?.error, `Проверка ${provider.label} не прошла.`), true);
+    setAiProviderStatus([checkSummary, localizeError(response?.error, `Проверка ${provider.label} не прошла.`)].filter(Boolean).join('. '), true);
     return;
   }
-  setAiProviderStatus(`${provider.label} работает.`);
+  setAiProviderStatus(checkSummary || `${provider.label} работает.`);
 }
 
 async function runResumeProfileAction(type) {
@@ -648,10 +657,27 @@ fields.aiProvider.addEventListener('change', () => {
   setAiProviderStatus('');
 });
 
-fields.aiEnabled.addEventListener('change', () => {
+fields.aiEnabled.addEventListener('change', async () => {
   aiProviderTestGeneration += 1;
+  const enabled = isAiEnabled();
+  aiModeSaving = true;
   renderAiModeControls();
   setAiProviderStatus('');
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'SET_AI_ENABLED', enabled });
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось изменить режим ИИ.');
+    setAiProviderStatus(response.queueInvalidated
+      ? 'Режим сохранён. Начните новый запуск; история сохранена.'
+      : 'Режим ИИ сохранён.');
+  } catch (error) {
+    setAiProviderStatus(localizeError(error), true);
+  } finally {
+    const stored = await chrome.storage.local.get(['aiEnabled', 'runState', 'autoApplyRunLease']);
+    fields.aiEnabled.checked = stored.aiEnabled !== false;
+    aiModeLocked = globalThis.HHJA_AI_MODE.isLocked(stored);
+    aiModeSaving = false;
+    renderAiModeControls();
+  }
 });
 
 document.getElementById('saveProviderCredential').addEventListener('click', () =>
@@ -701,9 +727,18 @@ document.getElementById('editResumeProfile').addEventListener('click', () => {
   runResumeProfileAction('EDIT_RESUME_PROFILE').catch((error) => setResumeProfileStatus(localizeError(error), true));
 });
 
-loadOptions().catch((error) => setStatus(localizeError(error), true));
+chrome.runtime.sendMessage({ type: 'GET_STATUS' })
+  .then(() => loadOptions())
+  .catch((error) => setStatus(localizeError(error), true));
 
 chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
+  if (areaName === 'local' && (changes.aiEnabled || changes.runState || changes.autoApplyRunLease)) {
+    chrome.storage.local.get(['aiEnabled', 'runState', 'autoApplyRunLease']).then((stored) => {
+      fields.aiEnabled.checked = stored.aiEnabled !== false;
+      aiModeLocked = globalThis.HHJA_AI_MODE.isLocked(stored);
+      renderAiModeControls();
+    }).catch((error) => setAiProviderStatus(localizeError(error), true));
+  }
   if (
     areaName === 'local' &&
     (

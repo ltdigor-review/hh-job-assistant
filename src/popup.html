@@ -185,6 +185,9 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
+      .ai-toggle { display: flex; align-items: center; gap: 10px; font-weight: 600; cursor: pointer; }
+      .ai-toggle input { width: 18px; height: 18px; accent-color: #dc2626; }
+      #aiModeStatus { margin: 8px 0 14px; }
 
       .primary {
         grid-column: 1 / 2;
@@ -348,6 +351,8 @@
       </section>
 
       <section class="panel section" aria-label="Управление">
+        <label class="ai-toggle" for="aiEnabled"><input id="aiEnabled" type="checkbox" role="switch">Использовать ИИ</label>
+        <p id="aiModeStatus" class="status-detail" role="status"></p>
         <div class="actions">
           <button id="autoApply" class="primary" type="button">Запуск откликов</button>
           <button id="continueApply" class="secondary" type="button" disabled>Продолжить</button>

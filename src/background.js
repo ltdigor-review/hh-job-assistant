@@ -2,6 +2,9 @@ import './log-sanitize.js';
 import './agent-log.js';
 import './error-text.js';
 import './ai-providers.js';
+import './ai-mode.js';
+import './content-text.js';
+import './ai-validation.js';
 import './defaults.js';
 import './config-readiness.js';
 
@@ -573,13 +576,15 @@ async function preflightGroqQuota({ task, model, requestBody }) {
   const dailyRequestLimit = GROQ_DAILY_REQUEST_LIMITS[model];
   const estimate = estimateGroqRequestTokens(requestBody);
   if (dailyRequestLimit && entry.requests >= dailyRequestLimit) {
-    const error = new Error(`Дневная квота запросов ${model} исчерпана; используется безопасный локальный ответ.`);
+    const error = new Error(`Дневная квота запросов ${model} исчерпана.`);
     error.code = 'HHJA_AI_QUOTA_REQUESTS';
+    error.aiFallbackEligible = true;
     throw error;
   }
   if (dailyLimit && entry.rateTokens + estimate.maximumRateTokens > dailyLimit) {
-    const error = new Error(`Дневной AI-бюджет ${model} исчерпан; используется безопасный локальный ответ.`);
+    const error = new Error(`Дневной AI-бюджет ${model} исчерпан.`);
     error.code = 'HHJA_AI_QUOTA_DAILY';
+    error.aiFallbackEligible = true;
     throw error;
   }
 
@@ -589,8 +594,9 @@ async function preflightGroqQuota({ task, model, requestBody }) {
   const tokenResetAt = Number.isFinite(observedAt) ? observedAt + tokenResetMs : 0;
   const tpmLimit = Number(headers.limitTokens) || GROQ_PUBLISHED_TPM_LIMITS[model] || 0;
   if (tpmLimit && estimate.likelyRateTokens > tpmLimit) {
-    const error = new Error(`Запрос превышает минутный токенный лимит ${model}; используется безопасный локальный ответ.`);
+    const error = new Error(`Запрос превышает минутный токенный лимит ${model}.`);
     error.code = 'HHJA_AI_QUOTA_TPM';
+    error.aiFallbackEligible = true;
     throw error;
   }
   if (
@@ -600,8 +606,9 @@ async function preflightGroqQuota({ task, model, requestBody }) {
   ) {
     const waitMs = tokenResetAt - Date.now();
     if (waitMs > GROQ_QUOTA_WAIT_MAX_MS) {
-      const error = new Error(`Минутная квота ${model} восстановится слишком поздно; используется безопасный локальный ответ.`);
+      const error = new Error(`Минутная квота ${model} восстановится слишком поздно.`);
       error.code = 'HHJA_AI_QUOTA_TPM';
+      error.aiFallbackEligible = true;
       throw error;
     }
     await sleep(waitMs);
@@ -610,8 +617,9 @@ async function preflightGroqQuota({ task, model, requestBody }) {
   const requestResetMs = parseRateLimitResetMs(headers.resetRequests);
   const requestResetAt = Number.isFinite(observedAt) ? observedAt + requestResetMs : 0;
   if (Number(headers.remainingRequests) <= 0 && requestResetAt > Date.now()) {
-    const error = new Error(`Дневная квота запросов ${model} исчерпана; используется безопасный локальный ответ.`);
+    const error = new Error(`Дневная квота запросов ${model} исчерпана.`);
     error.code = 'HHJA_AI_QUOTA_REQUESTS';
+    error.aiFallbackEligible = true;
     throw error;
   }
   return estimate;
@@ -627,7 +635,7 @@ async function recordGroqUsage({ task, model, requestBody, response, usage }) {
   const totalTokens = normalized.totalTokens ?? (promptTokens + completionTokens);
   const cachedTokens = normalized.cachedTokens ?? 0;
   const rateTokens = normalized.promptTokens == null
-    ? estimate.likelyRateTokens
+    ? (response?.ok ? estimate.likelyRateTokens : 0)
     : Math.max(0, promptTokens - cachedTokens) + completionTokens;
   entry.requests += 1;
   entry.promptTokens += promptTokens;
@@ -704,10 +712,32 @@ async function recordProviderUsage({ providerId, task, model, usage }) {
   return normalized;
 }
 
-function enqueueAiHttp(work) {
-  const queued = groqHttpQueue.then(work, work);
+function assertAiDeadline(deadlineAt) {
+  if (Date.now() >= deadlineAt) {
+    throw aiProviderError('Время AI-операции истекло. Запустите заново.', 'HHJA_AI_OPERATION_TIMEOUT', false);
+  }
+}
+
+function enqueueAiHttp(work, deadlineAt) {
+  let started = false;
+  let expired = false;
+  let timer;
+  const queued = groqHttpQueue.then(async () => {
+    if (expired) throw aiProviderError('Истекло ожидание AI-очереди', 'HHJA_AI_QUEUE_TIMEOUT', true);
+    assertAiDeadline(deadlineAt);
+    started = true;
+    clearTimeout(timer);
+    return work();
+  });
   groqHttpQueue = queued.catch(() => {});
-  return queued;
+  const waiting = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (started) return;
+      expired = true;
+      reject(aiProviderError('Истекло ожидание AI-очереди', 'HHJA_AI_QUEUE_TIMEOUT', true));
+    }, Math.max(1, Math.min(AI_PROVIDERS.QUEUE_WAIT_MAX_MS, deadlineAt - Date.now())));
+  });
+  return Promise.race([queued, waiting]).finally(() => clearTimeout(timer));
 }
 
 function aiProviderError(message, code, fallbackEligible = false, cause = undefined) {
@@ -717,63 +747,50 @@ function aiProviderError(message, code, fallbackEligible = false, cause = undefi
   return error;
 }
 
-async function fetchProviderCompletion({ providerId, task, model, apiKey, requestBody }) {
+async function fetchProviderCompletion({ providerId, task, model, apiKey, requestBody, deadlineAt }) {
   const provider = AI_PROVIDERS.getProvider(providerId);
   return enqueueAiHttp(async () => {
-    if (provider.quotaPolicy === 'groq') {
-      await preflightGroqQuota({ task, model, requestBody });
-    }
+    assertAiDeadline(deadlineAt);
+    if (provider.quotaPolicy === 'groq') await preflightGroqQuota({ task, model, requestBody });
+    assertAiDeadline(deadlineAt);
     const controller = new AbortController();
-    const timeoutMs = getProviderRequestTimeoutMs(provider.id);
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    let response;
+    const timeoutMs = Math.max(1, Math.min(getProviderRequestTimeoutMs(provider.id), deadlineAt - Date.now()));
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(aiProviderError(`Запрос ${provider.label} не уложился в ${timeoutMs} мс`, 'HHJA_AI_PROVIDER_TIMEOUT', true));
+      }, timeoutMs);
+    });
+    let result;
     try {
-      response = await fetch(provider.endpoint, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        signal: controller.signal,
-        body: JSON.stringify(requestBody)
-      });
+      result = await Promise.race([timeout, (async () => {
+        const response = await fetch(provider.endpoint, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify(requestBody)
+        });
+        const responseText = typeof response.text === 'function' ? await response.text() : JSON.stringify(await response.json());
+        let data = null;
+        try { data = JSON.parse(responseText); } catch { /* Validated by the provider task. */ }
+        return { response, responseText, data };
+      })()]);
     } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw aiProviderError(
-          `Запрос ${provider.label} не уложился в ${timeoutMs} мс`,
-          'HHJA_AI_PROVIDER_TIMEOUT',
-          true,
-          error
-        );
-      }
-      throw aiProviderError(
-        `Не удалось подключиться к ${provider.label}: ${error?.message || 'ошибка сети'}`,
-        'HHJA_AI_PROVIDER_NETWORK',
-        true,
-        error
-      );
+      if (String(error?.code || '').startsWith('HHJA_')) throw error;
+      throw aiProviderError(`Не удалось прочитать ответ ${provider.label}`, 'HHJA_AI_PROVIDER_NETWORK', true, error);
     } finally {
       clearTimeout(timeoutId);
     }
-
-    const responseText = await response.text?.().catch?.(() => '') ?? '';
-    let data = null;
-    if (responseText) {
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = null;
-      }
-    } else if (typeof response.json === 'function') {
-      data = await response.json().catch(() => null);
-    }
+    assertAiDeadline(deadlineAt);
+    const { response, data } = result;
     if (provider.quotaPolicy === 'groq') {
       await recordGroqUsage({ task, model, requestBody, response, usage: data?.usage });
     } else {
       await recordProviderUsage({ providerId: provider.id, task, model, usage: data?.usage });
     }
-    return { response, responseText, data };
-  });
+    return result;
+  }, deadlineAt);
 }
 
 async function storageGet(keys) {
@@ -879,6 +896,85 @@ function updateDailyApplicationLedger(value, vacancyId, kind, counterBaseline = 
   ledger.alreadyApplied = ledger.alreadyAppliedVacancyIds.length;
   ledger.updatedAt = now.toISOString();
   return { ledger, added };
+}
+
+async function reconcileQuiescentStoppedLease() {
+  return enqueueAutoApplyOwnership(async () => {
+    const stored = await storageGet([
+      'runState', 'runResults', 'autoApplyStopRequested', AUTO_APPLY_RUN_LEASE_KEY,
+      'autoApplyQueue', 'autoApplySearchQueue', 'autoApplyPendingSubmit',
+      AUTO_APPLY_RESPONSE_ATTEMPTS_KEY, SCHEDULED_AUTO_APPLY_SESSION_KEY
+    ]);
+    const lease = stored[AUTO_APPLY_RUN_LEASE_KEY];
+    const state = stored.runState || {};
+    const updatedAt = Date.parse(lease?.updatedAt || lease?.claimedAt || '');
+    const runId = normalizeRunId(lease?.runId);
+    const ownerId = normalizeRunOwnerId(lease?.ownerId);
+    const session = stored[SCHEDULED_AUTO_APPLY_SESSION_KEY];
+    const scheduledActive = session &&
+      normalizeRunId(session.runId) === runId &&
+      ['starting', 'running', 'repair_pending'].includes(String(session.state || ''));
+    if (
+      lease?.active !== true || state.state !== 'stopped' || stored.autoApplyStopRequested !== true ||
+      !Number.isFinite(updatedAt) || Date.now() - updatedAt <= AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS ||
+      (state.runId && normalizeRunId(state.runId) !== runId) ||
+      (state.ownerId && normalizeRunOwnerId(state.ownerId) !== ownerId) ||
+      stored.autoApplyPendingSubmit || scheduledActive ||
+      [stored.autoApplyQueue, stored.autoApplySearchQueue].some(queue => queue?.active === true)
+    ) return false;
+    const unresolved = Object.values(stored[AUTO_APPLY_RESPONSE_ATTEMPTS_KEY] || {}).filter(attempt => (
+      attempt && !attempt.finalizedAt && !attempt.cancelledAt
+    ));
+    if (unresolved.length) {
+      // Resolve only owned, old navigation attempts at a known HH destination.
+      // The existing terminal-release helper preserves matching response pages.
+      if (!runId || !ownerId || !chrome.tabs?.get || unresolved.some(attempt => (
+        normalizeRunId(attempt.runId) !== runId || normalizeRunOwnerId(attempt.ownerId) !== ownerId ||
+        !Number.isFinite(Date.parse(attempt.startedAt || '')) ||
+        Date.now() - Date.parse(attempt.startedAt) <= AUTO_APPLY_RESPONSE_ATTEMPT_TTL_MS
+      ))) return false;
+      const ownerTab = await chrome.tabs.get(ownerId).catch(() => null);
+      if (!ownerTab) {
+        const result = await terminalizeClosedAutoApplyOwner(stored, ownerId);
+        return result.terminalized === true;
+      }
+      const ownerUrl = String(ownerTab.url || '');
+      if (!(isAutoApplySearchUrl(ownerUrl) || isHhApplicantProfileUrl(ownerUrl) || isHhVacancyDetailUrl(ownerUrl) || isHhResponseFormUrl(ownerUrl))) return false;
+      await releaseAutoApplyRunLeaseIfTerminalUnlocked({ runId, patch: { state: 'stopped' } }, { tab: ownerTab });
+      const refreshed = await storageGet([AUTO_APPLY_RUN_LEASE_KEY]);
+      if (refreshed[AUTO_APPLY_RUN_LEASE_KEY]?.active !== false) return false;
+    } else {
+      await storageSet({
+        [AUTO_APPLY_RUN_LEASE_KEY]: { ...lease, active: false, updatedAt: nowIso(), releasedState: 'stopped', releasedReason: 'quiescent_stopped_recovery' }
+      });
+    }
+    await appendAgentLog('auto_apply_stopped_lease_recovered', { runId, ownerId });
+    return true;
+  });
+}
+
+async function setAiEnabled(message) {
+  return enqueueAutoApplyOwnership(async () => {
+    if (typeof message.enabled !== 'boolean') throw aiProviderError('Неверный режим ИИ', 'HHJA_AI_MODE_INVALID');
+    const current = await storageGet(['aiEnabled', 'runState', AUTO_APPLY_RUN_LEASE_KEY, 'autoApplyQueue', 'autoApplySearchQueue']);
+    const oldEnabled = current.aiEnabled !== false;
+    if (message.enabled === oldEnabled) return { ok: true, aiEnabled: oldEnabled, queueInvalidated: false };
+    if (globalThis.HHJA_AI_MODE.isLocked(current)) throw aiProviderError('Остановите запуск перед изменением режима ИИ', 'HHJA_AI_MODE_RUN_ACTIVE');
+    const patch = { aiEnabled: message.enabled };
+    let queueInvalidated = false;
+    for (const name of ['autoApplyQueue', 'autoApplySearchQueue']) {
+      const queue = current[name];
+      if (!queue || typeof queue !== 'object') continue;
+      const mode = typeof queue.config?.aiEnabled === 'boolean' ? queue.config.aiEnabled : typeof queue.aiEnabled === 'boolean' ? queue.aiEnabled : oldEnabled;
+      if (mode !== message.enabled) {
+        patch[name] = { active: false, invalidatedReason: 'ai_mode_changed', aiEnabled: message.enabled };
+        queueInvalidated = true;
+      }
+    }
+    if (queueInvalidated) patch.autoApplyPendingSubmit = null;
+    await storageSet(patch);
+    return { ok: true, aiEnabled: message.enabled, queueInvalidated };
+  });
 }
 
 async function claimAutoApplyRun(message, sender) {
@@ -2629,6 +2725,9 @@ function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) 
   } catch {
     throw aiProviderError('AI-провайдер вернул некорректный JSON профиля резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
   }
+  if (typeof parsed?.profile !== 'string' || (parsed.weaknesses !== undefined && (!Array.isArray(parsed.weaknesses) || parsed.weaknesses.some(item => typeof item !== 'string')))) {
+    throw aiProviderError('AI-провайдер вернул неверную структуру профиля резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
+  }
   const profile = cleanPlainText(parsed?.profile).slice(0, RESUME_PROFILE_MAX_CHARS);
   if (profile.length < 40) {
     throw aiProviderError('AI-провайдер вернул слишком короткий профиль резюме', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true);
@@ -2647,7 +2746,7 @@ function parseResumeProfileResponse(content, { includeWeaknesses = true } = {}) 
   return { profile, weaknesses: includeWeaknesses ? weaknesses : '' };
 }
 
-async function callResumeProfileModel({ sourceText = '', currentProfile = '', editComment = '', mode = 'build' }) {
+async function callResumeProfileModel({ sourceText = '', currentProfile = '', editComment = '', mode = 'build', deadlineAt: requestedDeadline }) {
   const {
     aiEnabled = DEFAULTS.aiEnabled,
     aiProvider,
@@ -2702,6 +2801,7 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
       commentHash: editComment ? hashText(editComment) : ''
   };
 
+  const deadlineAt = Math.min(Number(requestedDeadline) || Infinity, AI_PROVIDERS.createOperationDeadline(settings, task));
   const runProvider = async (providerId, apiKey) => {
     for (let attempt = 1; attempt <= RESUME_PROFILE_MODEL_ATTEMPTS; attempt += 1) {
       try {
@@ -2712,7 +2812,8 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
           messages,
           logDetails,
           attempt,
-          maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS
+          maxAttempts: RESUME_PROFILE_MODEL_ATTEMPTS,
+          deadlineAt
         });
         parseResumeProfileResponse(completion.content, { includeWeaknesses: mode !== 'edit' });
         return completion.content;
@@ -2770,10 +2871,10 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
   }
 }
 
-async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() } = {}) {
+async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso(), deadlineAt } = {}) {
   const source = String(sourceText || '').slice(0, 12000);
   if (!source.trim()) throw new Error('Резюме пустое или не удалось прочитать его текст');
-  const parsed = parseResumeProfileResponse(await callResumeProfileModel({ sourceText: source, mode: 'build' }));
+  const parsed = parseResumeProfileResponse(await callResumeProfileModel({ sourceText: source, mode: 'build', deadlineAt }));
   const patch = {
     resumeProfileText: parsed.profile,
     resumeProfileWeaknesses: parsed.weaknesses,
@@ -2785,13 +2886,13 @@ async function buildResumeProfileFromSource(sourceText, { checkedAt = nowIso() }
   return patch;
 }
 
-async function buildResumeProfile() {
+async function buildResumeProfile({ deadlineAt } = {}) {
   await assertAiEnabled();
   const source = await getResumeContext({ forceRefresh: true });
-  return buildResumeProfileFromSource(source);
+  return buildResumeProfileFromSource(source, { deadlineAt });
 }
 
-async function editResumeProfile(editComment) {
+async function editResumeProfile(editComment, { deadlineAt } = {}) {
   await assertAiEnabled();
   const { resumeProfileText = '' } = await storageGet(['resumeProfileText']);
   if (!String(resumeProfileText).trim()) throw new Error('Сначала заполните промпт с резюме');
@@ -2799,14 +2900,15 @@ async function editResumeProfile(editComment) {
   const parsed = parseResumeProfileResponse(await callResumeProfileModel({
     currentProfile: resumeProfileText,
     editComment,
-    mode: 'edit'
+    mode: 'edit',
+    deadlineAt
   }), { includeWeaknesses: false });
   const patch = { resumeProfileText: parsed.profile, resumeProfileBuiltAt: nowIso() };
   await storageSet(patch);
   return patch;
 }
 
-async function ensureResumeProfileAutoRefresh({ suppressAiFallback = false } = {}) {
+async function ensureResumeProfileAutoRefresh({ suppressAiFallback = false, deadlineAt } = {}) {
   await assertAiEnabled();
   const current = await storageGet([
     'resumeProfileText',
@@ -2817,10 +2919,11 @@ async function ensureResumeProfileAutoRefresh({ suppressAiFallback = false } = {
     'resumeCandidateFacts'
   ]);
   const factsValid = normalizeResumeCandidateFacts(current.resumeCandidateFacts, current.resumeProfileSourceHash || '');
-  if (!current.resumeProfileAutoRefreshEnabled && factsValid) return current;
+  const profileAvailable = Boolean(String(current.resumeProfileText || '').trim());
+  if (profileAvailable && !current.resumeProfileAutoRefreshEnabled && factsValid) return current;
   const ttlHours = Math.max(0.1, Math.min(Number(current.resumeCacheTtlHours) || DEFAULTS.resumeCacheTtlHours, 168));
   const ageMs = Date.now() - Date.parse(current.resumeProfileCheckedAt || 0);
-  if (factsValid && Number.isFinite(ageMs) && ageMs < ttlHours * 60 * 60 * 1000) return current;
+  if (profileAvailable && factsValid && Number.isFinite(ageMs) && ageMs < ttlHours * 60 * 60 * 1000) return current;
   if (resumeProfileRefreshPromise) return resumeProfileRefreshPromise;
 
   resumeProfileRefreshPromise = (async () => {
@@ -2834,15 +2937,12 @@ async function ensureResumeProfileAutoRefresh({ suppressAiFallback = false } = {
         await appendAgentLog('resume_profile_auto_refresh', { changed: false, sourceHash, checkedAt });
         return { ...current, resumeProfileCheckedAt: checkedAt };
       }
-      const updated = await buildResumeProfileFromSource(source, { checkedAt });
+      const updated = await buildResumeProfileFromSource(source, { checkedAt, deadlineAt });
       await appendAgentLog('resume_profile_auto_refresh', { changed: true, sourceHash, checkedAt });
       return { ...current, ...updated };
     } catch (error) {
-      if (!suppressAiFallback) {
-        await recordAiQuotaFallback('resume_profile_build', error?.code || 'resume_profile_refresh_error');
-      }
-      await appendAgentLog('resume_profile_auto_refresh_error', { error: localizeError(error) });
-      return current;
+      await appendAgentLog('resume_profile_auto_refresh_error', { errorCode: error.code, provider: error.provider, task: error.task, httpStatus: error.httpStatus });
+      throw error;
     } finally {
       resumeProfileRefreshPromise = null;
     }
@@ -3043,6 +3143,47 @@ function parseEmployerAnswerResponse(content) {
   return { answers, coverLetter: cleanPlainText(parsed.coverLetter) };
 }
 
+function validateEmployerAnswers(structured, questions, coverLetterRequested, allowStructuredCoverLetter = false) {
+  const invalid = () => { throw aiProviderError('AI-провайдер вернул непригодные ответы работодателю', 'HHJA_AI_PROVIDER_INVALID_OUTPUT', true); };
+  if (structured.answers.length !== questions.length) invalid();
+  for (const question of questions) {
+    const answer = structured.answers.find(item => item.id === question.id);
+    if (!answer) invalid();
+    const options = (question.options || []).map(option => cleanPlainText(typeof option === 'string' ? option : option.label));
+    if (options.length) {
+      if (!answer.selectedOptions.length || new Set(answer.selectedOptions).size !== answer.selectedOptions.length) invalid();
+      if (answer.selectedOptions.some(option => !options.includes(option) || /^(on|true|short)$/i.test(option))) invalid();
+      if (question.inputType !== 'checkbox' && answer.selectedOptions.length !== 1) invalid();
+    } else {
+      if (!answer.answer || answer.selectedOptions.length) invalid();
+      const shortNumber = /^\d+$/.test(answer.answer) && /сколько|количеств|число|лет|год|разработчик|команд|зарплат|доход/i.test(question.question);
+      if (!shortNumber && globalThis.HHJobAssistantText.getGeneratedTextInvalidReason(answer.answer, { minLength: 2 })) invalid();
+      const salary = /зарплат|заработн|доход|компенсац|оклад|gross|salary|income/i.test(question.question);
+      if (salary && !/\d/.test(answer.answer)) {
+        if (/сумм|размер|сколько|оклад|рубл|тенге|amount|annual|monthly|net|gross/i.test(question.question) || !/по\s+договор[её]нности/i.test(answer.answer)) invalid();
+      }
+      const contact = /как\s+с\s+вами\s+связаться|контакт(?:ы|ные)?\s+для\s+связи|contact\s+(?:details|info)/i.test(question.question) || (/telegram|телеграм|мессендж|whatsapp/i.test(question.question) && /ник|аккаунт|ссылк|контакт|номер|телефон|username/i.test(question.question) && /укажите|напишите|оставьте|дайте/i.test(question.question));
+      if (contact && !/(?:^|\s)(?:@[a-z0-9_]{4,}|t\.me\/[a-z0-9_]+|https?:\/\/\S+|телеграм|telegram|whatsapp|wa\.me\/\S+)|общение\s+через\s+hh\.ru/i.test(answer.answer)) invalid();
+      const comparable = value => cleanPlainText(value).toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      const value = comparable(answer.answer);
+      const prompt = comparable(question.question);
+      if (value && prompt && (value === prompt || (value.length > 20 && prompt.includes(value)))) invalid();
+      if (/(?:резюме кандидата|текст вакансии|choice group|text question|ответы на вопросы работодателя)/i.test(answer.answer)) invalid();
+      if (question.inputType === 'number' && !/^[-+]?\d+(?:[.,]\d+)?$/.test(answer.answer)) invalid();
+    }
+  }
+  if (coverLetterRequested) {
+    if (allowStructuredCoverLetter) {
+      const lines = structured.coverLetter.split(/\n+/).map(cleanPlainText).filter(Boolean);
+      if (!lines.length || structured.coverLetter.length > 2200) invalid();
+      lines.forEach((line, index) => {
+        const match = line.match(/^(\d+)[.)]\s+(.+)$/);
+        if (!match || Number(match[1]) !== index + 1 || globalThis.HHJobAssistantText.getGeneratedTextInvalidReason(match[2], { minLength: 1 })) invalid();
+      });
+    } else if (validateProviderCoverLetter(structured.coverLetter)) invalid();
+  }
+}
+
 function formatAiEmptyResponseError({ providerLabel, task, status, finishReason, attempt, maxAttempts, maxTokens, usage }) {
   const normalizedUsage = normalizeUsage(usage);
   const parts = [
@@ -3100,18 +3241,23 @@ function buildProviderRequestBody({ providerId, task, messages, attempt = 1 }) {
 }
 
 function validateProviderCoverLetter(content) {
-  const text = cleanPlainText(content);
-  if (text.length < 20) return 'too_short';
-  if (text.length > 220) return 'too_long';
-  if (/^\s*(?:[-*]|\d+[.)])\s+/m.test(text)) return 'list';
-  if (text.split(/[.!?]+/).map(cleanPlainText).filter(Boolean).length > 2) return 'too_many_sentences';
-  if (/(?:резюме кандидата|текст вакансии|choice group|text question|ответы на вопросы работодателя)/i.test(text)) {
-    return 'protocol_leak';
-  }
-  return '';
+  return globalThis.HHJA_AI_VALIDATION.coverLetterInvalidReason(String(content || ''));
 }
 
-async function executeAiProviderRequest({ providerId, apiKey, task, messages, logDetails = {}, attempt = 1, maxAttempts = 1 }) {
+async function executeAiProviderRequest(input) {
+  try {
+    return await executeAiProviderRequestInner(input);
+  } catch (error) {
+    error.provider = input.providerId;
+    error.task = input.task;
+    if (error.code === 'HHJA_AI_PROVIDER_INVALID_OUTPUT') error.httpStatus ??= 200;
+    await appendAgentLog('ai_operation_error', { provider: error.provider, task: error.task, errorCode: error.code, httpStatus: error.httpStatus, providerErrorCode: error.providerErrorCode });
+    throw error;
+  }
+}
+
+async function executeAiProviderRequestInner({ providerId, apiKey, task, messages, logDetails = {}, attempt = 1, maxAttempts = 1, questions = [], coverLetterRequested = false, allowStructuredCoverLetter = false, deadlineAt = AI_PROVIDERS.createOperationDeadline({ aiProvider: providerId }, task) }) {
+  assertAiDeadline(deadlineAt);
   const provider = AI_PROVIDERS.getProvider(providerId);
   const current = await storageGet(['aiProviderCooldowns', 'groqCooldownUntil']);
   const cooldownUntil = getProviderCooldown(current, provider.id);
@@ -3176,7 +3322,8 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
     task,
     model: requestBody.model,
     apiKey,
-    requestBody
+    requestBody,
+    deadlineAt
   });
   if (!response.ok) {
     if (response.status === 429) {
@@ -3217,8 +3364,11 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
     const providerErrorCode = String(data?.code || data?.error?.code || '');
     const providerHttpMessage = provider.id === 'qwen' && providerErrorCode === 'AccessDenied.Unpurchased'
       ? 'Qwen недоступен: сервис Alibaba Cloud Model Studio не активирован для этого аккаунта. Активируйте Model Studio или выберите Groq.'
-      : `Запрос ${provider.label} завершился ошибкой: ${response.status} ${responseText.slice(0, 200)}`;
-    throw aiProviderError(providerHttpMessage, 'HHJA_AI_PROVIDER_HTTP', true);
+      : `Запрос ${provider.label} завершился ошибкой: HTTP ${response.status}`;
+    const error = aiProviderError(providerHttpMessage, 'HHJA_AI_PROVIDER_HTTP', true);
+    error.httpStatus = response.status;
+    if (/^[A-Za-z0-9_.:-]{1,100}$/.test(providerErrorCode)) error.providerErrorCode = providerErrorCode;
+    throw error;
   }
 
   const content = String(data?.choices?.[0]?.message?.content || '').trim();
@@ -3276,7 +3426,8 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
   let structured = null;
   if (task === 'test_assist') {
     structured = parseEmployerAnswerResponse(content);
-  } else if (task === 'cover_letter' && AI_PROVIDERS.getTaskCapability(provider.id, task).validateCoverLetter) {
+    validateEmployerAnswers(structured, questions, coverLetterRequested, allowStructuredCoverLetter);
+  } else if (task === 'cover_letter') {
     const invalidReason = validateProviderCoverLetter(content);
     if (invalidReason) {
       throw aiProviderError(
@@ -3286,10 +3437,12 @@ async function executeAiProviderRequest({ providerId, apiKey, task, messages, lo
       );
     }
   }
+  if (task.startsWith('resume_profile_')) parseResumeProfileResponse(content);
+  assertAiDeadline(deadlineAt);
   return { provider, requestBody, content, data, usage, finishReason, structured };
 }
 
-async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false }, options = {}) {
+async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '', questions = [], coverLetterRequested = false, allowStructuredCoverLetter = false }, options = {}) {
   const {
     aiEnabled = DEFAULTS.aiEnabled,
     aiProvider,
@@ -3397,6 +3550,8 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
     resumeBriefCached: resumeContext.cached
   };
 
+  const deadlineAt = Math.min(Number(options.deadlineAt) || Infinity, AI_PROVIDERS.createOperationDeadline(settings, task));
+  assertAiDeadline(deadlineAt);
   let completion;
   let fallbackReason = '';
   try {
@@ -3405,7 +3560,11 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
       apiKey: primaryApiKey,
       task,
       messages,
-      logDetails
+      logDetails,
+      questions: payloadParts.questions,
+      coverLetterRequested,
+      allowStructuredCoverLetter,
+      deadlineAt
     });
   } catch (error) {
     const fallbackProviderId = AI_PROVIDERS.normalizeFallbackProvider(settings, primaryProviderId);
@@ -3430,7 +3589,11 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
         apiKey: fallbackApiKey,
         task,
         messages,
-        logDetails
+        logDetails,
+        questions: payloadParts.questions,
+        coverLetterRequested,
+        allowStructuredCoverLetter,
+        deadlineAt
       });
       await appendAgentLog('ai_provider_fallback_complete', {
         task,
@@ -3488,16 +3651,33 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
 }
 
 async function testAiProvider(providerId, apiKey, hasApiKeyOverride = false) {
-  const options = {
-    providerId,
-    disableFallback: true
-  };
-  if (hasApiKeyOverride) options.apiKey = apiKey;
-  const result = await callAi({
-    task: 'cover_letter',
-    vacancyText: 'Вакансия: Java developer. Требуется знание Spring Boot и SQL.'
-  }, options);
-  return { ok: true, provider: result.provider, sampleLength: result.text.length };
+  await assertAiEnabled();
+  const config = await storageGet(['aiProvider', 'aiProviderCredentials', 'groqApiKey']);
+  const id = AI_PROVIDERS.normalizeProviderId(providerId || config.aiProvider);
+  const key = String(hasApiKeyOverride ? apiKey || '' : AI_PROVIDERS.getApiKey(config, id)).trim();
+  if (!key) throw aiProviderError(`Ключ ${AI_PROVIDERS.getProvider(id).label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED');
+  const checks = [];
+  const questions = [{ id: 'experience', kind: 'text', inputType: 'text', question: 'Сколько лет опыта Java?', options: [] }];
+  for (const task of ['cover_letter', 'resume_profile_build', 'test_assist']) {
+    const instruction = task === 'cover_letter'
+      ? DEFAULTS.coverPrompt
+      : task === 'resume_profile_build'
+        ? 'Верни JSON {"profile":"профиль кандидата не короче 40 символов","weaknesses":[]}. Используй только факты.'
+        : 'Верни JSON {"answers":[{"id":"experience","answer":"3 года","selectedOptions":[]}],"coverLetter":""}.';
+    try {
+      const result = await executeAiProviderRequest({ providerId: id, apiKey: key, task, questions: task === 'test_assist' ? questions : [], messages: [
+        { role: 'system', content: instruction },
+        { role: 'user', content: 'Синтетический кандидат: Java разработчик, 3 года опыта Spring Boot и SQL. Вакансия Java разработчика.' }
+      ] });
+      checks.push({ task, model: result.requestBody.model, ok: true, sampleLength: result.content.length });
+    } catch (error) {
+      checks.push({ task, model: AI_PROVIDERS.getTaskCapability(id, task).model, ok: false, error: localizeError(error), errorCode: error.code, httpStatus: error.httpStatus });
+    }
+  }
+  const failure = checks.find(check => !check.ok);
+  return failure
+    ? { ok: false, provider: id, checks, error: failure.error, errorCode: failure.errorCode, task: failure.task, httpStatus: failure.httpStatus }
+    : { ok: true, provider: id, checks, sampleLength: checks[0].sampleLength };
 }
 
 async function getTabDocumentReadyState(tabId) {
@@ -3882,6 +4062,17 @@ function isSafeHhStatusUrl(value) {
     return url.protocol === 'https:' &&
       (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
       !/\/account\/(?:login|signup)/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isHhApplicantProfileUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      (url.hostname === 'hh.ru' || url.hostname.endsWith('.hh.ru')) &&
+      /^\/applicant\/profile\/me\/?$/.test(url.pathname);
   } catch {
     return false;
   }
@@ -5183,6 +5374,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'GET_STATUS': {
+        await reconcileQuiescentStoppedLease();
         const state = await storageGet(['runState', 'runResults']);
         sendResponse({ ok: true, ...state });
         break;
@@ -5291,14 +5483,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
+      case 'SET_AI_ENABLED': {
+        sendResponse(await setAiEnabled(message));
+        break;
+      }
       case 'GENERATE_COVER_LETTER': {
         const result = await callAi({
           task: message.task || 'cover_letter',
           vacancyText: message.vacancyText || '',
           extraText: message.extraText || '',
           questions: message.questions || [],
-          coverLetterRequested: message.coverLetterRequested === true
-        });
+          coverLetterRequested: message.coverLetterRequested === true,
+          allowStructuredCoverLetter: message.allowStructuredCoverLetter === true
+        }, { deadlineAt: message.deadlineAt });
         sendResponse({ ok: true, ...result });
         break;
       }
@@ -5308,12 +5505,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'BUILD_RESUME_PROFILE': {
-        const result = await buildResumeProfile();
+        const result = await buildResumeProfile({ deadlineAt: message.deadlineAt });
         sendResponse({ ok: true, ...result });
         break;
       }
       case 'ENSURE_RESUME_PROFILE': {
-        const result = await ensureResumeProfileAutoRefresh();
+        const result = await ensureResumeProfileAutoRefresh({ deadlineAt: message.deadlineAt });
         sendResponse({ ok: true, refreshed: true, profileAvailable: Boolean(result?.resumeProfileText) });
         break;
       }
@@ -5323,7 +5520,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'EDIT_RESUME_PROFILE': {
-        const result = await editResumeProfile(message.comment || '');
+        const result = await editResumeProfile(message.comment || '', { deadlineAt: message.deadlineAt });
         sendResponse({ ok: true, ...result });
         break;
       }
@@ -5366,7 +5563,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({
       ok: false,
       error: localizeError(error),
-      errorCode: error?.code || 'HHJA_UNKNOWN_ERROR'
+      errorCode: error?.code || 'HHJA_UNKNOWN_ERROR',
+      provider: error?.provider,
+      task: error?.task,
+      httpStatus: error?.httpStatus,
+      providerErrorCode: error?.providerErrorCode
     });
   });
 

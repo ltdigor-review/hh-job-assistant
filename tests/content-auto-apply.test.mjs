@@ -43,6 +43,8 @@ async function runContentAutoApply({
   questionFieldLabel = '',
   questionFieldLabels = [],
   rejectQuestionFieldWrites = false,
+  rerenderTextOnInput = false,
+  deferredTextRerender = false,
   revealQuestionFieldOnChoice = false,
   bodyText = 'HH вакансии',
   responseHref = '',
@@ -131,10 +133,25 @@ async function runContentAutoApply({
     }
   }
 
+  let textRerendered = false;
   const questionTextareas = Array.from({ length: hasQuestionField ? questionFieldCount : hasTextarea ? 1 : 0 }, (_, index) => new FakeElement({
     text: hasQuestionField ? 'Писать тут' : 'Сопроводительное письмо',
     attrs: hasQuestionField ? { name: `task_${235076159 + index}_text` } : { placeholder: 'Сопроводительное письмо' },
     dispatch(event) {
+      if (hasQuestionField && rerenderTextOnInput && !textRerendered && event?.type === 'input') {
+        textRerendered = true;
+        const renderedValues = questionTextareas.map(field => field.value);
+        const rerender = () => {
+          questionTextareas.forEach((field, i) => {
+            field.isConnected = false;
+            const replacement = new FakeElement({ text: field.textContent, attrs: { ...field.attrs }, value: renderedValues[i] });
+            replacement.parentElement = field.parentElement;
+            questionTextareas[i] = replacement;
+          });
+          if (dialog) dialog.selectorMap.textarea = [...questionTextareas, ...(hasCoverLetterField ? [coverTextarea] : [])];
+        };
+        if (deferredTextRerender) queueMicrotask(rerender); else rerender();
+      }
       if (hasQuestionField && rejectQuestionFieldWrites && event?.type === 'input') {
         this.value = '';
       }
@@ -226,6 +243,7 @@ async function runContentAutoApply({
           syncDialogQuestionControls();
         }
       });
+      input.checked = Boolean(item.checked);
       input.parentElement = new FakeElement({ text: item.label });
       return { ...item, input };
     });
@@ -1831,7 +1849,7 @@ test('[BS:COVERS:HHJA-BR-000026] no-AI mode still submits a vacancy with no lett
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('[BS:COVERS:HHJA-BR-000027] enabled AI mode uses editable template after provider failure', async () => {
+test('[BS:COVERS:HHJA-BR-000043] [BS:RETIRES:HHJA-BR-000027:BY:HHJA-BR-000043] enabled AI mode stops after provider failure', async () => {
   const fallbackCoverLetterTemplate = 'Провайдер недоступен. Отправляю сохранённый шаблон.';
   const result = await runContentAutoApply({
     dialogText: 'Добавьте сопроводительное письмо\nОтправить',
@@ -1843,10 +1861,12 @@ test('[BS:COVERS:HHJA-BR-000027] enabled AI mode uses editable template after pr
     groqResponse: { ok: false, error: 'provider unavailable' }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.groqRequests.length, 1);
-  assert.equal(result.textareaValue, fallbackCoverLetterTemplate);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.states.at(-1).state, 'error');
 });
 
 test('auto apply stop during cover-letter generation prevents fill and submit', async () => {
@@ -2460,7 +2480,7 @@ test('auto apply stops cleanly when hh shows daily response limit after response
   assert.equal(result.states.at(-1).lastError, '');
 });
 
-test('[BS:COVERS:HHJA-BR-000035] auto apply stops cleanly when hh shows daily response limit after submit', async () => {
+test('[BS:COVERS:HHJA-BR-000043] [BS:RETIRES:HHJA-BR-000035:BY:HHJA-BR-000043] auto apply stops cleanly when hh shows daily response limit after submit', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться',
     hasTextarea: false,
@@ -2888,7 +2908,7 @@ test('[BS:COVERS:HHJA-BR-000025] auto apply treats hh attach-cover-letter modal 
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('auto apply falls back when Groq cover letter looks like prompt leakage', async () => {
+test('auto apply stops when Groq cover letter looks like prompt leakage', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -2906,12 +2926,12 @@ test('auto apply falls back when Groq cover letter looks like prompt leakage', a
     }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply accepts short human Groq cover letter', async () => {
@@ -2930,7 +2950,7 @@ test('auto apply accepts short human Groq cover letter', async () => {
   assert.equal(result.appended.at(-1).status, 'applied');
 });
 
-test('auto apply falls back when Groq cover letter sounds like corporate template', async () => {
+test('auto apply stops when Groq cover letter sounds like corporate template', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -2940,15 +2960,15 @@ test('auto apply falls back when Groq cover letter sounds like corporate templat
     }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
-test('auto apply falls back when Groq cover letter is a three sentence template', async () => {
+test('auto apply stops when Groq cover letter is a three sentence template', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -2958,42 +2978,42 @@ test('auto apply falls back when Groq cover letter is a three sentence template'
     }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
-test('auto apply falls back when Groq cover letter sounds like formal requirement matching', async () => {
+test('auto apply stops when Groq cover letter sounds like formal requirement matching', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
     groqResponse: { ok: true, text: 'Опыт проектирования интеграций и микросервисов на Spring Boot соответствует требованиям вакансии.' }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
-test('auto apply falls back when Groq cover letter uses stiff overlap wording', async () => {
+test('auto apply stops when Groq cover letter uses stiff overlap wording', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
     groqResponse: { ok: true, text: 'Задачи с JVM backend и API близки к моему опыту, поэтому откликаюсь.' }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.textareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied');
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.textareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply records already-applied cover form update without consuming new-submit quota', async () => {
@@ -3226,12 +3246,12 @@ test('[BS:COVERS:HHJA-BR-000033] auto apply rejects model garbage without invent
     groqResponse: { ok: true, text: '{"role":"assistant","content":"делал проекты"}' }
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.textareaValue, '');
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply puts only labeled free-text answer into question field', async () => {
@@ -3290,12 +3310,12 @@ test('auto apply rejects leaked prompt context without inventing a question answ
     }
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.textareaValue, '');
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply fills messenger contact locally without asking Groq', async () => {
@@ -3537,11 +3557,11 @@ test('auto apply rejects duplicate structured IDs and never pastes a raw respons
   });
 
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.groqRequests.length, 1);
   assert.deepEqual(result.textareaValues, ['', '']);
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'error');
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Network answer|\{"answers"/);
 });
 
@@ -3565,11 +3585,11 @@ test('auto apply rejects missing and unknown structured IDs', async () => {
   });
 
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.groqRequests.length, 1);
   assert.deepEqual(result.textareaValues, ['', '']);
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'error');
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Unknown answer/);
 });
 
@@ -3973,10 +3993,10 @@ test('auto apply skips unknown choice when model does not return an exact option
   });
 
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.deepEqual(result.checkedLabels, []);
   assert.equal(result.groqRequests.length, 1);
-  assert.equal(result.appended.at(-1).status, 'skipped_choice_fill_not_verified');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply does not retry or guess an unconfigured hybrid choice', async () => {
@@ -3997,14 +4017,14 @@ test('auto apply does not retry or guess an unconfigured hybrid choice', async (
     ]
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.response.errors, 0);
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.response.errors, 1);
   assert.equal(result.submitClicks, 0);
   assert.deepEqual(result.checkedLabels, []);
   assert.equal(result.groqRequests.length, 1);
-  assert.equal(result.appended.at(-1).status, 'skipped_choice_fill_not_verified');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply fallback obeys configured work-format preference', async () => {
@@ -4155,7 +4175,7 @@ test('auto apply uses fallback choice answers after recoverable Groq error', asy
   assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
 });
 
-test('auto apply uses fallback cover letter after hung Groq runtime message', async () => {
+test('auto apply stops without a cover letter after hung Groq runtime message', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Отклик на вакансию\nСопроводительное письмо',
     hasTextarea: true,
@@ -4165,13 +4185,13 @@ test('auto apply uses fallback cover letter after hung Groq runtime message', as
     groqResponse: new Promise(() => {})
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.errors, 0);
-  assert.equal(result.response.navigated, true);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.appended.at(-1).status, 'applied');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
-  assert.equal(result.navigateUrl, 'https://hh.ru/search/vacancy?text=java&page=1');
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.errors, 1);
+  assert.equal(result.response.navigated, undefined);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.appended.at(-1).status, 'error');
+  assert.equal(result.appended.at(-1).coverLetterUsed, false);
+  assert.equal(result.navigateUrl, '');
 });
 
 test('auto apply handles callback-style Groq runtime response', async () => {
@@ -4245,7 +4265,7 @@ test('auto apply processed cap stops after skipped card for bounded live smoke',
   assert.equal(result.appended.length, 0);
 });
 
-test('auto apply processed cap completes after unsafe unknown choice is skipped', async () => {
+test('auto apply processed cap cannot mask terminal invalid AI choice', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Откликнуться\nГотовы ли пройти тестовое задание?\nДа\nНет',
     hasTextarea: false,
@@ -4256,13 +4276,13 @@ test('auto apply processed cap completes after unsafe unknown choice is skipped'
     message: { type: 'START_AUTO_APPLY', limitOverride: 1, maxProcessed: 1 }
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
   assert.equal(result.response.processed, 1);
-  assert.equal(result.response.skipped, 1);
-  assert.equal(result.appended.at(-1).status, 'skipped_choice_fill_not_verified');
-  assert.equal(result.states.at(-1).state, 'complete');
-  assert.equal(result.states.at(-1).currentAction, 'Отклики завершены');
+  assert.equal(result.response.skipped, 0);
+  assert.equal(result.appended.at(-1).status, 'error');
+  assert.equal(result.states.at(-1).state, 'error');
+  assert.equal(result.states.at(-1).currentAction, 'Отклики остановлены из-за ошибки');
 });
 
 test('auto apply processed cap stops after skipped navigation response form', async () => {
@@ -4625,7 +4645,7 @@ test('auto apply skips unsupported OEBS module experience without provider use o
   assert.equal(result.appended.at(-1).status, 'skipped_unsupported_candidate_fact');
 });
 
-test('auto apply keeps cover fallback but never invents employer text when provider fails', async () => {
+test('auto apply stops without inventing employer text when provider fails', async () => {
   const result = await runContentAutoApply({
     dialogText: 'Опишите опыт управления тестированием',
     hasTextarea: true,
@@ -4636,12 +4656,12 @@ test('auto apply keeps cover fallback but never invents employer text when provi
     expectedSalary: '250 000 руб. на руки'
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.equal(result.textareaValue, '');
-  assert.equal(result.appended.at(-1).status, 'skipped_bad_generated_answer');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('[BS:COVERS:HHJA-BR-000030] auto apply sends employer questions and mandatory cover letter in one structured request', async () => {
@@ -4671,7 +4691,7 @@ test('[BS:COVERS:HHJA-BR-000030] auto apply sends employer questions and mandato
   assert.equal(result.coverTextareaValue, 'Откликаюсь: мой подтвержденный опыт соответствует задачам роли.');
 });
 
-test('auto apply falls back when mandatory cover letter sounds like corporate template', async () => {
+test('auto apply stops when mandatory cover letter sounds like corporate template', async () => {
   const result = await runContentAutoApply({
     dialogText: [
       'Отклик на вакансию',
@@ -4693,13 +4713,13 @@ test('auto apply falls back when mandatory cover letter sounds like corporate te
     ]
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
-  assert.equal(result.coverTextareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.coverTextareaValue, '');
+  assert.equal(result.appended.at(-1).status, 'error');
+  assert.equal(result.appended.at(-1).coverLetterUsed, false);
 });
 
 test('auto apply does not paste question protocol into mandatory cover letter', async () => {
@@ -4741,16 +4761,16 @@ test('auto apply does not paste question protocol into mandatory cover letter', 
     groqResponse: { ok: true, text: protocolAnswer }
   });
 
-  assert.equal(result.response.ok, true);
-  assert.equal(result.response.applied, 1);
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.applied, 0);
   assert.equal(result.response.skipped, 0);
-  assert.equal(result.submitClicks, 1);
+  assert.equal(result.submitClicks, 0);
   assert.deepEqual(result.checkedLabels, ['Да', 'Да', 'B2', 'Гибридный', 'Сразу']);
   assert.match(result.textareaValues.join('\n'), /350000/);
-  assert.equal(result.coverTextareaValue, 'Откликаюсь на вакансию. Подробности опыта указаны в резюме.');
+  assert.equal(result.coverTextareaValue, '');
   assert.doesNotMatch(result.coverTextareaValue, /Choice group|Text question/i);
-  assert.equal(result.appended.at(-1).status, 'applied_test_assisted');
-  assert.equal(result.appended.at(-1).coverLetterUsed, true);
+  assert.equal(result.appended.at(-1).status, 'error');
+  assert.equal(result.appended.at(-1).coverLetterUsed, false);
 });
 
 test('auto apply skips an acknowledgement when only a generic cover letter is available', async () => {
@@ -4781,12 +4801,12 @@ test('auto apply skips an acknowledgement when only a generic cover letter is av
     expectedSalary: '250 000 руб. gross'
   });
 
-  assert.equal(result.response.ok, true);
+  assert.equal(result.response.ok, false);
   assert.equal(result.response.applied, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
   assert.equal(result.submitClicks, 0);
   assert.deepEqual(result.checkedLabels, []);
-  assert.equal(result.appended.at(-1).status, 'skipped_acknowledgement_not_verified');
+  assert.equal(result.appended.at(-1).status, 'error');
 });
 
 test('auto apply verifies a numbered cover letter before selecting the copy-answers acknowledgement', async () => {
@@ -8476,7 +8496,8 @@ for (const onlyOther of [false, true]) {
     });
     assert.deepEqual(result.checkedLabels, []);
     assert.equal(result.submitClicks, 0);
-    assert.equal(result.response.skipped, 1);
+    assert.equal(result.response.skipped, 0);
+
   });
 }
 
@@ -8504,7 +8525,8 @@ for (const invalidAnswer of ['', 'Text question 1: Context: Resume candidate']) 
     assert.deepEqual(result.checkedLabels, []);
     assert.equal(result.textareaValue, '');
     assert.equal(result.submitClicks, 0);
-    assert.equal(result.response.skipped, 1);
+    assert.equal(result.response.skipped, 0);
+
   });
 }
 
@@ -8523,7 +8545,7 @@ test('checkbox failure preflight: missing group leaves configured choices untouc
   });
   assert.deepEqual(result.checkedLabels, []);
   assert.equal(result.submitClicks, 0);
-  assert.equal(result.response.skipped, 1);
+  assert.equal(result.response.skipped, 0);
 });
 
 test('checkbox failure preflight: live salary shorthand uses configured expectations', async () => {
@@ -8595,3 +8617,237 @@ test('checkbox preflight preserves explicit Other and answers newly revealed tex
   assert.equal(result.submitClicks, 1);
   assert.equal(result.response.applied, 1);
 });
+
+for (const deferredTextRerender of [false, true]) {
+  test(`regression current fields receive all answers after text rerender deferred=${deferredTextRerender}`, async () => {
+    const result = await runContentAutoApply({
+      dialogText: 'Ответьте на вопросы работодателя', startOnResponseForm: true,
+      hasTextarea: true, hasQuestionField: true, questionFieldCount: 2,
+      questionFieldLabels: ['Опишите опыт разработки', 'Опишите последний проект'],
+      rerenderTextOnInput: true, deferredTextRerender,
+      groqResponse: message => ({ ok: true, answers: message.questions.map(q => ({ id: q.id, answer: 'Разрабатывал Java сервисы', selectedOptions: [] })), coverLetter: '' })
+    });
+    assert.deepEqual(result.textareaValues, ['Разрабатывал Java сервисы', 'Разрабатывал Java сервисы']);
+    assert.equal(result.submitClicks, 1);
+    assert.equal(result.groqRequests.length, 1);
+  });
+}
+test('[BS:COVERS:HHJA-BR-000047] regression checkbox selections remove unwanted prechecked option', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Какие технологии знаете?', hasTextarea: false, startOnResponseForm: true,
+    questionControls: [
+      { type: 'checkbox', name: 'stack', label: 'Java', checked: false },
+      { type: 'checkbox', name: 'stack', label: 'Kotlin', checked: true }
+    ],
+    groqResponse: message => ({ ok: true, answers: message.questions.map(q => ({ id: q.id, answer: '', selectedOptions: ['Java'] })), coverLetter: '' })
+  });
+  assert.deepEqual(result.checkedLabels, ['Java']);
+  assert.equal(result.submitClicks, 1);
+});
+test('regression terminal provider failure stops list queue without template or next item', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true, dailyLimit: 20,
+    additionalCardIds: ['222222'],
+    groqResponse: { ok: false, error: 'Groq HTTP 403', errorCode: 'AI_HTTP_ERROR', provider: 'groq', httpStatus: 403, task: 'cover_letter' }
+  });
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.appended.length, 1);
+  assert.equal(result.states.at(-1).state, 'error');
+  assert.equal(result.states.at(-1).lastErrorCode, 'AI_HTTP_ERROR');
+  assert.equal(result.textareaValue, '');
+});
+
+test('[BS:COVERS:HHJA-BR-000043] terminal AI failure stops navigated queue and preserves metadata', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true, startOnResponseForm: true,
+    sendMessageAfterImport: false,
+    initialLocalStore: { autoApplyQueue: {
+      active: true, runId: 'terminal-queue', index: 0, limit: 2, returnToSearch: true,
+      sourceUrl: 'https://hh.ru/search/vacancy?text=java',
+      items: ['123', '456'].map((id, index) => ({ index, vacancyId: id, title: 'Java Developer', url: `https://hh.ru/vacancy/${id}`, responseUrl: `https://hh.ru/applicant/vacancy_response?vacancyId=${id}` })),
+      counters: { found: 2, processed: 0, applied: 0, skipped: 0, errors: 0 },
+      config: { ...TEST_READY_CONFIG, aiEnabled: true }
+    } },
+    groqResponse: { ok: false, error: 'Groq HTTP 403', errorCode: 'AI_HTTP_ERROR', provider: 'groq', task: 'cover_letter', httpStatus: 403 }
+  });
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.appended.length, 1);
+  assert.equal(result.navigateUrl, '');
+  assert.equal(result.localStore.autoApplyQueue.active, false);
+  assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  assert.equal(result.states.at(-1).state, 'error');
+  assert.equal(result.states.at(-1).lastErrorCode, 'AI_HTTP_ERROR');
+  assert.equal(result.states.at(-1).lastErrorHttpStatus, 403);
+});
+test('continuation rejects saved queue from another AI mode without provider calls', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true,
+    message: { type: 'CONTINUE_AUTO_APPLY' },
+    initialLocalStore: { aiEnabled: false, autoApplyQueue: {
+      active: true, runId: 'old-mode', index: 0,
+      config: { ...TEST_READY_CONFIG, aiEnabled: true },
+      items: [{ vacancyId: '123', url: 'https://hh.ru/vacancy/123' }]
+    } }
+  });
+  assert.equal(result.response.ok, false);
+  assert.match(result.response.error, /Режим ИИ изменён/);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 0);
+});
+
+test('[BS:COVERS:HHJA-BR-000043] resume-profile startup failure keeps provider diagnostic metadata', async () => {
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true,
+    runtimeResponses: { ENSURE_RESUME_PROFILE: {
+      ok: false, error: 'Groq HTTP 403', errorCode: 'AI_HTTP_ERROR', provider: 'groq', task: 'resume_profile', httpStatus: 403
+    } }
+  });
+  assert.equal(result.response.ok, false);
+  assert.equal(result.response.errorCode, 'AI_HTTP_ERROR');
+  assert.equal(result.response.provider, 'groq');
+  assert.equal(result.response.httpStatus, 403);
+  assert.equal(result.groqRequests.length, 0);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.states.at(-1).state, 'error');
+  assert.equal(result.states.at(-1).lastErrorCode, 'AI_HTTP_ERROR');
+});
+
+test('resume-profile startup deadline budgets both attempts for primary and fallback providers', async () => {
+  const previousRegistry = globalThis.HHJA_AI_PROVIDERS;
+  await import(`../src/ai-providers.js?startup-deadline=${Date.now()}`);
+  const registry = globalThis.HHJA_AI_PROVIDERS;
+  const config = { aiProvider: 'qwen', aiFallbackProvider: 'groq', aiProviderCredentials: { qwen: { apiKey: 'sk-test' }, groq: { apiKey: 'gsk-test' } } };
+  const expectedBudget = registry.getOperationBudgetMs(config, 'resume_profile_build');
+  const singleAttemptBudget = registry.getOperationBudgetMs(config, 'cover_letter');
+  let remainingBudget;
+  try {
+    const result = await runContentAutoApply({
+      dialogText: 'Откликнуться', hasTextarea: false,
+      initialLocalStore: config,
+      runtimeResponses: { ENSURE_RESUME_PROFILE(message) {
+        remainingBudget = message.deadlineAt - Date.now();
+        return { ok: true };
+      } }
+    });
+    assert.equal(result.response.ok, true);
+    assert.ok(expectedBudget > singleAttemptBudget, 'profile retries require a larger operation budget');
+    assert.ok(remainingBudget >= expectedBudget - 100 && remainingBudget <= expectedBudget,
+      `profile message has ${remainingBudget}ms, expected both-attempt budget ${expectedBudget}ms`);
+  } finally {
+    if (previousRegistry === undefined) delete globalThis.HHJA_AI_PROVIDERS;
+    else globalThis.HHJA_AI_PROVIDERS = previousRegistry;
+  }
+});
+
+test('fatal provider cleanup writes both queues before terminal state releases ownership', async () => {
+  let leaseActive = false;
+  const owned = {};
+  const terminalStates = [];
+  let rejectedWrites = 0;
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true,
+    runtimeResponses: {
+      CLAIM_AUTO_APPLY_RUN(message) { leaseActive = true; return { ok: true, claimed: true, runId: message.runId, ownerId: 7 }; },
+      CHECK_AUTO_APPLY_RUN_OWNERSHIP() { return { ok: true, owned: leaseActive }; },
+      WRITE_AUTO_APPLY_STATE(message) {
+        if (!leaseActive) { rejectedWrites += 1; return { ok: false, written: false }; }
+        Object.assign(owned, message.patch);
+        return { ok: true, written: true };
+      },
+      SET_RUN_STATE(message) {
+        if (!leaseActive) return { ok: false };
+        if (['error', 'complete', 'stopped'].includes(message.patch.state)) {
+          terminalStates.push(message.patch);
+          leaseActive = false;
+        }
+        return { ok: true };
+      }
+    },
+    groqResponse() {
+      owned.autoApplyQueue = { active: true };
+      owned.autoApplySearchQueue = { active: true };
+      return { ok: false, error: 'Groq HTTP 403', errorCode: 'AI_HTTP_ERROR', provider: 'groq', task: 'cover_letter', httpStatus: 403 };
+    }
+  });
+  assert.equal(rejectedWrites, 0);
+  assert.equal(owned.autoApplyQueue.active, false);
+  assert.equal(owned.autoApplySearchQueue.active, false);
+  assert.equal(terminalStates.length, 1);
+  assert.equal(terminalStates[0].lastErrorCode, 'AI_HTTP_ERROR');
+  assert.equal(result.submitClicks, 0);
+});
+
+test('startup refreshes AI mode after ownership claim before generating or submitting', async () => {
+  const aiLetter = 'Откликаюсь на вакансию Java-разработчика, мой опыт указан в резюме.';
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true,
+    initialLocalStore: { aiEnabled: false, fallbackCoverLetterTemplate: 'Старый шаблон без ИИ.' },
+    runtimeResponses: { async CLAIM_AUTO_APPLY_RUN(message) {
+      await chrome.storage.local.set({ aiEnabled: true });
+      return { ok: true, claimed: true, runId: message.runId, ownerId: 7 };
+    } },
+    groqResponse: { ok: true, text: aiLetter }
+  });
+  assert.equal(result.response.ok, true);
+  assert.equal(result.groqRequests.length, 1);
+  assert.equal(result.runtimeMessages.some(message => message.type === 'ENSURE_RESUME_PROFILE'), true);
+  assert.equal(result.textareaValue, aiLetter);
+  assert.equal(result.submitClicks, 1);
+});
+
+test('startup releases ownership when AI mode changes to unconfigured after claim', async () => {
+  let leaseActive = false;
+  const result = await runContentAutoApply({
+    dialogText: 'Сопроводительное письмо', hasTextarea: true,
+    initialLocalStore: { aiEnabled: false, groqApiKey: '', aiProviderCredentials: {} },
+    runtimeResponses: {
+      async CLAIM_AUTO_APPLY_RUN(message) {
+        leaseActive = true;
+        await chrome.storage.local.set({ aiEnabled: true });
+        return { ok: true, claimed: true, runId: message.runId, ownerId: 7 };
+      },
+      SET_RUN_STATE(message) {
+        if (message.patch.state === 'error') leaseActive = false;
+        return { ok: true };
+      }
+    }
+  });
+  assert.equal(result.response.ok, false);
+  assert.equal(leaseActive, false);
+  assert.equal(result.submitClicks, 0);
+  assert.equal(result.groqRequests.length, 0);
+});
+
+for (const queueKind of ['response', 'search']) {
+  test(`continuation rechecks AI mode after resuming ${queueKind} ownership`, async () => {
+    let leaseActive = false;
+    const queue = {
+      active: true, runId: 'resume-mode-race', ownerId: 7, index: 0, limit: 1,
+      items: [{ index: 1, vacancyId: '123', title: 'Java Developer', url: 'https://hh.ru/vacancy/123', responseUrl: 'https://hh.ru/applicant/vacancy_response?vacancyId=123' }],
+      counters: { found: 1, processed: 0, applied: 0, skipped: 0, errors: 0 },
+      config: { ...TEST_READY_CONFIG, aiEnabled: false }
+    };
+    const result = await runContentAutoApply({
+      dialogText: 'Сопроводительное письмо', hasTextarea: true,
+      startOnResponseForm: queueKind === 'response', sendMessageAfterImport: false,
+      initialLocalStore: { aiEnabled: false, runState: { state: 'applying' },
+        [queueKind === 'response' ? 'autoApplyQueue' : 'autoApplySearchQueue']: queue },
+      runtimeResponses: {
+        CHECK_AUTO_APPLY_RUN_OWNERSHIP() { return { ok: true, owned: leaseActive }; },
+        async RESUME_AUTO_APPLY_RUN(message) {
+          leaseActive = true;
+          await chrome.storage.local.set({ aiEnabled: true });
+          return { ok: true, resumed: true, owned: true, runId: message.runId, ownerId: 7 };
+        }
+      }
+    });
+    assert.equal(result.submitClicks, 0);
+    assert.equal(result.groqRequests.length, 0);
+    assert.equal(result.states.at(-1).state, 'error');
+    assert.equal(result.states.at(-1).lastErrorCode, 'HHJA_AI_MODE_CHANGED');
+    assert.equal(result.localStore.autoApplyQueue.active, false);
+    assert.equal(result.localStore.autoApplySearchQueue.active, false);
+  });
+}
