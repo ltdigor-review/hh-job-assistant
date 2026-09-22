@@ -747,10 +747,54 @@ function aiProviderError(message, code, fallbackEligible = false, cause = undefi
   return error;
 }
 
+async function withOllamaServiceWorkerKeepalive(work) {
+  // A scoped event keeps an MV3 worker alive while a cold local model loads; it never outlives the request.
+  if (typeof chrome?.runtime?.getPlatformInfo !== 'function') return work();
+  const ping = () => chrome.runtime.getPlatformInfo().catch(() => {});
+  const interval = setInterval(ping, 25000);
+  try { return await work(); } finally { clearInterval(interval); }
+}
+
+function isLocalOllamaModel(model) {
+  if (!model || typeof model !== 'object') return false;
+  const name = String(model.name || model.model || '').trim();
+  const serialized = JSON.stringify(model).toLowerCase();
+  return Boolean(name) && !/(?:^|[_:-])(cloud|remote)(?:[_:-]|$)/i.test(name) &&
+    !/"(?:remote_host|remote_model|cloud_model|cloud)"\s*:\s*(?:true|"[^\"]+")/i.test(serialized);
+}
+
+async function listOllamaModels({ deadlineAt = Date.now() + 120000 } = {}) {
+  const provider = AI_PROVIDERS.getProvider('ollama');
+  const controller = new AbortController();
+  const timeoutMs = Math.max(1, Math.min(120000, deadlineAt - Date.now()));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(provider.tagsEndpoint, { method: 'GET', signal: controller.signal, redirect: 'error' });
+    const text = await response.text();
+    if (!response.ok) {
+      const error = aiProviderError(response.status === 401 || response.status === 403 ? 'Ollama отказал в доступе' : `Ollama вернул HTTP ${response.status}`, 'HHJA_OLLAMA_HTTP', false);
+      error.httpStatus = response.status;
+      throw error;
+    }
+    let data;
+    try { data = JSON.parse(text); } catch { throw aiProviderError('Ollama вернул некорректный список моделей', 'HHJA_OLLAMA_INVALID_RESPONSE', false); }
+    if (!Array.isArray(data.models)) throw aiProviderError('Ollama вернул некорректный список моделей', 'HHJA_OLLAMA_INVALID_RESPONSE', false);
+    return data.models.filter(isLocalOllamaModel).map((model) => String(model.name || model.model).trim()).filter(Boolean);
+  } catch (error) {
+    if (String(error?.code || '').startsWith('HHJA_')) throw error;
+    if (error?.name === 'AbortError') throw aiProviderError('Ollama не ответил за отведённое время', 'HHJA_OLLAMA_TIMEOUT', false, error);
+    throw aiProviderError('Ollama недоступен. Запустите локальный сервер.', 'HHJA_OLLAMA_UNAVAILABLE', false, error);
+  } finally { clearTimeout(timeout); }
+}
+
 async function fetchProviderCompletion({ providerId, task, model, apiKey, requestBody, deadlineAt }) {
   const provider = AI_PROVIDERS.getProvider(providerId);
-  return enqueueAiHttp(async () => {
+  const run = () => enqueueAiHttp(async () => {
     assertAiDeadline(deadlineAt);
+    if (provider.local) {
+      const models = await listOllamaModels({ deadlineAt });
+      if (!models.includes(model)) throw aiProviderError(`Локальная модель Ollama «${model}» не найдена`, 'HHJA_OLLAMA_MODEL_MISSING', false);
+    }
     if (provider.quotaPolicy === 'groq') await preflightGroqQuota({ task, model, requestBody });
     assertAiDeadline(deadlineAt);
     const controller = new AbortController();
@@ -767,8 +811,9 @@ async function fetchProviderCompletion({ providerId, task, model, apiKey, reques
       result = await Promise.race([timeout, (async () => {
         const response = await fetch(provider.endpoint, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          headers: provider.local ? { 'Content-Type': 'application/json' } : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
           signal: controller.signal,
+          redirect: 'error',
           body: JSON.stringify(requestBody)
         });
         const responseText = typeof response.text === 'function' ? await response.text() : JSON.stringify(await response.json());
@@ -787,10 +832,11 @@ async function fetchProviderCompletion({ providerId, task, model, apiKey, reques
     if (provider.quotaPolicy === 'groq') {
       await recordGroqUsage({ task, model, requestBody, response, usage: data?.usage });
     } else {
-      await recordProviderUsage({ providerId: provider.id, task, model, usage: data?.usage });
+      await recordProviderUsage({ providerId: provider.id, task, model, usage: provider.local ? data : data?.usage });
     }
     return result;
   }, deadlineAt);
+  return provider.local ? withOllamaServiceWorkerKeepalive(run) : run();
 }
 
 async function storageGet(keys) {
@@ -2778,7 +2824,7 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
   const primaryProviderId = AI_PROVIDERS.normalizeProviderId(aiProvider);
   const primaryProvider = AI_PROVIDERS.getProvider(primaryProviderId);
   const primaryApiKey = AI_PROVIDERS.getApiKey(settings, primaryProviderId);
-  if (!primaryApiKey) {
+  if (!primaryProvider.local && !primaryApiKey) {
     throw aiProviderError(`Ключ ${primaryProvider.label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED', false);
   }
 
@@ -2849,7 +2895,7 @@ async function callResumeProfileModel({ sourceText = '', currentProfile = '', ed
       : '';
     if (
       !fallbackProviderId ||
-      !fallbackApiKey ||
+      (!AI_PROVIDERS.getProvider(fallbackProviderId || 'qwen').local && !fallbackApiKey) ||
       error?.aiFallbackEligible !== true
     ) {
       throw error;
@@ -3053,7 +3099,7 @@ async function buildAutomationSettingsAudit() {
     debugLogsEnabled: current.agentDebugLogsEnabled === true,
     debugRetention20: Number(current.agentDebugRetentionCount) >= 20,
     resumeAutoRefreshEnabled: !aiEnabled || current.resumeProfileAutoRefreshEnabled === true,
-    aiProviderKeyConfigured: !aiEnabled || Boolean(selectedProviderKey),
+    aiProviderKeyConfigured: !aiEnabled || AI_PROVIDERS.getProvider(selectedProvider).local || Boolean(selectedProviderKey),
     fallbackProviderReady: !aiEnabled || !fallbackProvider || Boolean(AI_PROVIDERS.getApiKey(current, fallbackProvider))
   };
   const issues = Object.entries(checks)
@@ -3078,11 +3124,13 @@ function getAiTaskLabel(task) {
 }
 
 function normalizeUsage(usage = {}) {
+  usage = usage && typeof usage === 'object' ? usage : {};
+  const nativeUsage = usage?.prompt_eval_count !== undefined || usage?.eval_count !== undefined;
   const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? usage?.cached_tokens;
   return {
-    promptTokens: Number.isFinite(Number(usage.prompt_tokens)) ? Number(usage.prompt_tokens) : null,
-    completionTokens: Number.isFinite(Number(usage.completion_tokens)) ? Number(usage.completion_tokens) : null,
-    totalTokens: Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) : null,
+    promptTokens: Number.isFinite(Number(nativeUsage ? usage.prompt_eval_count : usage.prompt_tokens)) ? Number(nativeUsage ? usage.prompt_eval_count : usage.prompt_tokens) : null,
+    completionTokens: Number.isFinite(Number(nativeUsage ? usage.eval_count : usage.completion_tokens)) ? Number(nativeUsage ? usage.eval_count : usage.completion_tokens) : null,
+    totalTokens: Number.isFinite(Number(nativeUsage ? Number(usage.prompt_eval_count || 0) + Number(usage.eval_count || 0) : usage.total_tokens)) ? Number(nativeUsage ? Number(usage.prompt_eval_count || 0) + Number(usage.eval_count || 0) : usage.total_tokens) : null,
     cachedTokens: Number.isFinite(Number(cachedTokens)) ? Number(cachedTokens) : 0,
     reasoningTokens: Number.isFinite(Number(usage?.completion_tokens_details?.reasoning_tokens))
       ? Number(usage.completion_tokens_details.reasoning_tokens)
@@ -3218,18 +3266,23 @@ async function setProviderCooldown(providerId, cooldownUntil) {
   await storageSet(patch);
 }
 
-function buildProviderRequestBody({ providerId, task, messages, attempt = 1 }) {
+function buildProviderRequestBody({ providerId, task, messages, attempt = 1, ollamaModel = '' }) {
   const provider = AI_PROVIDERS.getProvider(providerId);
   const capability = AI_PROVIDERS.getTaskCapability(provider.id, task);
   const requestBody = {
-    model: capability.model,
+    model: provider.local ? String(ollamaModel || capability.model).trim() : capability.model,
     messages,
     temperature: task.startsWith('resume_profile_') ? 0 : 0.2,
     max_tokens: AI_PROVIDERS.getTaskMaxTokens(provider.id, task, attempt),
     ...provider.requestExtras,
     ...capability.requestExtras
   };
-  if (capability.responseFormat) requestBody.response_format = capability.responseFormat;
+  if (provider.local) {
+    requestBody.options = { temperature: requestBody.temperature, num_predict: requestBody.max_tokens };
+    delete requestBody.temperature;
+    delete requestBody.max_tokens;
+    if (capability.responseFormat) requestBody.format = capability.responseFormat.json_schema?.schema || capability.responseFormat;
+  } else if (capability.responseFormat) requestBody.response_format = capability.responseFormat;
   if (provider.id === 'groq' && task === 'test_assist') {
     const inputTokens = estimateGroqRequestTokens({ ...requestBody, max_tokens: 0 }).likelyRateTokens;
     const tpmLimit = GROQ_PUBLISHED_TPM_LIMITS[requestBody.model];
@@ -3256,7 +3309,7 @@ async function executeAiProviderRequest(input) {
   }
 }
 
-async function executeAiProviderRequestInner({ providerId, apiKey, task, messages, logDetails = {}, attempt = 1, maxAttempts = 1, questions = [], coverLetterRequested = false, allowStructuredCoverLetter = false, deadlineAt = AI_PROVIDERS.createOperationDeadline({ aiProvider: providerId }, task) }) {
+async function executeAiProviderRequestInner({ providerId, apiKey, task, messages, logDetails = {}, attempt = 1, maxAttempts = 1, questions = [], coverLetterRequested = false, allowStructuredCoverLetter = false, ollamaModel: requestedOllamaModel = '', deadlineAt = AI_PROVIDERS.createOperationDeadline({ aiProvider: providerId }, task) }) {
   assertAiDeadline(deadlineAt);
   const provider = AI_PROVIDERS.getProvider(providerId);
   const current = await storageGet(['aiProviderCooldowns', 'groqCooldownUntil']);
@@ -3276,7 +3329,8 @@ async function executeAiProviderRequestInner({ providerId, apiKey, task, message
     );
   }
 
-  const requestBody = buildProviderRequestBody({ providerId: provider.id, task, messages, attempt });
+  const { ollamaModel = DEFAULTS.ollamaModel } = provider.local ? await storageGet(['ollamaModel']) : {};
+  const requestBody = buildProviderRequestBody({ providerId: provider.id, task, messages, attempt, ollamaModel: requestedOllamaModel || ollamaModel });
   const startDetails = {
     provider: provider.id,
     task,
@@ -3371,8 +3425,9 @@ async function executeAiProviderRequestInner({ providerId, apiKey, task, message
     throw error;
   }
 
-  const content = String(data?.choices?.[0]?.message?.content || '').trim();
-  const finishReason = data?.choices?.[0]?.finish_reason || '';
+  const rawContent = provider.local ? data?.message?.content : data?.choices?.[0]?.message?.content;
+  const content = typeof rawContent === 'string' ? rawContent.trim() : '';
+  const finishReason = provider.local ? (data?.done_reason || (data?.done === true ? 'stop' : '')) : data?.choices?.[0]?.finish_reason || '';
   if (!content || finishReason === 'length') {
     const errorDetails = {
       provider: provider.id,
@@ -3409,14 +3464,14 @@ async function executeAiProviderRequestInner({ providerId, apiKey, task, message
     );
   }
 
-  const usage = normalizeUsage(data?.usage);
+  const usage = normalizeUsage(provider.local ? data : data?.usage);
   const responseDetails = {
     provider: provider.id,
     task,
     responseLength: content.length,
     responseHash: hashText(content),
     finishReason,
-    choiceCount: Array.isArray(data?.choices) ? data.choices.length : 0,
+    choiceCount: provider.local ? (data?.message ? 1 : 0) : Array.isArray(data?.choices) ? data.choices.length : 0,
     model: data?.model || requestBody.model,
     usage,
     attempt
@@ -3476,7 +3531,7 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
       ? options.apiKey
       : AI_PROVIDERS.getApiKey(settings, primaryProviderId)
   ).trim();
-  if (!primaryApiKey) {
+  if (!primaryProvider.local && !primaryApiKey) {
     throw aiProviderError(`Ключ ${primaryProvider.label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED', false);
   }
 
@@ -3573,7 +3628,7 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
       : '';
     const canFallback = options.disableFallback !== true &&
       Boolean(fallbackProviderId) &&
-      Boolean(fallbackApiKey) &&
+      (AI_PROVIDERS.getProvider(fallbackProviderId || 'qwen').local || Boolean(fallbackApiKey)) &&
       error?.aiFallbackEligible === true;
     if (!canFallback) throw error;
     fallbackReason = error.code || 'HHJA_AI_PROVIDER_ERROR';
@@ -3650,13 +3705,14 @@ async function callAi({ task = 'cover_letter', vacancyText = '', extraText = '',
   return { text: content, answers: [], coverLetter: content, provider: provider.id, usage, fallbackReason };
 }
 
-async function testAiProvider(providerId, apiKey, hasApiKeyOverride = false) {
+async function testAiProvider(providerId, apiKey, hasApiKeyOverride = false, ollamaModel = '') {
   await assertAiEnabled();
   const config = await storageGet(['aiProvider', 'aiProviderCredentials', 'groqApiKey']);
   const id = AI_PROVIDERS.normalizeProviderId(providerId || config.aiProvider);
   const key = String(hasApiKeyOverride ? apiKey || '' : AI_PROVIDERS.getApiKey(config, id)).trim();
-  if (!key) throw aiProviderError(`Ключ ${AI_PROVIDERS.getProvider(id).label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED');
+  if (!AI_PROVIDERS.getProvider(id).local && !key) throw aiProviderError(`Ключ ${AI_PROVIDERS.getProvider(id).label} API не настроен`, 'HHJA_AI_PROVIDER_NOT_CONFIGURED');
   const checks = [];
+  const deadlineAt = Date.now() + AI_PROVIDERS.getProvider(id).timeoutMs;
   const questions = [{ id: 'experience', kind: 'text', inputType: 'text', question: 'Сколько лет опыта Java?', options: [] }];
   for (const task of ['cover_letter', 'resume_profile_build', 'test_assist']) {
     const instruction = task === 'cover_letter'
@@ -3665,7 +3721,7 @@ async function testAiProvider(providerId, apiKey, hasApiKeyOverride = false) {
         ? 'Верни JSON {"profile":"профиль кандидата не короче 40 символов","weaknesses":[]}. Используй только факты.'
         : 'Верни JSON {"answers":[{"id":"experience","answer":"3 года","selectedOptions":[]}],"coverLetter":""}.';
     try {
-      const result = await executeAiProviderRequest({ providerId: id, apiKey: key, task, questions: task === 'test_assist' ? questions : [], messages: [
+      const result = await executeAiProviderRequest({ providerId: id, apiKey: key, ollamaModel, deadlineAt, task, questions: task === 'test_assist' ? questions : [], messages: [
         { role: 'system', content: instruction },
         { role: 'user', content: 'Синтетический кандидат: Java разработчик, 3 года опыта Spring Boot и SQL. Вакансия Java разработчика.' }
       ] });
@@ -5528,9 +5584,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await testAiProvider(
           message.providerId,
           message.apiKey,
-          Object.prototype.hasOwnProperty.call(message, 'apiKey')
+          Object.prototype.hasOwnProperty.call(message, 'apiKey'),
+          message.ollamaModel
         );
         sendResponse(result);
+        break;
+      }
+      case 'LIST_OLLAMA_MODELS': {
+        const models = await listOllamaModels();
+        sendResponse({ ok: true, provider: 'ollama', models });
         break;
       }
       case 'TEST_GROQ': {

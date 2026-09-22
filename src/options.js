@@ -7,6 +7,9 @@ const WORK_FORMAT_PREFERENCE_VALUES = new Set(['remote', 'hybrid', 'office']);
 const fields = {
   aiEnabled: document.getElementById('aiEnabled'),
   aiProvider: document.getElementById('aiProvider'),
+  ollamaModel: document.getElementById('ollamaModel'),
+  ollamaControls: document.getElementById('ollamaControls'),
+  credentialControls: document.getElementById('credentialControls'),
   credentialProvider: document.getElementById('credentialProvider'),
   aiProviderApiKey: document.getElementById('aiProviderApiKey'),
   aiFallbackProvider: document.getElementById('aiFallbackProvider'),
@@ -52,6 +55,8 @@ const resumeProfileButtons = [
   document.getElementById('editResumeProfile')
 ];
 const testAiProviderButton = document.getElementById('testAiProvider');
+const testOllamaProviderButton = document.getElementById('testOllamaProvider');
+const refreshOllamaModelsButton = document.getElementById('refreshOllamaModels');
 const credentialDrafts = new Map();
 let credentialEditorProviderId = '';
 let aiProviderTestGeneration = 0;
@@ -59,6 +64,7 @@ let agentDebugRuns = [];
 let agentDebugDownloadInProgress = false;
 let aiModeSaving = false;
 let aiModeLocked = false;
+let lastKnownOllamaModel = '';
 
 function localizeError(error, fallback) {
   return globalThis.HHJA_LOCALIZE_ERROR?.(error, fallback) || fallback || 'Внутренняя ошибка расширения.';
@@ -93,19 +99,24 @@ function createProviderOption(provider) {
 }
 
 function populateProviderSelectors() {
-  const providerOptions = () => providers().map(createProviderOption);
-  fields.aiProvider.replaceChildren(...providerOptions());
-  fields.credentialProvider.replaceChildren(...providerOptions());
+  fields.aiProvider.replaceChildren(...providers().map(createProviderOption));
+  fields.credentialProvider.replaceChildren(...providers().filter((provider) => !provider.local).map(createProviderOption));
 }
 
 function renderFallbackProviders(preferredValue = fields.aiFallbackProvider.value) {
+  if (selectedProviderId() === 'ollama') {
+    fields.aiFallbackProvider.replaceChildren();
+    fields.aiFallbackSection.hidden = true;
+    fields.aiFallbackProvider.disabled = true;
+    return;
+  }
   const off = document.createElement('option');
   off.value = '';
   off.textContent = 'Выключен';
   const options = providers()
     .filter((provider) => {
       const draft = credentialDrafts.get(provider.id);
-      return provider.id !== selectedProviderId() && Boolean(String(draft?.apiKey || '').trim());
+      return !provider.local && provider.id !== selectedProviderId() && Boolean(String(draft?.apiKey || '').trim());
     })
     .map(createProviderOption);
   fields.aiFallbackProvider.replaceChildren(off, ...options);
@@ -122,6 +133,9 @@ function renderAiModeControls() {
   fields.aiEnabled.title = aiModeLocked ? 'Остановите запуск перед сменой режима ИИ' : '';
   fields.aiProvider.disabled = !enabled;
   testAiProviderButton.disabled = !enabled;
+  fields.ollamaModel.disabled = !enabled;
+  refreshOllamaModelsButton.disabled = !enabled;
+  testOllamaProviderButton.disabled = !enabled;
   fields.resumeProfileEditComment.disabled = !enabled;
   fields.resumeProfileAutoRefreshEnabled.disabled = !enabled;
   resumeProfileButtons.forEach((button) => { button.disabled = !enabled; });
@@ -136,8 +150,39 @@ function renderAiModeControls() {
 function renderProviderControls() {
   const providerId = selectedProviderId();
   const provider = AI_PROVIDERS.getProvider(providerId);
-  aiProviderModelNode.textContent = provider.settingsModelSummary;
+  aiProviderModelNode.textContent = provider.local
+    ? `Локально на этом Mac · ${fields.ollamaModel.value || 'модель не выбрана'}`
+    : provider.settingsModelSummary;
+  const local = provider.local === true;
+  fields.ollamaControls.hidden = !local;
+  fields.credentialControls.hidden = local;
+  document.getElementById('ollamaProbeControls').hidden = !local;
   renderFallbackProviders();
+}
+
+function renderOllamaModels(models = [], preferred = fields.ollamaModel.value || DEFAULTS.ollamaModel) {
+  const values = [...new Set(models.map((value) => String(value || '').trim()).filter(Boolean))];
+  fields.ollamaModel.replaceChildren(...(values.length ? values : ['']).map((value) => {
+    const option = document.createElement('option'); option.value = value; option.textContent = value; return option;
+  }));
+  if (!values.length) fields.ollamaModel.options[0].textContent = 'Нет локальных моделей';
+  fields.ollamaModel.value = values.includes(preferred) ? preferred : (values[0] || '');
+  if (fields.ollamaModel.value) lastKnownOllamaModel = fields.ollamaModel.value;
+  fields.ollamaModel.disabled = !isAiEnabled() || values.length === 0;
+  if (selectedProviderId() === 'ollama') renderProviderControls();
+}
+
+async function refreshOllamaModels() {
+  setAiProviderStatus('Получаю список локальных моделей Ollama…');
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'LIST_OLLAMA_MODELS' });
+    if (!response?.ok) throw new Error(response?.error || 'Не удалось получить список моделей Ollama.');
+    renderOllamaModels(response.models, fields.ollamaModel.value || lastKnownOllamaModel);
+    setAiProviderStatus(response.models.length ? `Локальные модели: ${response.models.join(', ')}` : 'В Ollama нет локальных моделей.', response.models.length === 0);
+  } catch (error) {
+    renderOllamaModels([], '');
+    setAiProviderStatus(localizeError(error, 'Ollama недоступен. Запустите локальный сервер.'), true);
+  }
 }
 
 function currentCredentialDraft(providerId = credentialEditorProviderId) {
@@ -154,6 +199,7 @@ function renderConfiguredProviders() {
   configuredProvidersNode.textContent = providers()
     .map((provider) => {
       const draft = credentialDrafts.get(provider.id);
+      if (provider.local) return `${provider.label} — локально, без ключа`;
       const configured = Boolean(String(draft?.apiKey || '').trim());
       return `${provider.label} — ${configured ? 'настроен' : 'не настроен'}`;
     })
@@ -306,6 +352,15 @@ async function loadDebugRuns() {
   renderDebugRuns(runs, preferredRunId);
 }
 
+async function refreshDebugUi() {
+  const stored = await chrome.storage.local.get(['agentDebugLogsEnabled', 'agentDebugRetentionCount']);
+  fields.agentDebugLogsEnabled.checked = stored.agentDebugLogsEnabled === true;
+  fields.agentDebugRetentionCount.value = normalizeDebugRetention(
+    stored.agentDebugRetentionCount ?? DEFAULTS.agentDebugRetentionCount
+  );
+  await loadDebugRuns();
+}
+
 async function downloadSelectedDebugRun() {
   const runId = fields.agentDebugRunSelect.value;
   if (!runId) {
@@ -386,6 +441,8 @@ async function loadOptions() {
   fields.fallbackCoverLetterTemplate.value =
     String(values.fallbackCoverLetterTemplate || '').trim() || DEFAULTS.fallbackCoverLetterTemplate;
   fields.aiProvider.value = AI_PROVIDERS.normalizeProviderId(values.aiProvider);
+  lastKnownOllamaModel = String(values.ollamaModel || DEFAULTS.ollamaModel || '').trim();
+  renderOllamaModels(values.aiProvider === 'ollama' ? [lastKnownOllamaModel] : [], lastKnownOllamaModel);
   credentialDrafts.clear();
   for (const provider of providers()) {
     const apiKey = String(credentials[provider.id]?.apiKey || '').trim();
@@ -397,7 +454,7 @@ async function loadOptions() {
   }
   renderProviderControls();
   renderFallbackProviders(AI_PROVIDERS.normalizeFallbackProvider(values, selectedProviderId()));
-  renderCredentialEditor(selectedProviderId());
+  renderCredentialEditor(AI_PROVIDERS.getProvider(selectedProviderId()).local ? 'qwen' : selectedProviderId());
   renderAiModeControls();
   fields.resumeUrl.value = values.resumeUrl || DEFAULTS.resumeUrl;
   fields.resumeCacheTtlHours.value = values.resumeCacheTtlHours ?? DEFAULTS.resumeCacheTtlHours;
@@ -491,6 +548,7 @@ async function saveOptions() {
 
   const patch = {
     aiProvider: selectedProviderId(),
+    ollamaModel: fields.ollamaModel.value || lastKnownOllamaModel || DEFAULTS.ollamaModel,
     aiFallbackProvider: fields.aiFallbackProvider.value,
     aiFallbackEnabled: Boolean(fields.aiFallbackProvider.value),
     aiFallbackToGroq: selectedProviderId() === 'qwen' && fields.aiFallbackProvider.value === 'groq',
@@ -565,21 +623,22 @@ async function saveOptions() {
   setStatus('Сохранено.');
 }
 
-async function testAiProvider() {
+async function testAiProvider(providerIdOverride = '') {
   if (!isAiEnabled()) {
     setAiProviderStatus('Включите ИИ, чтобы проверить провайдера.', true);
     return;
   }
   const generation = ++aiProviderTestGeneration;
   captureCredentialDraft();
-  const providerId = AI_PROVIDERS.normalizeProviderId(fields.credentialProvider.value);
+  const providerId = AI_PROVIDERS.normalizeProviderId(providerIdOverride || fields.credentialProvider.value);
   const provider = AI_PROVIDERS.getProvider(providerId);
   setAiProviderStatus(`Проверяю ${provider.label}...`);
   const isCurrent = () =>
-    generation === aiProviderTestGeneration && fields.credentialProvider.value === providerId;
+    generation === aiProviderTestGeneration && (provider.local ? selectedProviderId() : fields.credentialProvider.value) === providerId;
   let response;
   try {
     const message = { type: 'TEST_AI_PROVIDER', providerId };
+    if (provider.local) message.ollamaModel = fields.ollamaModel.value;
     const draft = credentialDrafts.get(providerId);
     if (draft?.dirty) message.apiKey = String(draft.apiKey || '').trim();
     response = await chrome.runtime.sendMessage(message);
@@ -655,6 +714,16 @@ fields.aiProvider.addEventListener('change', () => {
   aiProviderTestGeneration += 1;
   renderProviderControls();
   setAiProviderStatus('');
+});
+
+fields.ollamaModel.addEventListener('change', () => {
+  lastKnownOllamaModel = fields.ollamaModel.value || lastKnownOllamaModel;
+  renderProviderControls();
+});
+
+refreshOllamaModelsButton.addEventListener('click', () => { refreshOllamaModels(); });
+testOllamaProviderButton.addEventListener('click', () => {
+  testAiProvider('ollama');
 });
 
 fields.aiEnabled.addEventListener('change', async () => {
@@ -748,6 +817,6 @@ chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
       changes.agentDebugRetentionCount
     )
   ) {
-    loadOptions().catch((error) => setStatus(localizeError(error), true, agentDebugStatusNode));
+    refreshDebugUi().catch((error) => setStatus(localizeError(error), true, agentDebugStatusNode));
   }
 });

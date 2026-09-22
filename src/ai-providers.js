@@ -56,6 +56,25 @@
   }
 
   const PROVIDERS = Object.freeze({
+    ollama: Object.freeze({
+      id: 'ollama',
+      label: 'Ollama — локально',
+      local: true,
+      credentialLabel: '',
+      credentialPlaceholder: '',
+      endpoint: 'http://127.0.0.1:11434/api/chat',
+      tagsEndpoint: 'http://127.0.0.1:11434/api/tags',
+      timeoutMs: 120000,
+      quotaPolicy: 'none',
+      settingsModelSummary: 'Локально на этом Mac · qwen3:8b',
+      requestExtras: Object.freeze({ stream: false, think: false }),
+      tasks: Object.freeze({
+        cover_letter: taskCapability({ model: 'qwen3:8b', maxTokens: [2048], validateCoverLetter: true }),
+        test_assist: taskCapability({ model: 'qwen3:8b', maxTokens: [4096], responseFormat: EMPLOYER_ANSWER_RESPONSE_FORMAT }),
+        resume_profile_build: taskCapability({ model: 'qwen3:8b', maxTokens: [4096, 4096], responseFormat: RESUME_PROFILE_RESPONSE_FORMAT }),
+        resume_profile_edit: taskCapability({ model: 'qwen3:8b', maxTokens: [4096, 4096], responseFormat: RESUME_PROFILE_RESPONSE_FORMAT })
+      })
+    }),
     qwen: Object.freeze({
       id: 'qwen',
       label: 'Qwen',
@@ -134,13 +153,14 @@
 
   function normalizeFallbackProvider(config = {}, primaryProviderId = config.aiProvider) {
     const primaryId = normalizeProviderId(primaryProviderId);
-    const firstAlternative = Object.keys(PROVIDERS).find((providerId) => providerId !== primaryId) || '';
+    if (primaryId === 'ollama') return '';
+    const firstAlternative = Object.keys(PROVIDERS).find((providerId) => providerId !== primaryId && !PROVIDERS[providerId].local) || '';
     if (
       Object.prototype.hasOwnProperty.call(config, 'aiFallbackProvider') &&
       config.aiFallbackProvider !== undefined
     ) {
       const providerId = String(config.aiFallbackProvider || '').trim().toLowerCase();
-      return Object.prototype.hasOwnProperty.call(PROVIDERS, providerId) && providerId !== primaryId
+      return Object.prototype.hasOwnProperty.call(PROVIDERS, providerId) && providerId !== primaryId && providerId !== 'ollama'
         ? providerId
         : '';
     }
@@ -204,6 +224,7 @@
     const source = value && typeof value === 'object' ? value : {};
     const credentials = {};
     for (const providerId of Object.keys(PROVIDERS)) {
+      if (PROVIDERS[providerId].local) continue;
       const apiKey = String(source?.[providerId]?.apiKey || '').trim();
       if (apiKey) credentials[providerId] = { apiKey };
     }
@@ -215,6 +236,7 @@
 
   function getApiKey(config = {}, providerId = config.aiProvider) {
     const id = normalizeProviderId(providerId);
+    if (PROVIDERS[id].local) return '';
     const credentials = normalizeCredentials(config.aiProviderCredentials, config.groqApiKey);
     return String(credentials[id]?.apiKey || '').trim();
   }
@@ -222,6 +244,7 @@
   function setApiKey(value, providerId, apiKey) {
     const id = normalizeProviderId(providerId);
     const credentials = normalizeCredentials(value);
+    if (PROVIDERS[id].local) return credentials;
     const normalizedKey = String(apiKey || '').trim();
     if (normalizedKey) {
       credentials[id] = { apiKey: normalizedKey };

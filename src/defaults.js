@@ -2,6 +2,7 @@
   globalThis.HHJA_DEFAULTS = {
     aiEnabled: true,
     aiProvider: 'qwen',
+    ollamaModel: 'qwen3:8b',
     aiFallbackProvider: '',
     aiFallbackToGroq: false,
     aiProviderCredentials: {},

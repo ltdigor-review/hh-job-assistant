@@ -12,13 +12,17 @@
       (id === 'groq' ? String(config.groqApiKey || '').trim() : '');
   }
 
+  function providerNeedsCredential(id) {
+    return !globalThis.HHJA_AI_PROVIDERS?.getProvider?.(id)?.local;
+  }
+
   function evaluate(config = {}) {
     const aiEnabled = config.aiEnabled !== false;
     const selectedProvider = providerId(config);
     const providerLabel = globalThis.HHJA_AI_PROVIDERS?.getProvider?.(selectedProvider)?.label ||
       `${selectedProvider.charAt(0).toUpperCase()}${selectedProvider.slice(1)}`;
     const required = [
-      ...(aiEnabled ? [['ai_provider_api_key', `ключ ${providerLabel} API`, () => Boolean(providerApiKey(config))]] : []),
+      ...(aiEnabled && providerNeedsCredential(selectedProvider) ? [['ai_provider_api_key', `ключ ${providerLabel} API`, () => Boolean(providerApiKey(config))]] : []),
       ['resume_url', 'ссылка на резюме hh.ru', (value) => {
       try {
         const url = new URL(String(value || '').trim());

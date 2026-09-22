@@ -266,7 +266,7 @@ async function refreshPopup() {
   aiProviderStatus = {
     provider,
     label: globalThis.HHJA_AI_PROVIDERS.getProvider(provider).label,
-    configured: Boolean(globalThis.HHJA_AI_PROVIDERS.getApiKey(settings, provider)),
+    configured: globalThis.HHJA_AI_PROVIDERS.getProvider(provider).local || Boolean(globalThis.HHJA_AI_PROVIDERS.getApiKey(settings, provider)),
     enabled: settings.aiEnabled !== false
   };
   readiness = globalThis.HHJA_CONFIG_READINESS.evaluate(settings);

@@ -64,6 +64,15 @@ test('[BS:COVERS:HHJA-BR-000001] readiness selects provider credentials and pres
   assert.equal(legacyGroq.provider, 'groq');
 });
 
+test('[BS:COVERS:HHJA-BR-000048] Ollama is ready without an API key when the HH resume URL is valid', () => {
+  const context = vm.createContext({ URL });
+  context.HHJA_AI_PROVIDERS = { normalizeProviderId: (id) => id === 'ollama' ? 'ollama' : 'qwen', getProvider: (id) => id === 'ollama' ? { local: true, label: 'Ollama — локально' } : { local: false } };
+  vm.runInContext(source, context);
+  const result = context.HHJA_CONFIG_READINESS.evaluate({ aiProvider: 'ollama', resumeUrl: valid.resumeUrl });
+  assert.equal(result.ready, true);
+  assert.deepEqual(Array.from(result.missing), []);
+});
+
 test('readiness accepts regional https hh resume URLs', () => {
   assert.equal(readiness().evaluate({ ...valid, resumeUrl: 'https://ekaterinburg.hh.ru/resume/abc123' }).ready, true);
 });

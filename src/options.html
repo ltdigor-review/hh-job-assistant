@@ -311,6 +311,8 @@
         color: #475569;
       }
 
+      .actions[hidden] { display: none; }
+
       @media (max-width: 720px) {
         body {
           padding: 16px;
@@ -495,18 +497,30 @@
       <select id="aiProvider"></select>
       <p id="aiProviderModel" class="hint"></p>
 
-      <label for="credentialProvider">Ключ какого провайдера редактировать</label>
-      <select id="credentialProvider"></select>
-
-      <label id="aiProviderApiKeyLabel" for="aiProviderApiKey">API-ключ</label>
-      <input id="aiProviderApiKey" type="password" autocomplete="off">
-      <p id="aiProviderCredentialHint" class="hint"></p>
-
-      <div class="actions field-action">
-        <button id="saveProviderCredential" class="secondary" type="button">Сохранить ключ</button>
-        <button id="deleteProviderCredential" class="secondary" type="button">Удалить ключ</button>
-        <button id="testAiProvider" class="secondary" type="button">Проверить провайдера</button>
+      <div id="ollamaControls" hidden>
+        <label for="ollamaModel">Локальная модель Ollama</label>
+        <select id="ollamaModel"></select>
+        <div class="actions field-action">
+          <button id="refreshOllamaModels" class="secondary" type="button">Обновить список моделей</button>
+        </div>
+        <p class="hint">Только модели локального Ollama на 127.0.0.1. Облачные модели не используются.</p>
       </div>
+
+      <div id="credentialControls">
+        <label for="credentialProvider">Ключ какого провайдера редактировать</label>
+        <select id="credentialProvider"></select>
+
+        <label id="aiProviderApiKeyLabel" for="aiProviderApiKey">API-ключ</label>
+        <input id="aiProviderApiKey" type="password" autocomplete="off">
+        <p id="aiProviderCredentialHint" class="hint"></p>
+
+        <div class="actions field-action">
+          <button id="saveProviderCredential" class="secondary" type="button">Сохранить ключ</button>
+          <button id="deleteProviderCredential" class="secondary" type="button">Удалить ключ</button>
+          <button id="testAiProvider" class="secondary" type="button">Проверить провайдера</button>
+        </div>
+      </div>
+      <div class="actions field-action" id="ollamaProbeControls" hidden><button id="testOllamaProvider" class="secondary" type="button">Проверить Ollama</button></div>
       <div id="aiProviderStatus" role="status"></div>
       <div id="configuredProviders" role="status"></div>
 

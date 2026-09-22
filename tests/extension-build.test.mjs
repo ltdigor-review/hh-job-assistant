@@ -4202,11 +4202,13 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
       textContent: '',
       disabled: false,
       children: [],
+      options: [],
       querySelectorAll(selector) {
         return selector === 'input[type="checkbox"]' ? this.inputs : [];
       },
       replaceChildren(...children) {
         this.children = children;
+        this.options = children;
       },
       setCustomValidity(value) {
         this.validationMessage = value;
@@ -4222,12 +4224,13 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     return element;
   }
 
-  const ids = ['aiEnabled', 'aiProvider', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiFallbackSection', 'fallbackCoverLetterTemplate', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'scheduledAutoApplyEnabled', 'scheduledAutoApplyTimeMsk', 'scheduledAutoApplyLateWindowMinutes', 'scheduledAutoApplyFilterUrl', 'scheduledAutoApplyMaxRepairAttempts', 'scheduledAutoApplyRepairCutoffMsk', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider'];
+  const ids = ['aiEnabled', 'aiProvider', 'ollamaModel', 'ollamaControls', 'credentialControls', 'credentialProvider', 'aiProviderApiKey', 'aiFallbackProvider', 'aiFallbackSection', 'fallbackCoverLetterTemplate', 'aiProviderModel', 'aiProviderApiKeyLabel', 'aiProviderCredentialHint', 'configuredProviders', 'resumeUrl', 'resumeCacheTtlHours', 'resumeProfileText', 'resumeProfileEditComment', 'resumeProfileAutoRefreshEnabled', 'resumeProfileWeaknesses', 'resumeProfileStatus', 'buildResumeProfile', 'editResumeProfile', 'expectedSalary', 'telegramUsername', 'employmentPreference', 'workFormatPreference', 'coverPrompt', 'employerQuestionPrompt', 'dailyLimit', 'delayMinMs', 'delayMaxMs', 'scheduledAutoApplyEnabled', 'scheduledAutoApplyTimeMsk', 'scheduledAutoApplyLateWindowMinutes', 'scheduledAutoApplyFilterUrl', 'scheduledAutoApplyMaxRepairAttempts', 'scheduledAutoApplyRepairCutoffMsk', 'agentDebugLogsEnabled', 'agentDebugRetentionCount', 'agentDebugRunSelect', 'downloadAgentDebugRun', 'agentDebugStatus', 'status', 'aiProviderStatus', 'save', 'saveProviderCredential', 'deleteProviderCredential', 'testAiProvider', 'testOllamaProvider', 'refreshOllamaModels', 'ollamaProbeControls'];
   const elements = Object.fromEntries(ids.map((id) => [id, makeElement(id)]));
   let groqKeySeenByTest = null;
   let delayedProviderTestResolver = null;
   let delayNextProviderTest = false;
   let debugRuns = [];
+  let storageChangeListener = null;
   let storageSetCalls = 0;
   const downloadedRunIds = [];
   const createdLinks = [];
@@ -4325,7 +4328,8 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
             delete storage[key];
           }
         }
-      }
+      },
+      onChanged: { addListener(listener) { storageChangeListener = listener; } }
     },
     runtime: {
       async sendMessage(message) {
@@ -4378,6 +4382,38 @@ test('[BS:COVERS:HHJA-BR-000004][BS:COVERS:HHJA-BR-000005][BS:COVERS:HHJA-BR-000
     );
     assert.equal(elements.scheduledAutoApplyMaxRepairAttempts.value, 2);
     assert.equal(elements.scheduledAutoApplyRepairCutoffMsk.value, '17:45');
+
+    // A provider diagnostic appends debug entries. Its storage events must not reload saved
+    // settings over an unsaved Ollama selection or unrelated drafts.
+    elements.credentialProvider.value = 'qwen';
+    handlers.get('credentialProvider:change')();
+    handlers.get('aiProviderApiKey:focus')();
+    elements.aiProviderApiKey.value = 'sk_qwen_unsaved_diagnostic';
+    handlers.get('aiProviderApiKey:input')();
+    elements.coverPrompt.value = 'unsaved cover prompt';
+    elements.employerQuestionPrompt.value = 'unsaved employer prompt';
+    elements.aiProvider.value = 'ollama';
+    handlers.get('aiProvider:change')();
+    elements.ollamaModel.value = 'qwen3:4b';
+    handlers.get('ollamaModel:change')();
+    delayNextProviderTest = true;
+    const probePromise = handlers.get('testOllamaProvider:click')();
+    storageChangeListener({ agentDebugRunIndex: { oldValue: [], newValue: ['run-1'] }, agentDebugActiveRunId: { oldValue: '', newValue: 'run-1' } }, 'local');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(elements.aiProvider.value, 'ollama');
+    assert.equal(elements.ollamaModel.value, 'qwen3:4b');
+    assert.equal(elements.coverPrompt.value, 'unsaved cover prompt');
+    assert.equal(elements.employerQuestionPrompt.value, 'unsaved employer prompt');
+    assert.equal(elements.aiProviderApiKey.value, 'sk_qwen_unsaved_diagnostic');
+    delayedProviderTestResolver();
+    await probePromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    elements.aiProvider.value = 'qwen';
+    handlers.get('aiProvider:change')();
+    elements.coverPrompt.value = 'default prompt';
+    elements.employerQuestionPrompt.value = 'default employer prompt';
+    elements.aiProviderApiKey.value = 'sk_qwen_saved';
+    handlers.get('aiProviderApiKey:input')();
 
     const writesBeforeInvalidSchedule = storageSetCalls;
     elements.scheduledAutoApplyEnabled.checked = true;

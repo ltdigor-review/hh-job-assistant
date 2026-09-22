@@ -949,3 +949,24 @@ This file is the canonical business-level source of truth for the extension. Pro
 }
 ```
 <!-- BUSINESS_SPEC_RULE_END -->
+
+<!-- BUSINESS_SPEC_RULE_BEGIN -->
+```json
+{
+  "schema": 1,
+  "kind": "business-rule",
+  "id": "HHJA-BR-000048",
+  "scope": "local-ai-routing",
+  "requirement": "When Ollama is selected, every AI task MUST use only the fixed local loopback Ollama API and an installed local model, without an API key or any cloud fallback.",
+  "acceptance": [
+    "The default Ollama model is qwen3:8b; Settings lists local /api/tags models, lets the user refresh and select one, and runs a synthetic diagnostic.",
+    "Cover letters use ordinary text; employer answers and resume-profile build or edit use the native Ollama chat JSON schema format with stream=false and think=false.",
+    "Readiness, popup state, audits, and diagnostics do not require a key for Ollama, and legacy fallback settings cannot issue a Qwen or Groq request.",
+    "Unavailable server, no models, missing selected model, access denial, timeout, and malformed response are classified locally and make no cloud request.",
+    "The version stays synchronized, navigation remains limited to HTTPS HH domains, provider permissions are limited to the declared Qwen, Groq, and fixed Ollama loopback endpoints, debug export has no broad download or offscreen permission, and user-facing controls and errors are Russian."
+  ],
+  "supersedes": ["HHJA-BR-000041"],
+  "introduced": "2026-09-22"
+}
+```
+<!-- BUSINESS_SPEC_RULE_END -->
