@@ -187,8 +187,19 @@ test('[BS:COVERS:HHJA-BR-000048] [BS:RETIRES:HHJA-BR-000041:BY:HHJA-BR-000048] O
     requests.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
     if (url.endsWith('/api/tags')) return jsonResponse(200, { models: [{ name: 'qwen3:8b' }, { name: 'qwen3:4b' }, { name: 'remote:cloud', remote_model: 'cloud' }] });
     const body = JSON.parse(options.body);
-    const content = body.format?.properties?.answers
-      ? JSON.stringify({ answers: [{ id: JSON.stringify(body.messages).includes('experience') ? 'experience' : 'q1', answer: '3 года', selectedOptions: [] }], coverLetter: '' })
+    const answerSchema = body.format?.properties?.answers;
+    const answerIds = answerSchema
+      ? (answerSchema.items?.properties?.id?.const
+        ? [answerSchema.items.properties.id.const]
+        : answerSchema.items?.properties?.id?.enum || [])
+      : [];
+    const content = answerSchema
+      ? JSON.stringify({
+        answers: answerIds.map((id) => id === 'choice-1'
+          ? { id, answer: '', selectedOptions: ['Java'] }
+          : { id, answer: '3 года', selectedOptions: [] }),
+        coverLetter: answerIds.length === 0 ? 'Здравствуйте! У меня есть опыт Java, Spring Boot и SQL. Буду рад обсудить задачу.' : ''
+      })
       : body.format?.properties?.profile
         ? JSON.stringify({ profile: 'Java developer with 3 years of Spring Boot and SQL experience.', weaknesses: [] })
         : 'Работал с Java и Spring Boot. Откликаюсь.';
@@ -198,6 +209,18 @@ test('[BS:COVERS:HHJA-BR-000048] [BS:RETIRES:HHJA-BR-000041:BY:HHJA-BR-000048] O
   assert.equal(probe.ok, true);
   const question = await bg.send({ type: 'GENERATE_COVER_LETTER', task: 'test_assist', vacancyText: 'Java', questions: [{ id: 'q1', kind: 'text', inputType: 'text', question: 'Опыт?', options: [] }] });
   assert.equal(question.ok, true);
+  const multipleQuestions = await bg.send({
+    type: 'GENERATE_COVER_LETTER',
+    task: 'test_assist',
+    vacancyText: 'Java',
+    questions: [
+      { id: 'q2', kind: 'text', inputType: 'text', question: 'Опыт?', options: [] },
+      { id: 'choice-1', kind: 'choice', inputType: 'checkbox', question: 'Технологии?', options: ['Java'] }
+    ]
+  });
+  assert.equal(multipleQuestions.ok, true);
+  const emptyAnswers = await bg.send({ type: 'GENERATE_COVER_LETTER', task: 'test_assist', vacancyText: 'Java', questions: [], coverLetterRequested: false });
+  assert.equal(emptyAnswers.ok, true);
   const cover = await bg.send({ type: 'GENERATE_COVER_LETTER', task: 'cover_letter', vacancyText: 'Java' });
   assert.equal(cover.ok, true);
   const edit = await bg.send({ type: 'EDIT_RESUME_PROFILE', comment: 'Keep Java and Spring Boot facts.' });
@@ -210,6 +233,17 @@ test('[BS:COVERS:HHJA-BR-000048] [BS:RETIRES:HHJA-BR-000041:BY:HHJA-BR-000048] O
   assert.ok(chats.every((request) => request.body.stream === false && request.body.think === false && !('response_format' in request.body)));
   assert.ok(chats.every((request) => Number.isFinite(request.body.options?.temperature) && Number.isInteger(request.body.options?.num_predict)));
   assert.ok(chats.some((request) => request.body.format?.properties?.answers));
+  const singleQuestionFormat = chats.find((request) => request.body.format?.properties?.answers?.items?.properties?.id?.const === 'q1')?.body.format;
+  assert.equal(singleQuestionFormat.properties.answers.minItems, 1);
+  assert.equal(singleQuestionFormat.properties.answers.maxItems, 1);
+  assert.equal(singleQuestionFormat.properties.answers.items.properties.id.const, 'q1');
+  const multiQuestionFormat = chats.find((request) => request.body.format?.properties?.answers?.items?.properties?.id?.enum?.includes('choice-1'))?.body.format;
+  assert.equal(multiQuestionFormat.properties.answers.minItems, 2);
+  assert.equal(multiQuestionFormat.properties.answers.maxItems, 2);
+  assert.deepEqual(multiQuestionFormat.properties.answers.items.properties.id.enum, ['q2', 'choice-1']);
+  assert.equal(multiQuestionFormat.properties.answers.allOf, undefined);
+  const emptyAnswersFormat = chats.find((request) => request.body.format?.properties?.answers?.minItems === 0)?.body.format;
+  assert.equal(emptyAnswersFormat.properties.answers.maxItems, 0);
   assert.ok(chats.some((request) => request.body.format?.properties?.profile));
   assert.ok(chats.every((request) => !request.options.headers.Authorization));
   assert.ok(requests.filter((request) => request.url.endsWith('/api/tags')).every((request) => request.url === 'http://127.0.0.1:11434/api/tags'));

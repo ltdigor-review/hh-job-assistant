@@ -3266,7 +3266,41 @@ async function setProviderCooldown(providerId, cooldownUntil) {
   await storageSet(patch);
 }
 
-function buildProviderRequestBody({ providerId, task, messages, attempt = 1, ollamaModel = '' }) {
+function buildOllamaEmployerAnswerFormat(responseFormat, questions = []) {
+  const schema = responseFormat?.json_schema?.schema || responseFormat;
+  if (!schema?.properties?.answers?.items) return schema;
+  const questionIds = questions
+    .map((question) => typeof question?.id === 'string' ? question.id.trim() : '')
+    .filter(Boolean);
+  const uniqueQuestionIds = [...new Set(questionIds)];
+  const answerSchema = schema.properties.answers;
+  const itemSchema = answerSchema.items;
+  const idSchema = uniqueQuestionIds.length === 1
+    ? { type: 'string', const: uniqueQuestionIds[0] }
+    : uniqueQuestionIds.length > 1
+      ? { type: 'string', enum: uniqueQuestionIds }
+      : itemSchema.properties.id;
+  return {
+    ...schema,
+    properties: {
+      ...schema.properties,
+      answers: {
+        ...answerSchema,
+        minItems: questionIds.length,
+        maxItems: questionIds.length,
+        items: {
+          ...itemSchema,
+          properties: {
+            ...itemSchema.properties,
+            id: idSchema
+          }
+        }
+      }
+    }
+  };
+}
+
+function buildProviderRequestBody({ providerId, task, messages, attempt = 1, ollamaModel = '', questions = [] }) {
   const provider = AI_PROVIDERS.getProvider(providerId);
   const capability = AI_PROVIDERS.getTaskCapability(provider.id, task);
   const requestBody = {
@@ -3281,7 +3315,11 @@ function buildProviderRequestBody({ providerId, task, messages, attempt = 1, oll
     requestBody.options = { temperature: requestBody.temperature, num_predict: requestBody.max_tokens };
     delete requestBody.temperature;
     delete requestBody.max_tokens;
-    if (capability.responseFormat) requestBody.format = capability.responseFormat.json_schema?.schema || capability.responseFormat;
+    if (capability.responseFormat) {
+      requestBody.format = task === 'test_assist'
+        ? buildOllamaEmployerAnswerFormat(capability.responseFormat, questions)
+        : capability.responseFormat.json_schema?.schema || capability.responseFormat;
+    }
   } else if (capability.responseFormat) requestBody.response_format = capability.responseFormat;
   if (provider.id === 'groq' && task === 'test_assist') {
     const inputTokens = estimateGroqRequestTokens({ ...requestBody, max_tokens: 0 }).likelyRateTokens;
@@ -3330,7 +3368,7 @@ async function executeAiProviderRequestInner({ providerId, apiKey, task, message
   }
 
   const { ollamaModel = DEFAULTS.ollamaModel } = provider.local ? await storageGet(['ollamaModel']) : {};
-  const requestBody = buildProviderRequestBody({ providerId: provider.id, task, messages, attempt, ollamaModel: requestedOllamaModel || ollamaModel });
+  const requestBody = buildProviderRequestBody({ providerId: provider.id, task, messages, attempt, ollamaModel: requestedOllamaModel || ollamaModel, questions });
   const startDetails = {
     provider: provider.id,
     task,

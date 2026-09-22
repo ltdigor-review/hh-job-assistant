@@ -42,6 +42,8 @@ async function runContentAutoApply({
   hasCoverLetterField = false,
   questionFieldLabel = '',
   questionFieldLabels = [],
+  questionFieldTaskBodies = [],
+  mirrorQuestionValuesInParent = false,
   rejectQuestionFieldWrites = false,
   rerenderTextOnInput = false,
   deferredTextRerender = false,
@@ -180,6 +182,24 @@ async function runContentAutoApply({
   questionTextareas.forEach((field, index) => {
     if (effectiveQuestionLabels[index]) {
       field.parentElement = new FakeElement({ text: `${effectiveQuestionLabels[index]}\nПисать тут` });
+    }
+    const taskBodyText = questionFieldTaskBodies[index] || '';
+    if (taskBodyText) {
+      const taskBody = new FakeElement({ text: taskBodyText });
+      const closest = field.closest.bind(field);
+      field.closest = (selector) => selector === '[data-qa="task-body"]' ? taskBody : closest(selector);
+    }
+    if (mirrorQuestionValuesInParent && field.parentElement) {
+      const markerText = field.parentElement.textContent;
+      const dispatch = field.dispatchHandler;
+      field.dispatchHandler = function mirrorQuestionValue(event) {
+        dispatch?.call(this, event);
+        if (event?.type === 'input') {
+          const mirrored = `${markerText}\n${this.value}\n${String(this.value || '').length} из 10000`;
+          field.parentElement.innerText = mirrored;
+          field.parentElement.textContent = mirrored;
+        }
+      };
     }
   });
   const contentEditableQuestion = new FakeElement({
@@ -3563,6 +3583,46 @@ test('auto apply rejects duplicate structured IDs and never pastes a raw respons
   assert.deepEqual(result.textareaValues, ['', '']);
   assert.equal(result.appended.at(-1).status, 'error');
   assert.doesNotMatch(result.textareaValues.join('\n'), /Linux answer|Network answer|\{"answers"/);
+});
+
+test('auto apply keeps answered IDs stable when an HH Magritte wrapper mirrors filled textarea values', async () => {
+  const questions = [
+    'Какой уровень дохода вы ожидаете?',
+    'Что для Вас важно в работе?'
+  ];
+  const result = await runContentAutoApply({
+    dialogText: ['Ответьте на вопросы работодателя', ...questions].join('\n'),
+    hasTextarea: true,
+    startOnResponseForm: true,
+    hasQuestionField: true,
+    questionFieldCount: 2,
+    questionFieldLabels: questions,
+    questionFieldTaskBodies: questions,
+    mirrorQuestionValuesInParent: true,
+    initialLocalStore: {
+      resumeProfileText: 'Java developer with Spring Boot and SQL experience.',
+      expectedSalary: '300000'
+    },
+    groqResponse: (message) => ({
+      ok: true,
+      answers: message.questions.map((question) => ({
+        id: question.id,
+        answer: /доход/i.test(question.question)
+          ? '300000'
+          : 'Важны понятные задачи, сильная команда и качество результата.',
+        selectedOptions: []
+      })),
+      coverLetter: ''
+    })
+  });
+
+  assert.equal(result.response.ok, true);
+  assert.equal(result.submitClicks, 1);
+  assert.equal(result.groqRequests.length, 1);
+  assert.deepEqual(result.textareaValues, [
+    '300000',
+    'Важны понятные задачи, сильная команда и качество результата.'
+  ]);
 });
 
 test('auto apply rejects missing and unknown structured IDs', async () => {

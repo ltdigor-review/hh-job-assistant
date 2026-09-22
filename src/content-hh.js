@@ -1850,6 +1850,23 @@ function getFieldMarker(field) {
   return `${name}\n${dataQa}\n${placeholder}\n${ariaLabel}\n${nearText}`;
 }
 
+// HH's Magritte textarea wrapper mirrors the current value and character count
+// into its text content.  That is useful for recognizing a field, but it must
+// never become part of its persistent question identity: it changes after the
+// extension fills an answer and would make an already answered field look new.
+function getQuestionFieldSignature(field) {
+  return [
+    String(field?.tagName || '').toLowerCase(),
+    field?.getAttribute?.('name') || '',
+    field?.getAttribute?.('data-qa') || '',
+    field?.getAttribute?.('id') || '',
+    field?.getAttribute?.('type') || field?.type || '',
+    field?.getAttribute?.('inputmode') || '',
+    field?.getAttribute?.('autocomplete') || '',
+    field?.required || field?.getAttribute?.('aria-required') === 'true' ? 'required' : 'optional'
+  ].join('\n');
+}
+
 function getFieldLogTarget(field) {
   if (!field) return {};
   return {
@@ -2257,7 +2274,7 @@ function stableQuestionHash(value) {
 function createQuestionSnapshot(root, questionFields = findQuestionFields(root), questionControlGroups = findQuestionControlGroups(root)) {
   const textQuestions = questionFields.map((field, index) => {
     const question = cleanText(getMeaningfulQuestionText(field) || getFieldMarker(field) || 'question text not found');
-    const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${getFieldMarker(field)}`)}`;
+    const id = `text-${index + 1}-${stableQuestionHash(`${question}\n${getQuestionFieldSignature(field)}`)}`;
     field.__hhjaQuestionText = question;
     field.__hhjaQuestionId = id;
     return {

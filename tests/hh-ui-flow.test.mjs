@@ -118,14 +118,15 @@ async function createCdpSession(wsUrl) {
   };
 }
 
-async function waitForComplete(session) {
+async function waitForComplete(session, expectedUrl = '') {
   const started = Date.now();
   while (Date.now() - started < 10000) {
     const result = await session.send('Runtime.evaluate', {
-      expression: 'document.readyState',
+      // A new CDP target can still expose the complete initial about:blank document.
+      expression: `(!${JSON.stringify(expectedUrl)} || location.href === ${JSON.stringify(expectedUrl)}) && document.readyState === 'complete'`,
       returnByValue: true
     });
-    if (result.result?.value === 'complete') return;
+    if (result.result?.value === true) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('Page load timed out');
@@ -451,7 +452,7 @@ test('[BS:COVERS:HHJA-BR-000045] real browser popup and Settings share AI mode w
     const target = await cdpFetch(port, `/json/new?${encodeURIComponent(harness.url)}`, { method: 'PUT' });
     session = await createCdpSession(target.webSocketDebuggerUrl);
     await session.send('Runtime.enable');
-    await waitForComplete(session);
+    await waitForComplete(session, new URL(harness.url).href);
     const evaluation = await session.send('Runtime.evaluate', {
       expression: `(async () => {
         const poll = async (predicate, description) => {
